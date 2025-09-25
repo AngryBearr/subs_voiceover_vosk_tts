@@ -2,8 +2,13 @@ import os
 from pathlib import Path
 from vosk_tts.model import Model
 from vosk_tts.synth import Synth
-from utils.subs_utils import ensure_folder_exists
 
+def ensure_folder_exists(folder_name):
+    if not Path(folder_name).exists():
+        Path(folder_name).mkdir(parents=True, exist_ok=True)
+        print(f"Folder '{folder_name}' created.")
+    else:
+        print(f"Folder '{folder_name}' already exists.")
 
 def synthesize_text_to_audio(
     text,
@@ -16,7 +21,8 @@ def synthesize_text_to_audio(
     noise_level=None,
     duration_noise_level=None,
     scale=None,
-    device="cpu"  # 'cpu' or 'cuda'
+    device="cpu",  # 'cpu' or 'cuda'
+    model_path=None,
 ):
     """
     Synthesize text to audio using vosk_tts with customizable options.
@@ -33,6 +39,7 @@ def synthesize_text_to_audio(
         duration_noise_level (float): Duration noise (default: model default).
         scale (float): Volume scaling (default: model default).
         device (str): 'cpu' or 'cuda' (default 'cpu').
+        model_path (str): Path to the model directory (default None).
     Returns:
         str: Path to the generated wav file.
     """
@@ -70,7 +77,7 @@ def synthesize_text_to_audio(
     ensure_folder_exists(output_folder)
     outname = os.path.join(output_folder, f"{file_prefix}output.wav")
 
-    model = Model(model_name=model_name, lang=lang)
+    model = Model(model_path=model_path, model_name=model_name, lang=lang)
     synth = Synth(model)
     synth.synth(
         text,
@@ -87,11 +94,12 @@ def synthesize_text_to_audio(
 if __name__ == "__main__":
     wav = synthesize_text_to_audio(
         text="У Лукоморья дуб зелёный. Златая цепь на дубе том. И днём и ночью кот учёный всё ходит по цеп+и кругом.",
-        model_name="vosk-model-tts-ru-0.8-multi",
+        model_path="D:/tts_projects/vosk/models/vosk-model-tts-ru-0.10-multi",
+        model_name="vosk-model-tts-ru-0.10-multi",
         lang="ru",
         output_folder="./tts_out",
-        file_prefix="test_",
-        speaker_id=4,
+        file_prefix="test_10_",
+        speaker_id=10,
         speech_rate=1,
         device="cuda",
     )
