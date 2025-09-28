@@ -1,14 +1,20 @@
 import os
+import sys
 from pathlib import Path
+
+# Ensure project root is on sys.path so local packages like `utils` can be imported
+# when running this script directly (e.g. `python synthesize/synthesize.py`).
+# The repo layout has `utils/` at the project root, so add the parent of this
+# script's parent folder to sys.path.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from vosk_tts.model import Model
 from vosk_tts.synth import Synth
 
-def ensure_folder_exists(folder_name):
-    if not Path(folder_name).exists():
-        Path(folder_name).mkdir(parents=True, exist_ok=True)
-        print(f"Folder '{folder_name}' created.")
-    else:
-        print(f"Folder '{folder_name}' already exists.")
+# Reuse shared utility implementation instead of duplicating logic
+from utils.subs_utils import ensure_folder_exists
 
 def synthesize_text_to_audio(
     text,
@@ -97,7 +103,7 @@ if __name__ == "__main__":
         model_path="D:/tts_projects/vosk/models/vosk-model-tts-ru-0.10-multi",
         model_name="vosk-model-tts-ru-0.10-multi",
         lang="ru",
-        output_folder="./tts_out",
+        output_folder="./tts_out_test",
         file_prefix="test_10_",
         speaker_id=10,
         speech_rate=1,
