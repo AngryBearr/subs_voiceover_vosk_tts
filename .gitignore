@@ -4,3 +4,4 @@ runorm_cache
 __pycache__/
 models
 tts_out
+temp
