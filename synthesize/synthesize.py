@@ -1,112 +1,236 @@
-import os
-import sys
+"""
+Reusable text-to-speech function for Vosk TTS.
+
+Exposes synthesize_text(...) that loads a model and writes a .wav.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-# Ensure project root is on sys.path so local packages like `utils` can be imported
-# when running this script directly (e.g. `python synthesize/synthesize.py`).
-# The repo layout has `utils/` at the project root, so add the parent of this
-# script's parent folder to sys.path.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+# Import from the installed/checked-out package
+from vosk_tts import Model, Synth  # type: ignore
+import wave
 
-from vosk_tts.model import Model
-from vosk_tts.synth import Synth
 
-# Reuse shared utility implementation instead of duplicating logic
-from utils.subs_utils import ensure_folder_exists
+class SynthesisError(Exception):
+    """Raised for synthesis-related failures with helpful context."""
 
-def synthesize_text_to_audio(
-    text,
-    model_name=None,
-    lang="en-us",
-    output_folder=".",
-    file_prefix="tts_",
-    speaker_id=0,
-    speech_rate=1.0,
-    noise_level=None,
-    duration_noise_level=None,
-    scale=None,
-    device="cpu",  # 'cpu' or 'cuda'
-    model_path=None,
-):
+
+@dataclass
+class SynthesizeResult:
+    output_path: Path
+
+
+def _ensure_output_path(
+    output_path: Optional[str],
+    filename_prefix: Optional[str],
+    default_dir: Path,
+) -> Path:
+    if output_path:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.suffix.lower() != ".wav":
+            out = out.with_suffix(".wav")
+        return out
+
+    default_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    prefix = (filename_prefix or "tts").strip().replace(" ", "_")
+    fname = f"{prefix}_{stamp}.wav" if prefix else f"tts_{stamp}.wav"
+    return default_dir / fname
+
+
+class _ForceCPUProviders:
+    """Context manager to force onnxruntime to use CPU provider only.
+
+    This temporarily monkey-patches onnxruntime.get_available_providers
+    so that Model(...) constructed inside the context uses CPU.
     """
-    Synthesize text to audio using vosk_tts with customizable options.
 
-    Args:
-        text (str): Text to synthesize.
-        model_name (str): Model name to use (e.g., 'vosk-model-tts-ru-0.8-multi').
-        lang (str): Language code (default 'en-us').
-        output_folder (str): Where to save the output file.
-        file_prefix (str): Prefix for the output file.
-        speaker_id (int): Speaker id for multispeaker models.
-        speech_rate (float): Speed of speech (default 1.0).
-        noise_level (float): Noise level for synthesis (default: model default).
-        duration_noise_level (float): Duration noise (default: model default).
-        scale (float): Volume scaling (default: model default).
-        device (str): 'cpu' or 'cuda' (default 'cpu').
-        model_path (str): Path to the model directory (default None).
+    def __enter__(self):
+        import onnxruntime as ort  # imported here to avoid global side-effects
+
+        self._ort = ort
+        self._prev = getattr(ort, "get_available_providers")
+
+        def _only_cpu():  # noqa: N802
+            return ["CPUExecutionProvider"]
+
+        ort.get_available_providers = _only_cpu  # type: ignore[assignment]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if hasattr(self, "_prev"):
+            self._ort.get_available_providers = self._prev  # type: ignore[assignment]
+        return False
+
+
+def synthesize_text(
+    text: str,
+    voice: Optional[int] = 0,
+    speech_rate: float = 1.0,
+    model_path: str = "",
+    device: str = "cpu",
+    output_path: Optional[str] = None,
+    filename_prefix: Optional[str] = None,
+    output_sample_rate: Optional[int] = None,
+) -> Path:
+    """
+    Synthesize text to a .wav file using Vosk TTS.
+
+    Parameters:
+        text: Text to synthesize (non-empty).
+        voice: Speaker id for multispeaker models (default 0).
+        speech_rate: Speaking speed multiplier (> 0).
+        model_path: Path to the model directory containing model.onnx, dictionary, config.json, etc.
+        device: "cpu" or "cuda" (advisory: GPU use depends on onnxruntime build and providers).
+        output_path: Full output .wav path. If omitted, one is generated under ./out.
+        filename_prefix: Prefix used when output_path is not provided.
+
     Returns:
-        str: Path to the generated wav file.
+        Path to the written .wav file.
+
+    Raises:
+        ValueError: On invalid parameters.
+        FileNotFoundError: If model_path is invalid or missing required files.
+        SynthesisError: On model load or inference errors.
+        OSError: On filesystem-related errors.
     """
-    # Patch Model to allow CUDA if requested
-    import vosk_tts.model as model_mod
-    import onnxruntime
-    orig_init = model_mod.Model.__init__
-    def patched_init(self, model_path=None, model_name=None, lang=None):
-        if model_path is None:
-            model_path = self.get_model_path(model_name, lang)
-        else:
-            model_path = Path(model_path)
-        sess_options = onnxruntime.SessionOptions()
-        providers = ['CUDAExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
-        self.onnx = onnxruntime.InferenceSession(str(model_path / "model.onnx"), sess_options=sess_options, providers=providers)
-        self.dic = {}
-        probs = {}
-        for line in open(model_path / "dictionary", encoding='utf-8'):
-            items = line.split()
-            prob = float(items[1])
-            if probs.get(items[0], 0) < prob:
-                self.dic[items[0]] = " ".join(items[2:])
-                probs[items[0]] = prob
-        self.config = __import__('json').load(open(model_path / "config.json"))
-        import os
-        if os.path.exists(model_path / "bert/vocab.txt"):
-            from tokenizers.implementations import BertWordPieceTokenizer
-            self.tokenizer = BertWordPieceTokenizer(vocab=str(model_path / "bert/vocab.txt"), unk_token="[UNK]", lowercase=False)
-            self.bert_onnx = onnxruntime.InferenceSession(str(model_path / "bert/model.onnx"), sess_options=sess_options, providers=providers)
-        else:
-            self.tokenizer = None
-    model_mod.Model.__init__ = patched_init
+    # Basic validations
+    if text is None or not str(text).strip():
+        raise ValueError("Text must be a non-empty string.")
+    if speech_rate is None or speech_rate <= 0:
+        raise ValueError("speech_rate must be > 0.")
+    if not model_path:
+        raise ValueError("model_path is required.")
+
+    model_dir = Path(model_path)
+    if not model_dir.exists() or not model_dir.is_dir():
+        raise FileNotFoundError(f"Model path does not exist or is not a directory: {model_path}")
+
+    # Pre-check for common required files to give clearer error messages
+    required_files = [
+        model_dir / "model.onnx",
+        model_dir / "dictionary",
+        model_dir / "config.json",
+    ]
+    missing = [str(p.name) for p in required_files if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Model directory is missing required files: {', '.join(missing)}"
+        )
+
+    device = (device or "cpu").lower()
+    NATIVE_SR = 22050  # Model native output rate
+    if output_sample_rate is not None and output_sample_rate <= 0:
+        raise ValueError("output_sample_rate must be a positive integer if provided.")
 
     # Prepare output path
-    ensure_folder_exists(output_folder)
-    outname = os.path.join(output_folder, f"{file_prefix}output.wav")
+    out_path = _ensure_output_path(output_path, filename_prefix, default_dir=Path.cwd() / "out")
 
-    model = Model(model_path=model_path, model_name=model_name, lang=lang)
-    synth = Synth(model)
-    synth.synth(
-        text,
-        outname,
-        speaker_id=speaker_id,
-        noise_level=noise_level,
-        speech_rate=speech_rate,
-        duration_noise_level=duration_noise_level,
-        scale=scale,
-    )
-    return outname
+    try:
+        # Device/provider handling
+        if device in ("cpu",):
+            with _ForceCPUProviders():
+                model = Model(model_path=str(model_dir))
+        elif device in ("cuda", "gpu"):
+            try:
+                import onnxruntime as ort
+                ort.preload_dlls()
+                providers = ort.get_available_providers()  # type: ignore[attr-defined]
+                if "CUDAExecutionProvider" not in providers:
+                    logging.warning(
+                        "CUDA provider not available in onnxruntime installation; proceeding on CPU."
+                    )
+            except Exception:
+                # If ORT isn't importable here for any reason, we'll let Model handle it.
+                pass
+            model = Model(model_path=str(model_dir))
+        else:
+            logging.warning(f"Unknown device '{device}', defaulting to CPU.")
+            with _ForceCPUProviders():
+                model = Model(model_path=str(model_dir))
 
-# Example usage:
-if __name__ == "__main__":
-    wav = synthesize_text_to_audio(
-        text="У Лукоморья дуб зелёный. Златая цепь на дубе том. И днём и ночью кот учёный всё ходит по цеп+и кругом.",
-        model_path="D:/tts_projects/vosk/models/vosk-model-tts-ru-0.10-multi",
-        model_name="vosk-model-tts-ru-0.10-multi",
-        lang="ru",
-        output_folder="./tts_out_test",
-        file_prefix="test_10_",
-        speaker_id=10,
-        speech_rate=1,
-        device="cuda",
-    )
-    print(f"Audio written to {wav}")
+        synth = Synth(model)
+
+        speaker_id = 0 if voice is None else int(voice)
+
+        # If no resampling requested (or native rate requested), use fast path
+        if output_sample_rate is None or output_sample_rate == NATIVE_SR:
+            synth.synth(
+                text=text,
+                oname=str(out_path),
+                speaker_id=speaker_id,
+                speech_rate=float(speech_rate),
+            )
+            logging.info(f"Synthesis complete: {out_path}")
+            return out_path
+
+        # Resampling requested: try to import helper and resample
+        target_sr = int(output_sample_rate)
+        try:
+            try:
+                # Prefer absolute package-style import
+                from utils.audio_resample import (
+                    resample_int16_scipy,
+                    ResampleUnavailableError,
+                )
+            except Exception:
+                # Fallback: direct sibling import if run in different contexts
+                from audio_resample import (
+                    resample_int16_scipy,  # type: ignore
+                    ResampleUnavailableError,  # type: ignore
+                )
+
+            audio_i16 = synth.synth_audio(
+                text=text,
+                speaker_id=speaker_id,
+                speech_rate=float(speech_rate),
+            )
+            audio_i16 = resample_int16_scipy(audio_i16, from_sr=NATIVE_SR, to_sr=target_sr)
+
+            with wave.open(str(out_path), "w") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)  # int16
+                f.setframerate(target_sr)
+                f.writeframes(audio_i16.tobytes())
+
+            logging.info(f"Synthesis complete (resampled to {target_sr} Hz): {out_path}")
+            return out_path
+        except Exception as re:
+            # If SciPy is unavailable or resampling failed, log and continue with native rate
+            msg = str(re)
+            logging.error(
+                "Resampling requested but failed (%s). Falling back to native %d Hz output.",
+                msg,
+                NATIVE_SR,
+            )
+            synth.synth(
+                text=text,
+                oname=str(out_path),
+                speaker_id=speaker_id,
+                speech_rate=float(speech_rate),
+            )
+            logging.info(f"Synthesis complete (native {NATIVE_SR} Hz fallback): {out_path}")
+            return out_path
+
+    except Exception as e:
+        msg = str(e)
+        lower = msg.lower()
+        if "onnx" in lower or "runtime" in lower:
+            raise SynthesisError(
+                "ONNX inference failed. Check model integrity and onnxruntime installation: " + msg
+            ) from e
+        if "no such file" in lower or "not found" in lower:
+            raise SynthesisError(
+                f"Model files missing or invalid at {model_path}: {msg}"
+            ) from e
+        if "speaker" in lower or "sid" in lower:
+            raise SynthesisError(
+                f"Invalid voice/speaker id ({voice}). Try a value within the model's supported range."
+            ) from e
+        raise SynthesisError(f"Synthesis failed: {msg}") from e

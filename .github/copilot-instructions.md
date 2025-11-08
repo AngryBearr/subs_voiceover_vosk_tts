@@ -1,59 +1,78 @@
 # Copilot Project Instructions
 
-Purpose: Speed up AI agent onboarding to this subtitle → normalized/accented text → Vosk TTS synthesis pipeline.
-Keep responses concise. Follow existing patterns; do not introduce frameworks or large refactors without request.
+Цель: Ускорить онбординг ИИ-агента в конвейер «SRT субтитры → нормализация + акцентирование → синтез речи Vosk TTS → микс/экспорт».
+Пишите кратко. Следуйте текущим паттернам; не вносите фреймворки и крупные рефакторинги без запроса.
 
 ## 1. Big Picture Data Flow
-1. Input SRT (`*.srt`) → parsed to structured JSON (`utils/srt_to_json.py`).
-2. JSON subtitles (list of `{index,start,end,duration,text:[...],gender}`) → normalization + accent injection (RUAccent + RUNorm) in batch (`utils/text_normalizer.py`, `utils/subtitle_processor.py`). Ellipses are temporarily rewritten (`...`→`..`) before accenting, then restored.
-3. Accentized text (may include `+` markers for stress) → Vosk TTS single or batch synthesis (`synthesize/synthesize.py`, `synthesize/synthesize_batch.py`).
-4. Produced wav segments → optionally speed‑matched (`utils/subs_utils.change_speed`) and overlaid onto a silent bed or video duration (`overlay_audio`, `create_silence_audio`).
+1. Входной SRT (`*.srt`) → парсинг в структурированный JSON (`utils/srt_to_json.py`).
+2. JSON сабы (список `{index,start,end,duration,text:[...],gender}`) → нормализация + акцентирование батчем (RUNorm + RUAccent) (`utils/text_normalizer.py`, при необходимости `utils/subtitle_processor.py`). Троеточие временно заменяем (`...`→`..`) до акцентирования и потом восстанавливаем.
+3. Акцентированный текст (возможны маркеры ударения `+`) → синтез Vosk TTS одиночный или батч через единый CLI (`synthesize/synthesize_cli.py`; под капотом `synthesize/synthesize.py` и `synthesize/synthesize_batch.py`).
+4. Полученные WAV‑сегменты → опционально подгоняем темпом под слот (`utils/subs_utils.change_speed`) и/или собираем на таймлайн высокопроизводительным миксером (`utils/audio_mixer.mix_segments`). Лёгкая альтернатива: `create_silence_audio` + `overlay_audio` из `utils/subs_utils`.
 
 ## 2. Key Conventions & Patterns
-- Text lists: subtitle entries keep `text` as a list (even if single line). Batch processors often join lines with space, then restore to single‑element list containing processed string.
-- Accent workflow: Replace ellipsis before RUAccent (`replace_ellipsis` / `restore_ellipsis`). Skip characters that would break list literal parsing by operating on `str(list)` plus a skip regex.
-- RUAccent batching: Convert list of strings to a Python list string representation and call `process_all(..., skip_regex=...)`; then `ast.literal_eval` back.
-- Device selection for ONNX / Vosk TTS done via monkey‑patching `Model.__init__` to inject providers (`CUDAExecutionProvider` vs `CPUExecutionProvider`). Replicate existing patch style; do not redesign.
-- Custom dictionary for accenting defined in `utils/text_normalizer.py` (`cust_dict`). Preserve when extending.
-- Output audio naming: single synth uses `<file_prefix>output.wav`; batch uses incremental `<file_prefix><n>.wav` (1‑based index). Maintain for consistency.
+- Текст как список: поле `text` всегда список строк. В батч‑процессорах строки обычно соединяются пробелом, а на выход кладётся одна строка в виде списка из одного элемента.
+- Акцентирование: перед RUAccent обязательно `replace_ellipsis`/`restore_ellipsis`. Для безопасной пакетной обработки используем строковое представление списка (`str(list)`) и `skip_regex`, который пропускает синтаксис списка. Рекомендуемый шаблон: `r'[\[\],\"]'`.
+- RUAccent батч: превращаем список строк в строку‑лист, вызываем `process_all(..., skip_regex=...)`, затем парсим обратно `ast.literal_eval` с защитой и fallback‑ом на поэлементную обработку при ошибке.
+- Выбор девайса/провайдеров (Vosk TTS): используется контекстный патч onnxruntime через менеджер `_ForceCPUProviders` внутри `synthesize/synthesize.py` (CPU принудительно) или нативные провайдеры ORT (CUDA при наличии). Не изменяйте подход (не патчить `Model.__init__`).
+- RUNorm/RUAccent девайсы: в `utils/text_normalizer.py` по умолчанию загружаются на GPU (`device="CUDA"/"cuda"`). Для CPU‑окружений явно переключайте девайсы в коде или параметрах.
+- Кастомный словарь для акцентирования: `utils/text_normalizer.py` (`cust_dict`) — сохраняйте и расширяйте аккуратно.
+- Именование выходов:
+	- single‑synth: если не указан `output_path`, автогенерация в `./out/` с префиксом и таймстампом (`filename_prefix`).
+	- batch‑synth: `<file_prefix><n>.wav` (нумерация с 1) в `output_folder`.
 
 ## 3. External Dependencies / Requirements
-- Core libs: `ruaccent`, `runorm`, `onnxruntime`, `vosk-tts`, PyTorch (for potential GPU), `tokenizers` when BERT sub-model present.
-- RUAccent loads with model size `turbo3.1`; RUNorm with `model_size="big"` from cached `runorm_cache` directory.
-- FFmpeg + FFprobe must be present on PATH for audio speed and overlay utilities.
+- Core: `ruaccent`, `runorm`, `onnxruntime`/`onnxruntime-gpu`, `vosk-tts`, `tokenizers` (если есть BERT‑подмодель), PyTorch (GPU в зависимостях RUAccent/RUNorm).
+- Resampling/IO: `scipy` (опц. для ресемплинга в TTS), `soundfile` (чтение/запись WAV), `soxr` (опц. высококачественный ресемплинг в миксере).
+- Overlay/tempo: `pydub` (в `utils/subs_utils.change_speed`).
+- FFmpeg + FFprobe должны быть в PATH (скорость, оверлей, транскод).
+- RUNorm грузится с `model_size="big"` из кэша `runorm_cache`; RUAccent — `omograph_model_size='turbo3.1'`.
 
 ## 4. Typical Workflows
-- Convert SRT → JSON: call `srt_to_json(path, out_path)` or run `python utils/srt_to_json.py input.srt -o subs.json`.
-- Normalize + accent: `python utils/text_normalizer.py subs.json accentized.json 20` (batch size optional). Returns transformed JSON with accent markers.
-- Batch synth: `python synthesize/synthesize_batch.py` after editing hard‑coded example OR expose a wrapper. Ensure `model_path` or `model_name` resolves to existing folder under `models/`.
-- Single line synth for quick test: run `python synthesize/synthesize.py` (edit sample text & params).
-- Overlay segments: ensure silent base via `create_silence_audio`, then `overlay_audio(silence.wav, tts_out, subs.json, mixed.mp3)`.
+- SRT → JSON:
+	- Python API: `srt_to_json(path, out_path)`
+	- CLI: `python utils/srt_to_json.py input.srt -o subs.json`
+- Нормализация + акцент: `python utils/text_normalizer.py subs.json accentized.json 20` (батч размер опционален). На выходе JSON с маркерами ударений.
+- Синтез (единый CLI):
+	- Single‑line: `python -m synthesize.synthesize_cli --text "Привет!" --model models/vosk-model-tts-ru-0.10-multi --voice 0 --speech-rate 1.0 --device cpu`
+	- Batch: `python -m synthesize.synthesize_cli --json .\accentized.json --model models/vosk-model-tts-ru-0.10-multi --voice 0 --speech-rate 1.0 --device cpu --output-folder .\tts_out --file-prefix tts_`
+	- Опциональный ресемплинг: `--output-sample-rate 48000` (использует SciPy при наличии)
+- Сборка/микс: быстрый миксер `python -m utils.audio_mixer subs.json tts_out output/mix --sr 48000 --channels 1` (даст `mix.wav` и по умолчанию `mix.mp3`).
+- Альтернатива (простая): создать тишину `create_silence_audio`, затем `overlay_audio(silence.wav, tts_out, subs.json, mixed.mp3)` из `utils/subs_utils`.
 
 ## 5. Testing Notes
-- Existing tests: `test_srt_transformer.py` (parsing), `test_ruaccent.py` (structure & RUAccent batch). Use `python -m unittest` to run all.
-- When adding new processors, mirror batch pattern from `subtitle_processor.process_subtitles_with_ruaccent` and keep list length stable.
+- Наличие примеров/тестов: `temp/test_srt_transformer.py` (парсинг), `temp/test_ruaccent.py` (структура/батч RUAccent), `utils/test_accent_array.py` (RUAccent.process_array демо).
+- Запуск: `python -m unittest` (учтите, тесты RUAccent/RUNorm могут быть тяжелыми и требуют моделей/кеша).
+- При добавлении новых процессоров — следуйте паттерну батч‑акцентирования (с сохранением длины списка) и fallback‑обработке ошибок.
 
 ## 6. Extension Guidelines
-- Keep new params optional with safe defaults; do not break existing function signatures relied upon by scripts.
-- If adding per‑entry synthesis controls, follow pattern in `synthesize_batch.py` (lookup keys, fall back to defaults).
-- Prefer adding small utility in `utils/` rather than scattering logic into synth scripts.
+- Новые параметры — опциональны, с безопасными дефолтами; не ломайте существующие интерфейсы.
+- Пер‑строчные настройки синтеза: брать по ключам из записи (например, `speaker_id`, `speech_rate`), падать на дефолты по образцу `synthesize_batch.py`/CLI.
+- Вспомогательные утилиты — предпочитайте добавлять в `utils/`, а не разносить по синтез‑скриптам.
 
 ## 7. Performance / Reliability
-- Heavy model loads: load RUAccent / RUNorm / Vosk TTS once and reuse; avoid per‑subtitle instantiation.
-- Graceful fallback: On RUAccent batch parse failure, process each line individually (see `subtitle_processor.py`). Maintain this defensive style.
+- Тяжёлые модели грузим один раз и переиспользуем: RUAccent/RUNorm (в `text_normalizer.py`) и Vosk TTS.
+- Защищённые падения: при ошибке батч‑парсинга RUAccent — обрабатываем элементы по одному (`subtitle_processor.py` демонстрирует стиль), длина списка неизменна.
+- Миксер `utils/audio_mixer` выполняет один проход по предвыделенному буферу; для очень длинных проектов допускается будущее расширение до потокового режима.
 
 ## 8. Pitfalls / Gotchas
-- Ellipsis handling mandatory before accenting to avoid mis-accenting sequences of dots.
-- Ensure JSON encoding uses `utf-8` and retains `ensure_ascii=False` for Cyrillic output.
-- `speaker_id` must be valid for the selected model variant; no runtime check currently—document in PRs if adding.
-- Monkey patch must happen before instantiating `Model`; do not delay patch after creating the object.
+- Обязательная обработка троеточий до RUAccent, иначе возможны ошибки/неверные ударения.
+- JSON сохраняем в `utf-8` с `ensure_ascii=False` для кириллицы.
+- `speaker_id` должен соответствовать выбранной модели; явной валидации нет.
+- Патч провайдеров ORT должен происходить до создания `Model` (в `synthesize.py` это уже учтено контекст‑менеджером). Не переносите патч после инстанциирования.
+- По умолчанию `text_normalizer` грузит модели на GPU; на CPU‑хостах переведите `device` на CPU, если нужно.
 
 ## 9. Safe Change Examples
-- Adding a new normalization pre-pass: implement function in `text_normalizer.py`, call it inside existing loop prior to `replace_ellipsis`.
-- Adding CLI to batch synth: wrap argument parsing; keep existing default invocation behavior when script run without args.
+- Добавить новый препроход нормализации: реализовать функцию в `text_normalizer.py`, вызвать до `replace_ellipsis`.
+- Расширить CLI батч‑синтеза: используйте имеющийся `synthesize/synthesize_cli.py` (single/batch уже поддержаны), не меняя дефолтное поведение без аргументов.
+- Микс: prefer `utils/audio_mixer.mix_segments` вместо петель `pydub.overlay` для больших проектов.
 
 ## 10. When Unsure
-Keep changes localized, prefer utility extraction over refactor, and ask for clarification if altering data structure of subtitle entries.
+Держите изменения локальными, выделяйте утилиты вместо рефакторинга, и уточняйте только если требуется менять структуру данных сабов.
 
 ---
-Provide feedback if any workflow differs in actual usage or if additional internal scripts should be documented.
+Дайте обратную связь, если фактические шаги расходятся с описанием или есть внутренние скрипты, которые стоит задокументировать.
+
+# Copilot Chat Instructions
+
+## Language
+- Всегда отвечай на русском.
