@@ -1,15 +1,25 @@
 import sys
 import json
 import ast
+import argparse
 from ruaccent import RUAccent
 from runorm import RUNorm
 
 cust_dict = {'аганоа': 'аган+оа', 'санаапу': 'сан+аапу', 'вавау': 'вав+ау', 'дэз': 'д+эз', 'кюча': 'к+юча', 'огакор': 'ог+акор' }
 
-accentizer = RUAccent()
-accentizer.load(omograph_model_size='turbo3.1', use_dictionary=True, custom_dict=cust_dict, device="CUDA")
-normalizer = RUNorm()
-normalizer.load(workdir="./runorm_cache", model_size="big", device="cuda")
+def _load_models(accent_device: str = "CUDA", norm_device: str = "cuda"):
+    accentizer = RUAccent()
+    accentizer.load(
+        omograph_model_size='turbo3.1',
+        use_dictionary=True,
+        custom_dict=cust_dict,
+        device=accent_device,
+    )
+    normalizer = RUNorm()
+    normalizer.load(workdir="./runorm_cache", model_size="big", device=norm_device)
+    return accentizer, normalizer
+
+accentizer, normalizer = _load_models()
 
 # Default batch size for subtitle processing
 DEFAULT_BATCH_SIZE = 10
@@ -54,7 +64,7 @@ def transform_json(obj, batch_size=DEFAULT_BATCH_SIZE):
         batch_string = str(batch_texts)
         print(batch_string)
         # Process the entire batch string with ruaccent, skipping array syntax
-        processed_batch_string = accentizer.process_all(batch_string, skip_regex='[\[\]]')
+        processed_batch_string = accentizer.process_all(batch_string, skip_regex='[\[\],\"]')
         print(processed_batch_string)
         # Parse the result back to a list
         try:
@@ -113,31 +123,28 @@ def normalize_text_file(input_path, output_path, output_format='json', batch_siz
         raise ValueError("output_format must be 'json' or 'txt'")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        json_file_path = sys.argv[1]
-        batch_size = DEFAULT_BATCH_SIZE
-        
-        # Check if batch size is provided as third argument
-        if len(sys.argv) > 3 and sys.argv[3].isdigit():
-            batch_size = int(sys.argv[3])
+    parser = argparse.ArgumentParser(description="Normalize + accent Russian subtitles JSON")
+    parser.add_argument("input", help="Input JSON file path")
+    parser.add_argument("output", nargs="?", help="Optional output JSON file path")
+    parser.add_argument("batch_size", nargs="?", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size")
+    parser.add_argument("--accent-device", dest="accent_device", default="CUDA", choices=["CPU", "CUDA", "cuda", "cpu"], help="Device for RUAccent")
+    parser.add_argument("--norm-device", dest="norm_device", default="cuda", choices=["CUDA", "cuda", "CPU", "cpu"], help="Device for RUNorm")
+    args = parser.parse_args()
 
-        try:
-            with open(json_file_path, 'r', encoding='utf-8-sig') as file:
-                data = json.load(file)
-                print(f"Loaded {len(data)} subtitle entries")
+    try:
+        global accentizer, normalizer
+        accentizer, normalizer = _load_models(accent_device=args.accent_device, norm_device=args.norm_device)
 
-            transformed_data = transform_json(data, batch_size=batch_size)
+        with open(args.input, 'r', encoding='utf-8-sig') as file:
+            data = json.load(file)
+            print(f"Loaded {len(data)} subtitle entries")
 
-            if len(sys.argv) > 2:
-                # If a second argument is provided, save the transformed JSON to this path
-                output_file_path = sys.argv[2]
-                save_to_file(transformed_data, output_file_path)
-                print(f"Transformed data saved to {output_file_path}")
-            else:
-                # If no second argument, print the transformed JSON
-                print(json.dumps(transformed_data, ensure_ascii=False, indent=2))
+        transformed_data = transform_json(data, batch_size=args.batch_size)
 
-        except Exception as e:
-            print(f"An error occurred: {e}")
-    else:
-        print("Usage: python text_normalizer.py <input_json_file> [output_json_file] [batch_size]")
+        if args.output:
+            save_to_file(transformed_data, args.output)
+            print(f"Transformed data saved to {args.output}")
+        else:
+            print(json.dumps(transformed_data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"An error occurred: {e}")

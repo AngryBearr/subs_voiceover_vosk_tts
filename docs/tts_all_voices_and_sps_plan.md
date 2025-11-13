@@ -1,177 +1,186 @@
-# Plan: All-voices Vosk TTS run + Symbols-per-second metrics
+# План: Прогон Vosk TTS по всем голосам + метрика «символы в секунду» (SPS)
 
-This document describes two small additions to this repository:
-- A script to synthesize a long, complex Russian text with every speaker in `models/vosk-model-tts-ru-0.10-multi` using CPU.
-- A metrics utility that computes symbols-per-second (SPS) for the produced WAV files, counting all characters in the text.
+Этот документ описывает две небольшие доработки репозитория:
+- Скрипт для синтеза длинного русского текста всеми спикерами модели `models/vosk-model-tts-ru-0.10-multi` на CPU.
+- Утилиту метрик, вычисляющую «символы в секунду» (SPS) для полученных WAV, считая символы текста по заданной политике.
 
- The design follows existing patterns (provider monkey-patch, output naming, utilities reuse) outlined in this repo.
- Counting policy for SPS and manifest (per request):
- - Count punctuation (commas, periods, exclamation and question marks, colons, semicolons, hyphens, ellipses, quotes, etc.).
- - Exclude spaces and newline characters from the count.
- - Ignore RUAccent stress marks (`+`) — they are not counted as separate symbols; they’re treated as part of the letter they modify.
+Дизайн следует существующим паттернам репозитория (CPU‑патч провайдеров, соглашения по именованию выходов, переиспользование утилит).
+Политика подсчёта для SPS и манифеста (по требованию):
+- Учитывать пунктуацию (запятые, точки, восклицательные и вопросительные знаки, двоеточия, точки с запятой, дефисы, многоточие, кавычки и т. п.).
+- Не учитывать пробелы и переводы строк.
+- Игнорировать ударения RUAccent (`+`) — не считать их отдельными символами; воспринимать как часть буквы, к которой они относятся.
 
-## Goals and scope
-- Produce one WAV per voice (57 speakers) for the model `vosk-model-tts-ru-0.10-multi`.
-- Use a sufficiently long and challenging Russian text to get stable timing and exercise the grapheme/phoneme pipeline.
-- Default device: CPU; no need to use CUDA.
-- Output naming: incremental `{file_prefix}{n}.wav` (1-based) under `tts_out/`.
-- Emit a compact `manifest.csv` mapping output index and speaker_id to filename and text length.
-- Provide a reusable SPS calculator that reads durations from WAV without requiring FFmpeg.
-- Do not alter existing public behavior; keep new utilities optional.
+## Цели и объём
+- Сгенерировать по одному WAV на голос (57 спикеров) для модели `vosk-model-tts-ru-0.10-multi`.
+- Для измерения SPS сложный текст не обязателен; по умолчанию использовать простой нейтральный русский текст. Разрешить переопределение через файл или CLI‑строку.
+- Устройство по умолчанию: CPU; CUDA не требуется.
+- Именование выходов: инкрементально `{file_prefix}{n}.wav` (нумерация с 1) в `tts_out/`.
+- Эмитировать компактный `manifest.csv`, связывающий индекс вывода и speaker_id с именем файла и длиной текста.
+- Предоставить переиспользуемый калькулятор SPS, читающий длительности из WAV без необходимости FFmpeg.
+- Не менять текущее публичное поведение; новые утилиты — опциональны.
 
-## Existing components to reuse
-- `synthesize/synthesize_batch.py` — contains `patch_model_for_device(device="cpu"|"cuda")` for ONNX providers monkey‑patch; reuse this patch before model instantiation.
-- `synthesize/synthesize.py` — reference for single-run naming and Synth API usage.
-- `utils/subs_utils.py` — `ensure_folder_exists(path)` to create output folders.
-- `utils/audio_mixer.py` — uses `soundfile`; we’ll mirror the same dependency to read WAV duration reliably without FFmpeg.
-- `utils/text_normalizer.py` and `utils/subtitle_processor.py` — provide RUAccent integration patterns (ellipsis replacement/restore, batching, and a `cust_dict` for domain overrides). We will reuse this approach to add stress marks to the single long text before synthesis.
-- `models/vosk-model-tts-ru-0.10-multi/config.json` — includes `num_speakers`, `speaker_id_map`, `audio.sample_rate`; we’ll assume numeric `speaker_id` in 0..56.
+## Что переиспользуем
+- `synthesize/synthesize.py` — предоставляет `create_synth(device)` и `synthesize_text(...)` с встроенным CPU‑патчем провайдеров через `_ForceCPUProviders`. Этот путь предпочтительнее старого `patch_model_for_device`.
+- `synthesize/synthesize_batch.py` — полезен для батч‑паттернов, но выбор провайдера лучше делать через `create_synth` из `synthesize.py`.
+- `utils/subs_utils.py` — `ensure_folder_exists(path)` для создания выходных папок.
+- `utils/audio_mixer.py` — использует `soundfile`; зеркалим зависимость, чтобы надёжно читать длительность WAV без FFmpeg.
+- `utils/text_normalizer.py` и `utils/subtitle_processor.py` — дают паттерны интеграции RUAccent (замена/восстановление многоточий, батч‑обработка, `cust_dict`). Переиспользуем подход для добавления ударений в исходный текст перед синтезом.
+- `models/vosk-model-tts-ru-0.10-multi/config.json` — содержит `num_speakers`, `speaker_id_map`, `audio.sample_rate`; предполагаем числовой `speaker_id` в диапазоне 0..56.
 
-## Script 1: synthesize_all_voices.py
+## Скрипт 1: synthesize_all_voices.py
 
-Responsibilities:
-- Load Vosk TTS `vosk-model-tts-ru-0.10-multi` once on CPU.
-- Preprocess the input text with RUAccent to add stress marks (`+`) and then synthesize the resulting accentized text for each `speaker_id` in range(num_speakers).
-- Save outputs using `{output_folder}/{file_prefix}{n}.wav`, where `n` starts at 1.
-- Write `manifest.csv` alongside outputs: `n,speaker_id,filename,text_length`.
+Обязанности:
+- Однократно загрузить Vosk TTS `vosk-model-tts-ru-0.10-multi` на CPU.
+- Предобработать входной текст RUAccent для добавления ударений (`+`), затем синтезировать акцентированный текст для каждого `speaker_id` в диапазоне num_speakers.
+- Сохранять выходы как `{output_folder}/{file_prefix}{n}.wav`, где `n` начинается с 1.
+- Записать рядом `manifest.csv`: `n,speaker_id,filename,text_length`.
 
-CLI (proposed):
-- `--model-name` (str, default: `vosk-model-tts-ru-0.10-multi`) — resolved under `models/`.
-- `--model-path` (str, optional) — if provided, overrides model-name resolution.
-- `--output-folder` (str, default: `tts_out`) — created if missing.
-- `--file-prefix` (str, default: `tts_`) — prefix for output naming.
-- `--text-file` (path, optional) — if not provided, use the embedded default text.
-- `--speech-rate` (float, optional) — fallback to model default if None.
-- `--noise-level` (float, optional) — fallback to model default if None.
-- `--duration-noise-level` (float, optional) — fallback to model default if None.
-- `--scale` (float, optional) — model-dependent additional control.
-- `--no-accent` (flag, optional) — by default RUAccent preprocessing is enabled; this flag disables it.
+CLI (предложение):
+- `--model-name` (str, по умолчанию: `vosk-model-tts-ru-0.10-multi`) — резолвится под `models/`.
+- `--model-path` (str, опционально) — при указании перекрывает `model-name`.
+- `--output-folder` (str, по умолчанию: `tts_out`) — создаётся при отсутствии.
+- `--file-prefix` (str, по умолчанию: `tts_`) — префикс имён выходных файлов.
+- `--text-file` (path, опционально) — при отсутствии используется встроенный дефолтный текст.
+- `--speech-rate` (float, опционально) — при None берётся дефолт модели.
+- `--noise-level` (float, опционально) — при None берётся дефолт модели.
+- `--duration-noise-level` (float, опционально) — при None берётся дефолт модели.
+- `--scale` (float, опционально) — дополнительный контроль, зависит от модели.
+- `--no-accent` (флаг, опционально) — по умолчанию RUAccent включён; флаг отключает его.
 
- Defaults and policies:
-- Device is forced to CPU (providers = ["CPUExecutionProvider"]).
-- Language is set to `ru`.
-- RUAccent preprocessing is ON by default to ensure correct pronunciation and more accurate timing; stress marks (`+`) are preserved in the text passed to synthesis.
-  - Symbol counting for `manifest.csv` and SPS follows the policy above: remove spaces and newlines, drop `+` stress marks, but keep punctuation (including `...`).
+По умолчанию и политики:
+- Устройство принудительно CPU (providers = ["CPUExecutionProvider"]).
+- Язык — `ru`.
+- RUAccent — опционален; для SPS не строго обязателен. По умолчанию включён, но может быть отключён `--no-accent` для скорости/простоты.
+  - Подсчёт символов для `manifest.csv` и SPS следует политике выше: исключать пробелы и переводы строк, отбрасывать `+`, сохранять пунктуацию (включая `...`).
 
- Implementation notes:
-- Import and call `patch_model_for_device(device="cpu")` before creating the model.
-- Instantiate `Model` and `Synth` once, reuse across all speakers.
-- Determine `num_speakers` as `len(config["speaker_id_map"])` or `config["num_speakers"]` (whichever the patched model exposes); if unavailable, fallback to 57.
-- For index `i` in 0..num_speakers-1, write `{file_prefix}{i+1}.wav`.
-- Use `utils.subs_utils.ensure_folder_exists(output_folder)`.
-  - Emit `manifest.csv` with header row and one line per output: `i+1,speaker_id,filename,symbol_count` where `symbol_count` uses the policy above.
+Технические заметки:
+- Создавать синтезатор через `create_synth(model_path, device="cpu")` из `synthesize/synthesize.py` (внутри применяется `_ForceCPUProviders`).
+- Инстанцировать один `Synth` и переиспользовать его для всех спикеров.
+- Определять `num_speakers` как `len(config["speaker_id_map"])` или `config["num_speakers"]`; при недоступности — fallback на 57.
+- Для индекса `i` в 0..num_speakers-1 писать `{file_prefix}{i+1}.wav`.
+- Использовать `utils/subs_utils.ensure_folder_exists(output_folder)`.
+  - Записывать `manifest.csv` с заголовком и строками вида: `i+1,speaker_id,filename,symbol_count` (последний — по политике выше).
 
- RUAccent preprocessing:
-- We will follow the repository’s established pattern:
-  1) Replace ellipses before accenting to avoid parsing issues (`replace_ellipsis`).
-  2) Use RUAccent with model size `turbo3.1` on CPU to add stress marks. For a single long string we can either:
-     - Use RUAccent’s `process` for a single string, or
-     - Reuse the batch pattern: convert `[text]` to a Python list string and call `process_all(..., skip_regex=...)`, then `ast.literal_eval` back.
-  3) Restore ellipses (`restore_ellipsis`).
-  4) Preserve any `cust_dict` overrides defined in `utils/text_normalizer.py` if we extend or adapt its logic.
-- If RUAccent fails to parse the full string (rare), we’ll fallback to a defensive path: split on sentences and accent each piece, then join; log a warning.
+Предобработка RUAccent:
+- Следуем принятому в репозитории паттерну и добавляем лёгкую санитизацию:
+  0) Санитизация: нормализовать проблемные символы и пробелы до RUAccent.
+     - `«`/`»` → `"`.
+     - `—`/`–` → `-`.
+     - Удалить управляющие символы и эмодзи (непечатаемые/суррогаты).
+     - Схлопнуть избыточные пробелы в одиночные.
+  1) `replace_ellipsis` перед акцентированием, чтобы избежать проблем с многоточием.
+  2) RUAccent с размером `turbo3.1` на CPU для добавления ударений. Для одной длинной строки можно:
+     - вызывать `process` для строки, или
+     - использовать батч‑паттерн: `[text]` → строка‑лист → `process_all(..., skip_regex=...)` → безопасный `ast.literal_eval` обратно.
+  3) `restore_ellipsis` после акцентирования.
+  4) Сохранять `cust_dict` из `utils/text_normalizer.py`, если расширяем логику.
+- Если RUAccent не справился с целой строкой (редко), применить fallback: разбить на предложения, акцентировать по частям и соединить; залогировать предупреждение.
 
-Embedded default Russian text (criteria):
-- One multi-paragraph block ~700–1200 symbols to ensure measurable durations per voice.
-- Rich morphology and orthography: loanwords, compound words, abbreviations, proper nouns, numbers, dates, rare or archaic lexemes, hyphenation, and punctuation variety.
-- Example categories to include: «какафония», «инфраструктура», «экзистенциальный», «непротиворечивость», «реинжиниринг», «квазиисторический», «мультимодальность», «субстантивированный», «кросс‑валидация», «электрофизиология», «непреложный».
-- The exact text lives as a module-level constant `DEFAULT_RU_TEXT` inside the script; users can override via `--text-file`.
+Ограничения ввода (RUAccent/TTS):
+- Проблемные символы: типографские кавычки `«»`, разные тире `—`/`–`, управляющие символы и эмодзи могут ухудшать парсинг RUAccent и/или графемную обработку TTS. Шаг санитизации мапит их на безопасные эквиваленты или удаляет.
+- Ограничения длины: слишком длинные строки нагружают и RUAccent, и TTS. Консервативно ограничивать чанк до ~800–1500 символов. Длиннее — резать по границам предложений и обрабатывать последовательно, сохраняя полный текст для подсчёта SPS.
+- Балансировка пунктуации: по возможности выравнивать кавычки/скобки; несбалансированные случаи нормализуются санитизацией, чтобы снизить неоднозначность парсера.
 
-Output artifacts:
-- WAVs: `{output_folder}/{file_prefix}{n}.wav` for each speaker.
-- `manifest.csv` saved into `{output_folder}`.
+Встроенный дефолтный русский текст (критерии):
+- Для SPS достаточно простого нейтрального текста (~300–600 символов) для устойчивых измерений. Сложная морфология — опционально и может быть передана через `--text-file`.
+- Пример: повествовательный текст общего назначения без узкоспециализированной лексики; пунктуация сохранена для реалистического тайминга.
+- Дефолтный текст хранится как `DEFAULT_RU_TEXT` внутри скрипта; можно переопределить `--text-file` или прямой строкой CLI.
 
-Error handling:
-- If model path/name not found: clear error with hint to place model under `models/`.
-- If a particular `speaker_id` fails (out of bounds): log and continue (or abort if strict mode is desired; default: continue).
-- If text is empty or whitespace: abort with error.
-- If RUAccent preprocessing is enabled but fails, attempt a per-sentence fallback; if still failing, either disable accenting with a warning (respecting `--no-accent`) or abort based on a `--strict-accent` flag (optional).
+Выходные артефакты:
+- WAV: `{output_folder}/{file_prefix}{n}.wav` для каждого спикера.
+- `manifest.csv` в `{output_folder}`.
 
-## Script 2: utils/audio_metrics.py (SPS)
+Обработка ошибок:
+- Отсутствие пути/имени модели: понятная ошибка с подсказкой положить модель в `models/`.
+- Ошибка конкретного `speaker_id` (выход за диапазон): логировать и продолжать (или прерывать в строгом режиме; по умолчанию — продолжать).
+- Пустой/пробельный текст: прерывать с ошибкой.
+- RUAccent включён, но упал: попытаться по‑предложенчески; если снова неудачно — отключить акцентирование с предупреждением (уважая `--no-accent`) или прервать при `--strict-accent` (опционально).
 
-Responsibilities:
-- Provide a function to compute symbols-per-second (SPS) given a folder of WAVs and the text used for synthesis.
-- Count all symbols in the provided text (including spaces/punctuation).
-- Read WAV durations using `soundfile` to avoid external dependencies.
-- Save per-file metrics to `metrics.csv` and return a summary.
+## Скрипт 2: utils/audio_metrics.py (SPS)
 
- Public API (Python):
- - `compute_symbols_per_second(outputs_folder: str, text: str, expected_prefix: str = "tts_", sort=True) -> dict`
-   - Iterates files matching `{expected_prefix}*.wav` under `outputs_folder`.
-   - For each file: duration_sec = frames / samplerate (via `soundfile.info(path)`).
-   - chars = `count_symbols(text)` where `count_symbols` applies the policy: remove spaces (`" ")` and newlines (`"\n"`, `"\r"`), drop `+` stress marks, keep punctuation and all other visible symbols.
-   - cps = `chars / duration_sec` if `duration_sec > 0` else `None`.
-   - Returns `{ "per_file": [ {"filename", "duration_sec", "chars", "cps"}... ], "aggregate": {"mean_cps", "min_cps", "max_cps"} }`.
-   - Also writes `metrics.csv` with columns: `filename,duration_sec,chars,cps` into `outputs_folder`.
-   - Provide `count_symbols` in the same module for reuse; future flags can toggle inclusion of spaces/newlines if needed.
+Обязанности:
+- Рассчитать SPS для папки WAV и текста, использованного при синтезе.
+- Подсчитывать символы согласно политике (пунктуацию учитывать; пробелы/переводы строк — нет; `+` не считать).
+- Читать длительность WAV через `soundfile`, чтобы не зависеть от FFmpeg.
+- Сохранять метрики по файлам в `metrics.csv` и возвращать сводку.
 
-CLI (optional small wrapper or flag in the synth script):
-- Inputs: `--outputs-folder`, `--text-file` (or `--text` literal), `--file-prefix`.
-- Produces `metrics.csv` under `outputs-folder` and prints summary.
+Публичный API (Python):
+- `compute_symbols_per_second(outputs_folder: str, text: str, expected_prefix: str = "tts_", sort=True) -> dict`
+  - Итерирует файлы `{expected_prefix}*.wav` в `outputs_folder`.
+  - Для каждого файла: `duration_sec = frames / samplerate` (через `soundfile.info(path)`).
+  - `chars = count_symbols(text)`, где `count_symbols` применяет политику: удалить пробелы (`" "`) и переводы строк (`"\n"`, `"\r"`), отбросить `+`, сохранить пунктуацию и прочие видимые символы.
+  - `cps = chars / duration_sec`, если `duration_sec > 0`, иначе — `None`.
+  - Возвращает `{ "per_file": [ {"filename", "duration_sec", "chars", "cps"}... ], "aggregate": {"mean_cps", "min_cps", "max_cps"} }`.
+  - Также пишет `metrics.csv` с колонками: `filename,duration_sec,chars,cps` в `outputs_folder`.
+  - `count_symbols` экспортируется в том же модуле; в будущем можно добавить флаги для включения пробелов/переводов строк.
 
-Notes on durations:
-- Use `soundfile.info(path)`; it returns samplerate and frames consistently for WAV.
-- Avoid pydub/ffprobe to remove dependency on FFmpeg for this task.
+CLI (опциональная обёртка или флаг в синтез‑скрипте):
+- Входы: `--outputs-folder`, `--text-file` (или литерал `--text`), `--file-prefix`.
+- Пишет `metrics.csv` в `outputs-folder` и печатает сводку.
 
-## End-to-end flow
-1) Run `synthesize_all_voices.py` with defaults. Internally it will RUAccent‑accentize the text first, then synthesize.
-  - Outputs 57 WAVs and a `manifest.csv` in `tts_out/` (or user-specified folder).
-2) Run the SPS utility with the same (accentized) text to produce `metrics.csv` where `chars` uses the policy above (punctuation included, spaces/newlines excluded, `+` removed).
+Заметки о длительностях:
+- Использовать `soundfile.info(path)`; он стабильно возвращает `samplerate` и `frames` для WAV.
+- Не использовать pydub/ffprobe, чтобы убрать зависимость от FFmpeg под эту задачу.
 
-## Try it (example commands)
-- Synthesize all voices on CPU with defaults:
+## Сквозной сценарий
+1) Запустить `synthesize_all_voices.py` с настройками по умолчанию. Внутри текст будет (опционально) акцентирован RUAccent и затем озвучен.
+   - На выходе: 57 WAV и `manifest.csv` в `tts_out/` (или указанной папке).
+2) Запустить утилиту SPS с тем же (акцентированным) текстом для генерации `metrics.csv`, где `chars` соответствует политике (пунктуация включена, пробелы/переводы строк исключены, `+` отброшены).
+
+## Попробовать (примеры)
+- Синтез всех голосов на CPU по умолчанию:
 
 ```powershell
-# Uses embedded complex Russian text; outputs to .\tts_out\tts_1.wav ... tts_57.wav
+# Использует встроенный русский текст; выдаст .\tts_out\tts_1.wav ... tts_57.wav
 python synthesize/synthesize_all_voices.py
 ```
 
-- Synthesize with a text file and custom prefix:
+- Синтез с файлом текста и кастомным префиксом:
 
 ```powershell
 python synthesize/synthesize_all_voices.py --text-file .\temp\long_ru_text.txt --file-prefix vosk10_
 ```
 
-- Compute SPS (counting all symbols) for the run above:
+- Подсчёт SPS для запуска выше:
 
 ```powershell
 python -c "from utils.audio_metrics import compute_symbols_per_second; import json; print(json.dumps(compute_symbols_per_second('tts_out', open('temp/long_ru_text.txt', 'r', encoding='utf-8').read(), expected_prefix='vosk10_'), ensure_ascii=False, indent=2))"
 ```
 
-The SPS function also writes `tts_out/metrics.csv`.
+Функция SPS также пишет `tts_out/metrics.csv`.
 
-## Edge cases and safeguards
-- Missing or empty text: the synthesizer should raise a clear error.
-- Zero-length or extremely short audio: CPS becomes undefined; record as empty and warn.
-- Partial output set: the SPS utility will only include found files; aggregate computed from available files.
-- File ordering: if `sort=True`, files are sorted lexicographically; numeric parsing of the trailing index can be added if needed.
-- Sample rate: do not assume 48k; read actual WAV samplerate. Model 0.10 uses 22050 Hz per `config.json`.
- - Ellipses handling: text-level counting treats `...` as three characters; pronunciation-wise the model may map it to a single phoneme token, but counting follows the textual rule.
+## Краевые случаи и гарантии
+- Отсутствие/пустота текста: синтезатор должен выдавать понятную ошибку.
+- Нулевая/очень малая длина аудио: CPS не определён; записать пустое и предупредить.
+- Неполный набор выходов: SPS учитывает только найденные файлы; агрегаты считаются по доступным данным.
+- Порядок файлов: при `sort=True` сортировка лексикографическая; можно добавить разбор числового индекса при необходимости.
+- Частота дискретизации: не предполагать 48k; читать фактическую из WAV. У модели 0.10 нативно 22050 Гц (см. `config.json`).
+- Многоточие: на уровне текста `...` — три символа; по произношению модель может мапить иначе, но подсчёт следует текстовому правилу.
 
-## Quality gates
-- Lint/typecheck: both scripts are plain Python with stdlib + soundfile; ensure imports are added to `requirements.txt` if `soundfile` isn’t already present. If not desired, we can fall back to `wave` from stdlib, but `soundfile` is more robust.
-- Tests (lightweight):
-  - Unit test for `compute_symbols_per_second` using a tiny generated WAV with known duration (e.g., 1s of silence) to validate CPS math.
-  - Smoke test for `synthesize_all_voices.py` with `--limit 2` (optional flag) to synthesize two speakers quickly.
-  - RUAccent preprocessing test: given a short snippet with ellipses and known stress, verify ellipsis replacement/restore and presence of `+` markers in the output.
+## Качество
+- Lint/typecheck: оба скрипта — обычный Python со stdlib + soundfile; при необходимости добавить `soundfile` в `requirements.txt`. Альтернатива — stdlib `wave`, но `soundfile` надёжнее.
+- Лёгкие тесты:
+  - Юнит‑тест `compute_symbols_per_second` на небольшом WAV с известной длительностью (например, 1 с тишины) для проверки формулы CPS.
+  - Смоук‑тест `synthesize_all_voices.py` с `--limit 2` (опционально), чтобы быстро озвучить двух спикеров.
+  - Тест RUAccent: на коротком фрагменте с многоточиями проверить replace/restore и наличие маркеров `+` в выводе.
 
-## Implementation checklist
-- Add `synthesize/synthesize_all_voices.py`:
-  - Import: `patch_model_for_device`, `Model`, `Synth`, `ensure_folder_exists`, `json`, `csv`, `argparse`, `pathlib`.
-  - Embed `DEFAULT_RU_TEXT` and implement optional `--text-file`.
-  - Add RUAccent preprocessing (CPU) with ellipsis handling and optional `cust_dict` integration.
-  - CPU-only providers via patch; single Model/Synth instance reused.
-  - Iterate 0..num_speakers-1; write WAVs as `{prefix}{i+1}.wav`.
-  - Emit `manifest.csv` with index, speaker_id, filename, text_length.
+## Чек‑лист реализации
+- Добавить `synthesize/synthesize_all_voices.py`:
+  - Импорты: `create_synth` (и/или `synthesize_text`) из `synthesize/synthesize.py`, `Model`, `Synth`, `ensure_folder_exists`, `json`, `csv`, `argparse`, `pathlib`.
+  - Встроить `DEFAULT_RU_TEXT` и поддержать `--text-file` (или `--text`).
+  - Добавить санитизацию + RUAccent (CPU) с replace/restore многоточий и опциональным `cust_dict`; поддержать `--no-accent`.
+  - Использовать один `create_synth(..., device="cpu")`; переиспользовать `Synth` для всех голосов.
+  - Итерироваться 0..num_speakers-1; писать `{prefix}{i+1}.wav`.
+  - Писать `manifest.csv` с `index,speaker_id,filename,text_length`.
 
-- Add `utils/audio_metrics.py`:
-  - Implement `compute_symbols_per_second(outputs_folder, text, expected_prefix='tts_', sort=True)` using `soundfile`.
-  - Write `metrics.csv` with `filename,duration_sec,chars,cps` and return JSON-like dict.
+- Добавить `utils/audio_metrics.py`:
+  - Реализовать `compute_symbols_per_second(outputs_folder, text, expected_prefix='tts_', sort=True)` на `soundfile`.
+  - Писать `metrics.csv` с `filename,duration_sec,chars,cps` и возвращать JSON‑подобную структуру.
 
-- Optional: Add a `--compute-sps` flag to the synth script to compute metrics immediately after synthesis.
+- Опционально: флаг `--compute-sps` в синтез‑скрипте, чтобы сразу посчитать метрики после синтеза.
 
-## Future extensions
-- Add per-entry synthesis overrides (speech rate, noise) per speaker from a manifest.
-- Allow speaker name mapping by reading `speaker_id_map` from model `config.json`.
-- Permit filename pattern `{prefix}{n:02d}.wav` and/or include speaker name in filenames.
-- Add resampling/transcoding switches (e.g., to 48kHz WAV or MP3) reusing `utils/audio_mixer.py` patterns.
+## Дальнейшие расширения
+- Пер‑спикерные оверрайды (скорость, шум) из манифеста.
+- Маппинг имён спикеров, читая `speaker_id_map` из `config.json` модели.
+- Паттерн имени `{prefix}{n:02d}.wav` и/или включение имени спикера в файл.
+- Ресемплинг/транскодирование (например, в 48 кГц WAV или MP3) с переиспользованием паттернов `utils/audio_mixer.py`.

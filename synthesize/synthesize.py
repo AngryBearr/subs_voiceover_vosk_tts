@@ -69,6 +69,41 @@ class _ForceCPUProviders:
         return False
 
 
+def create_synth(
+    model_path: str,
+    device: str = "cpu",
+) -> Synth:
+    """Create and return a Synth instance with proper provider handling.
+
+    This centralizes device/provider selection so it can be reused in batch flows.
+    """
+    model_dir = Path(model_path)
+    device = (device or "cpu").lower()
+
+    if device in ("cpu",):
+        with _ForceCPUProviders():
+            model = Model(model_path=str(model_dir))
+    elif device in ("cuda", "gpu"):
+        try:
+            import onnxruntime as ort
+            ort.preload_dlls()
+            providers = ort.get_available_providers()  # type: ignore[attr-defined]
+            if "CUDAExecutionProvider" not in providers:
+                logging.warning(
+                    "CUDA provider not available in onnxruntime installation; proceeding on CPU."
+                )
+        except Exception:
+            # If ORT isn't importable here for any reason, we'll let Model handle it.
+            pass
+        model = Model(model_path=str(model_dir))
+    else:
+        logging.warning(f"Unknown device '{device}', defaulting to CPU.")
+        with _ForceCPUProviders():
+            model = Model(model_path=str(model_dir))
+
+    return Synth(model)
+
+
 def synthesize_text(
     text: str,
     voice: Optional[int] = 0,
@@ -78,6 +113,7 @@ def synthesize_text(
     output_path: Optional[str] = None,
     filename_prefix: Optional[str] = None,
     output_sample_rate: Optional[int] = None,
+    synth: Optional[Synth] = None,
 ) -> Path:
     """
     Synthesize text to a .wav file using Vosk TTS.
@@ -105,24 +141,25 @@ def synthesize_text(
         raise ValueError("Text must be a non-empty string.")
     if speech_rate is None or speech_rate <= 0:
         raise ValueError("speech_rate must be > 0.")
-    if not model_path:
-        raise ValueError("model_path is required.")
+    if synth is None and not model_path:
+        raise ValueError("model_path is required when synth is not provided.")
 
-    model_dir = Path(model_path)
-    if not model_dir.exists() or not model_dir.is_dir():
-        raise FileNotFoundError(f"Model path does not exist or is not a directory: {model_path}")
+    if synth is None:
+        model_dir = Path(model_path)
+        if not model_dir.exists() or not model_dir.is_dir():
+            raise FileNotFoundError(f"Model path does not exist or is not a directory: {model_path}")
 
-    # Pre-check for common required files to give clearer error messages
-    required_files = [
-        model_dir / "model.onnx",
-        model_dir / "dictionary",
-        model_dir / "config.json",
-    ]
-    missing = [str(p.name) for p in required_files if not p.exists()]
-    if missing:
-        raise FileNotFoundError(
-            f"Model directory is missing required files: {', '.join(missing)}"
-        )
+        # Pre-check for common required files to give clearer error messages
+        required_files = [
+            model_dir / "model.onnx",
+            model_dir / "dictionary",
+            model_dir / "config.json",
+        ]
+        missing = [str(p.name) for p in required_files if not p.exists()]
+        if missing:
+            raise FileNotFoundError(
+                f"Model directory is missing required files: {', '.join(missing)}"
+            )
 
     device = (device or "cpu").lower()
     NATIVE_SR = 22050  # Model native output rate
@@ -133,29 +170,8 @@ def synthesize_text(
     out_path = _ensure_output_path(output_path, filename_prefix, default_dir=Path.cwd() / "out")
 
     try:
-        # Device/provider handling
-        if device in ("cpu",):
-            with _ForceCPUProviders():
-                model = Model(model_path=str(model_dir))
-        elif device in ("cuda", "gpu"):
-            try:
-                import onnxruntime as ort
-                ort.preload_dlls()
-                providers = ort.get_available_providers()  # type: ignore[attr-defined]
-                if "CUDAExecutionProvider" not in providers:
-                    logging.warning(
-                        "CUDA provider not available in onnxruntime installation; proceeding on CPU."
-                    )
-            except Exception:
-                # If ORT isn't importable here for any reason, we'll let Model handle it.
-                pass
-            model = Model(model_path=str(model_dir))
-        else:
-            logging.warning(f"Unknown device '{device}', defaulting to CPU.")
-            with _ForceCPUProviders():
-                model = Model(model_path=str(model_dir))
-
-        synth = Synth(model)
+        if synth is None:
+            synth = create_synth(str(model_dir), device=device)
 
         speaker_id = 0 if voice is None else int(voice)
 

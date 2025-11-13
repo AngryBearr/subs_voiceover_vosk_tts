@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Union
 
 from utils.subs_utils import ensure_folder_exists
-from .synthesize import synthesize_text, SynthesisError
+from .synthesize import synthesize_text, SynthesisError, create_synth
 
 
 def _load_entries(json_path: str) -> List[dict]:
@@ -50,6 +50,9 @@ def synthesize_json_lines(
 
     entries = _load_entries(json_path)
 
+    # Create shared Synth once for batch
+    synth = create_synth(model_path=model_path, device=device)
+
     for idx, entry in enumerate(entries):
         raw = entry.get(text_key)
         text = _normalize_text(raw)
@@ -70,6 +73,7 @@ def synthesize_json_lines(
                 output_path=outname,
                 filename_prefix=None,
                 output_sample_rate=output_sample_rate,
+                synth=synth,
             )
             print(f"Synthesized: {outname}")
         except (ValueError, FileNotFoundError, OSError, SynthesisError) as e:
