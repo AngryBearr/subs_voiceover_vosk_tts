@@ -346,7 +346,7 @@ Usage notes:
 
 <skill>
 <name>subtitle-shortener-skill</name>
-<description>Скилл для итеративного мягкого сжатия критичных субтитров в JSON с полем analysis. Работает по критичным сегментам (analysis.is_critical=true и extended_mismatch_ratio>=1.5), собирает локальный контекст, подаёт их агенту для сжатия, затем обновляет текст, тайминговый анализ и служебные поля shortened/max_shortening_ratio.</description>
+<description>Сжатие критичных субтитров (is_critical=true, extended_mismatch_ratio>=1.5) с контролем уровня сокращения (≤30%) и итеративными повторами при слишком агрессивном сжатии.</description>
 <location>project</location>
 </skill>
 

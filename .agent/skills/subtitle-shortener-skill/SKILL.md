@@ -11,6 +11,36 @@ description: Сжатие критичных субтитров (is_critical=tru
 - Нужно сократить реплики с `analysis.is_critical == true` и `extended_mismatch_ratio >= 1.5`
 - Требуется контроль уровня сокращения (не более 30%)
 
+---
+
+## ⚠️ КРИТИЧЕСКИ ВАЖНО: Как запускать скрипт
+
+**НЕ используй `uv run -m`** — скрипт находится вне структуры пакетов
+репозитория и не может быть импортирован как модуль Python.
+
+### Правильный способ (PowerShell, из корня d:\tts_projects\vosk)
+
+Используй `uv run python` с **относительным путём** к скрипту:
+
+```powershell
+# Режим payload — генерация данных для сжатия моделью
+uv run python .agent/skills/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py skill_test/subs_analyzed.json --mode payload
+
+# Режим apply — применение ответа модели и пересчёт analysis
+uv run python .agent/skills/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py skill_test/subs_analyzed.json --mode apply --response temp/response.json --output temp/output.json
+```
+
+### Аргументы CLI
+
+| Аргумент     | Описание                                                  |
+|--------------|-----------------------------------------------------------|
+| `input`      | Путь к JSON с проанализированными субтитрами (позиционный)|
+| `--mode`     | `payload` (по умолчанию) или `apply`                      |
+| `--response` | Путь к JSON-ответу модели (обязателен для `mode=apply`)   |
+| `--output`   | Путь для сохранения результата (обязателен для `mode=apply`) |
+
+---
+
 ## Константы
 
 ```python
@@ -98,5 +128,5 @@ save_items("output.json", items)
 
 ## Resources
 
-- `scripts/subtitle_shortener_skill.py` — основная логика
+- `scripts/subtitle_shortener_skill.py` — основная логика + CLI (`--mode payload|apply`)
 - `assets/subs_analyzed.json` — пример входных данных
