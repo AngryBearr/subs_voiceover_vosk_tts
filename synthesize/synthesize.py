@@ -20,6 +20,58 @@ class SynthesisError(Exception):
     """Raised for synthesis-related failures with helpful context."""
 
 
+def compute_speech_rate_from_analysis(
+    analysis: dict | None,
+    *,
+    base_rate: float = 1.25,
+    max_extra_pct: float = 0.20,
+    round_ndigits: int = 2,
+) -> float:
+    """Compute a conservative speech_rate using subtitle text analysis.
+
+    This follows the pipeline rule:
+        - base_rate is the default starting point.
+        - mismatch_ratio / extended_mismatch_ratio are treated as required
+          acceleration coefficients to fit the text into the available window.
+        - we accelerate only if needed (ratio > base_rate).
+        - we cap acceleration to avoid overly fast speech.
+    """
+
+    def _as_pos_float(v: object) -> float | None:
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except Exception:
+            return None
+        if f <= 0 or f != f:  # NaN
+            return None
+        return f
+
+    if base_rate <= 0:
+        raise ValueError("base_rate must be > 0")
+
+    ratio: float | None = None
+    if isinstance(analysis, dict):
+        mr = _as_pos_float(analysis.get("mismatch_ratio"))
+        emr = _as_pos_float(analysis.get("extended_mismatch_ratio"))
+        candidates = [x for x in (mr, emr) if x is not None]
+        if candidates:
+            ratio = min(candidates)
+
+    target = base_rate if ratio is None else max(base_rate, ratio)
+
+    if max_extra_pct is None:
+        capped = target
+    else:
+        max_rate = base_rate * (1.0 + float(max_extra_pct))
+        capped = min(target, max_rate)
+
+    if round_ndigits is not None:
+        capped = round(float(capped), int(round_ndigits))
+
+    # Defensive: never return <=0
+    return max(0.01, float(capped))
+
+
 @dataclass
 class SynthesizeResult:
     output_path: Path

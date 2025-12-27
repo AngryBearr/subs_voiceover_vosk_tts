@@ -4,7 +4,12 @@ from pathlib import Path
 from typing import Any, Iterable, List, Union
 
 from utils.subs_utils import ensure_folder_exists
-from .synthesize import synthesize_text, SynthesisError, create_synth
+from .synthesize import (
+    synthesize_text,
+    SynthesisError,
+    create_synth,
+    compute_speech_rate_from_analysis,
+)
 
 
 def _load_entries(json_path: str) -> List[dict]:
@@ -36,6 +41,10 @@ def synthesize_json_lines(
     file_prefix: str = "tts_",
     voice: int = 0,
     default_speech_rate: float = 1.0,
+    use_analysis_speech_rate: bool = False,
+    base_speech_rate: float = 1.25,
+    max_extra_pct: float = 0.20,
+    output_naming: str = "position",
     text_key: str = "text",
     output_sample_rate: int | None = None,
 ) -> None:
@@ -61,13 +70,31 @@ def synthesize_json_lines(
             print(f"Skipping empty text at entry {idx+1}")
             continue
 
-        outname = os.path.join(output_folder, f"{file_prefix}{idx+1}.wav")
+        if output_naming == "index":
+            try:
+                file_id = int(entry.get("index"))
+            except Exception:
+                file_id = idx + 1
+        else:
+            file_id = idx + 1
+
+        outname = os.path.join(output_folder, f"{file_prefix}{file_id}.wav")
+
+        speech_rate = float(default_speech_rate)
+        if use_analysis_speech_rate:
+            analysis = entry.get("analysis") if isinstance(entry, dict) else None
+            speech_rate = compute_speech_rate_from_analysis(
+                analysis if isinstance(analysis, dict) else None,
+                base_rate=float(base_speech_rate),
+                max_extra_pct=float(max_extra_pct),
+                round_ndigits=2,
+            )
 
         try:
             synthesize_text(
                 text=text,
                 voice=voice,
-                speech_rate=default_speech_rate,
+                speech_rate=speech_rate,
                 model_path=model_path,
                 device=device,
                 output_path=outname,
@@ -75,7 +102,7 @@ def synthesize_json_lines(
                 output_sample_rate=output_sample_rate,
                 synth=synth,
             )
-            print(f"Synthesized: {outname}")
+            print(f"Synthesized: {outname} (speech_rate={speech_rate:.2f})")
         except (ValueError, FileNotFoundError, OSError, SynthesisError) as e:
             # Continue batch on individual failures
             print(f"Failed to synthesize entry {idx+1}: {e}")
