@@ -25,10 +25,10 @@ description: Сжатие критичных субтитров (is_critical=tru
 
 ```powershell
 # Режим payload — генерация данных для сжатия моделью
-uv run python .agent/skills/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py skill_test/subs_analyzed.json --mode payload
+uv run python .opencode/skill/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py skill_test/subs_analyzed.json --mode payload
 
 # Режим apply — применение ответа модели и пересчёт analysis
-uv run python .agent/skills/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py skill_test/subs_analyzed.json --mode apply --response temp/response.json --output temp/output.json
+uv run python .opencode/skill/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py skill_test/subs_analyzed.json --mode apply --response temp/response.json --output temp/output.json
 ```
 
 ### Аргументы CLI

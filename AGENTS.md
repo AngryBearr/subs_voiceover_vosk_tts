@@ -350,7 +350,7 @@ Usage notes:
 
 <skill>
 <name>subtitle-shortener-skill</name>
-<description>Сжатие критичных субтитров (is_critical=true, extended_mismatch_ratio>=1.5) с контролем уровня сокращения (≤30%) и итеративными повторами при слишком агрессивном сжатии.</description>
+<description>Сжатие критичных субтитров (is_critical=true, combined mismatch_ratio>=1.5) с контролем уровня сокращения (≤30%) и итеративными повторами при слишком агрессивном сжатии.</description>
 <location>project</location>
 </skill>
 
