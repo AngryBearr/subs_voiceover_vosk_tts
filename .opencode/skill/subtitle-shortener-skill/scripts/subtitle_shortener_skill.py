@@ -13,8 +13,10 @@ MIN_GAP_BEFORE_NEXT_SEC: float = 0.3
 MIN_WORDS_SHORT_SEGMENT: int = 3
 
 # Константы контроля уровня сокращения
-MAX_SHORTENING_PERCENT: float = 30.0  # Максимально допустимое сокращение в %
-TOLERANCE_PERCENT: float = 5.0  # Допуск ±5% от целевого уровня
+# УБРАНО: ограничение MAX_SHORTENING_PERCENT = 30% — теперь модель может сокращать
+# на любое значение, главное чтобы итоговый ratio <= TARGET_MISMATCH_RATIO
+TARGET_MISMATCH_RATIO: float = 1.5  # Целевой порог ratio после сокращения
+MIN_MISMATCH_RATIO_FOR_SHORTENING: float = 1.5  # Минимальный ratio для попадания в список на сокращение
 MAX_COMPRESSION_ATTEMPTS: int = 5  # Максимум попыток сокращения
 
 
@@ -328,21 +330,22 @@ class AgentSegment:
 def collect_segments_for_agent(
     items: List[Dict[str, Any]],
     window: int = 3,
-    min_ratio: float = 1.5,
+    min_ratio: float = MIN_MISMATCH_RATIO_FOR_SHORTENING,
 ) -> Dict[int, AgentSegment]:
-    """Select critical segments that require compression and attach context.
+    """Select segments that require compression based on mismatch ratio.
 
-    Учитываются только сегменты, которые по результатам анализа помечены
-    как критичные и при этом имеют комбинированный mismatch_ratio выше порога.
-    Комбинированный ratio — это минимум из ``mismatch_ratio`` и
-    ``extended_mismatch_ratio`` (если он есть), что отражает лучший возможный
-    вариант с учётом зазора до следующего субтитра.
+    Сегмент попадает в выборку, если:
+    - mismatch_ratio >= min_ratio, ИЛИ
+    - extended_mismatch_ratio >= min_ratio (если есть)
+    
+    Флаг is_critical НЕ используется — проверяем только значения ratio.
+    Это гарантирует, что все субтитры с высоким ratio будут обработаны.
 
     Args:
         items: Полный список сегментов с полем ``analysis``.
         window: Размер оконного контекста (количество соседей до/после).
-        min_ratio: Минимально допустимое значение комбинированного ratio
-            для попадания в выборку (сегменты с ratio ниже этого уже не требуют сжатия).
+        min_ratio: Минимальное значение ratio для попадания в выборку
+            (по умолчанию 1.5).
 
     Returns:
         Словарь ``index -> AgentSegment`` для всех выбранных сегментов.
@@ -351,14 +354,23 @@ def collect_segments_for_agent(
     segments: Dict[int, AgentSegment] = {}
     for pos, item in enumerate(items):
         analysis = item.get("analysis") or {}
-        if not analysis.get("is_critical"):
+        
+        # Проверяем mismatch_ratio и extended_mismatch_ratio независимо
+        mismatch_ratio = analysis.get("mismatch_ratio")
+        extended_ratio = analysis.get("extended_mismatch_ratio")
+        
+        # Сегмент нуждается в сокращении если ЛЮБОЙ из ratio >= min_ratio
+        needs_shortening = False
+        if mismatch_ratio is not None and mismatch_ratio >= min_ratio:
+            needs_shortening = True
+        if extended_ratio is not None and extended_ratio >= min_ratio:
+            needs_shortening = True
+        
+        if not needs_shortening:
             continue
-
-        # Use combined ratio (min of mismatch_ratio and extended_mismatch_ratio)
-        # to make the filtering decision
+        
+        # Используем combined ratio для отображения (минимум из двух)
         combined = get_combined_mismatch_ratio(analysis)
-        if combined is None or combined < min_ratio:
-            continue
 
         idx = item.get("index")
         if idx is None:
@@ -560,14 +572,18 @@ def is_too_aggressive_compression(
 
 @dataclass
 class ShorteningResult:
-    """Result of text shortening with metrics."""
+    """Result of text shortening with metrics.
+    
+    Новая логика: нет ограничения на процент сокращения.
+    Главный критерий успеха — итоговый mismatch_ratio <= TARGET_MISMATCH_RATIO.
+    """
     
     index: int
     original_text: str
     shortened_text: str
     shortening_percent: float
-    is_acceptable: bool
-    is_too_aggressive: bool
+    new_mismatch_ratio: float | None  # ratio после сокращения
+    target_achieved: bool  # True если new_mismatch_ratio <= TARGET_MISMATCH_RATIO
     attempt_number: int
 
 
@@ -592,165 +608,147 @@ def calculate_shortening_percent(original_text: str, shortened_text: str) -> flo
     return (reduction / original_len) * 100.0
 
 
-def is_shortening_acceptable(
-    shortening_percent: float,
-    max_percent: float = MAX_SHORTENING_PERCENT,
-    tolerance: float = TOLERANCE_PERCENT,
-) -> bool:
-    """Check if the shortening level is within acceptable bounds.
+def format_shortened_subtitles(
+    items: List[Dict[str, Any]],
+) -> Dict[int, str]:
+    """Format shortened subtitles as {index: shortened_text} dictionary.
 
-    Сокращение считается приемлемым, если:
-    - Оно положительное (текст реально стал короче)
-    - Не превышает максимально допустимый уровень с учётом допуска
+    Собирает все субтитры, которые были сокращены (имеют флаг shortened=True),
+    и возвращает их в виде словаря для быстрой проверки результатов.
 
     Args:
-        shortening_percent: Текущий процент сокращения.
-        max_percent: Максимально допустимый процент сокращения (по умолчанию 30%).
-        tolerance: Допуск в процентах (по умолчанию ±5%).
+        items: Список субтитров с полем `shortened` и `text`.
 
     Returns:
-        True, если сокращение в допустимых пределах.
+        Словарь {index: shortened_text} только для сокращённых субтитров.
     """
-    # Сокращение должно быть положительным (текст стал короче)
-    if shortening_percent < 0:
-        return True  # Удлинение — это не проблема в контексте "слишком агрессивного"
+    result: Dict[int, str] = {}
+    for item in items:
+        if item.get("shortened", False):
+            idx = item.get("index")
+            if idx is not None:
+                text = join_text_lines(item.get("text", ""))
+                result[idx] = text
+    return result
+
+
+def print_shortened_subtitles(items: List[Dict[str, Any]]) -> str:
+    """Generate a formatted string of shortened subtitles for display.
+
+    Выводит сокращённые субтитры в удобном для чтения формате.
+
+    Args:
+        items: Список субтитров.
+
+    Returns:
+        Строка JSON с сокращёнными субтитрами.
+    """
+    shortened = format_shortened_subtitles(items)
+    return json.dumps(shortened, ensure_ascii=False, indent=2)
+
+
+def get_segments_needing_further_shortening(
+    items: List[Dict[str, Any]],
+    target_ratio: float = TARGET_MISMATCH_RATIO,
+) -> List[Dict[str, Any]]:
+    """Find segments that still need further shortening after compression.
+
+    После применения сокращения и пересчёта analysis, находит сегменты,
+    у которых mismatch_ratio или extended_mismatch_ratio всё ещё >= target_ratio.
+
+    Args:
+        items: Список субтитров с пересчитанным analysis.
+        target_ratio: Целевой максимальный ratio (по умолчанию 1.5).
+
+    Returns:
+        Список сегментов, требующих дополнительного сокращения.
+    """
+    still_need_shortening: List[Dict[str, Any]] = []
     
-    # Проверяем, не превышает ли сокращение максимальный порог с допуском
-    upper_limit = max_percent + tolerance
-    return shortening_percent <= upper_limit
-
-
-def is_shortening_too_aggressive(
-    shortening_percent: float,
-    max_percent: float = MAX_SHORTENING_PERCENT,
-    tolerance: float = TOLERANCE_PERCENT,
-) -> bool:
-    """Check if the text was shortened too aggressively.
-
-    Сокращение считается слишком агрессивным, если процент сокращения
-    превышает максимально допустимый уровень с учётом допуска.
-
-    Args:
-        shortening_percent: Текущий процент сокращения.
-        max_percent: Максимально допустимый процент сокращения (по умолчанию 30%).
-        tolerance: Допуск в процентах (по умолчанию ±5%).
-
-    Returns:
-        True, если сокращение слишком агрессивное.
-    """
-    upper_limit = max_percent + tolerance
-    return shortening_percent > upper_limit
+    for item in items:
+        if not item.get("shortened", False):
+            continue
+            
+        analysis = item.get("analysis") or {}
+        mismatch_ratio = analysis.get("mismatch_ratio")
+        extended_ratio = analysis.get("extended_mismatch_ratio")
+        
+        needs_more = False
+        if mismatch_ratio is not None and mismatch_ratio >= target_ratio:
+            needs_more = True
+        if extended_ratio is not None and extended_ratio >= target_ratio:
+            needs_more = True
+            
+        if needs_more:
+            still_need_shortening.append(item)
+    
+    return still_need_shortening
 
 
 def evaluate_compression_result(
-    index: int,
+    item: Dict[str, Any],
     original_text: str,
     shortened_text: str,
     attempt_number: int = 1,
-    max_percent: float = MAX_SHORTENING_PERCENT,
-    tolerance: float = TOLERANCE_PERCENT,
+    target_ratio: float = TARGET_MISMATCH_RATIO,
 ) -> ShorteningResult:
     """Evaluate the result of a single compression attempt.
 
-    Анализирует результат сокращения текста и определяет, является ли он
-    приемлемым или слишком агрессивным.
+    Анализирует результат сокращения текста. Успех определяется тем,
+    достигнут ли целевой mismatch_ratio <= target_ratio.
+    
+    ВАЖНО: Нет ограничения на процент сокращения — модель может сокращать
+    на любое значение, главное достичь целевого ratio.
 
     Args:
-        index: Индекс сегмента.
+        item: Сегмент субтитра с пересчитанным analysis.
         original_text: Исходный текст до сокращения.
         shortened_text: Текст после сокращения.
         attempt_number: Номер текущей попытки (начиная с 1).
-        max_percent: Максимально допустимый процент сокращения.
-        tolerance: Допуск в процентах.
+        target_ratio: Целевой максимальный mismatch_ratio.
 
     Returns:
-        ShorteningResult с метриками и флагами результата.
+        ShorteningResult с метриками результата.
     """
     shortening_percent = calculate_shortening_percent(original_text, shortened_text)
-    is_acceptable = is_shortening_acceptable(shortening_percent, max_percent, tolerance)
-    is_aggressive = is_shortening_too_aggressive(shortening_percent, max_percent, tolerance)
+    
+    # Получаем новый ratio после сокращения
+    analysis = item.get("analysis") or {}
+    new_combined = get_combined_mismatch_ratio(analysis)
+    
+    # Проверяем достигнут ли целевой ratio
+    target_achieved = False
+    if new_combined is not None and new_combined <= target_ratio:
+        target_achieved = True
     
     return ShorteningResult(
-        index=index,
+        index=item.get("index", 0),
         original_text=original_text,
         shortened_text=shortened_text,
         shortening_percent=shortening_percent,
-        is_acceptable=is_acceptable,
-        is_too_aggressive=is_aggressive,
+        new_mismatch_ratio=new_combined,
+        target_achieved=target_achieved,
         attempt_number=attempt_number,
     )
 
 
-def filter_aggressive_compressions(
-    items: List[Dict[str, Any]],
-    compressed_texts: Dict[int, str],
-    max_percent: float = MAX_SHORTENING_PERCENT,
-    tolerance: float = TOLERANCE_PERCENT,
-) -> tuple[Dict[int, str], Dict[int, ShorteningResult]]:
-    """Filter out segments that were compressed too aggressively.
-
-    Проходит по всем сокращённым сегментам и разделяет их на:
-    - Приемлемые (возвращаются в первом словаре)
-    - Слишком агрессивные (возвращаются результаты во втором словаре)
-
-    Args:
-        items: Исходный список сегментов.
-        compressed_texts: Словарь index -> new_text от модели.
-        max_percent: Максимально допустимый процент сокращения.
-        tolerance: Допуск в процентах.
-
-    Returns:
-        Tuple из:
-        - Словаря приемлемых сокращений (index -> text)
-        - Словаря результатов для слишком агрессивных (index -> ShorteningResult)
-    """
-    acceptable: Dict[int, str] = {}
-    too_aggressive: Dict[int, ShorteningResult] = {}
-    
-    # Создаём индекс для быстрого поиска по index
-    index_to_item: Dict[int, Dict[str, Any]] = {}
-    for item in items:
-        idx = item.get("index")
-        if idx is not None:
-            index_to_item[idx] = item
-    
-    for idx, new_text in compressed_texts.items():
-        item = index_to_item.get(idx)
-        if item is None:
-            continue
-        
-        original_text = join_text_lines(item.get("text", ""))
-        result = evaluate_compression_result(
-            index=idx,
-            original_text=original_text,
-            shortened_text=new_text,
-            max_percent=max_percent,
-            tolerance=tolerance,
-        )
-        
-        if result.is_too_aggressive:
-            too_aggressive[idx] = result
-        else:
-            acceptable[idx] = new_text
-    
-    return acceptable, too_aggressive
-
-
 def build_retry_prompt_context(
     items: List[Dict[str, Any]],
-    aggressive_results: Dict[int, ShorteningResult],
+    segments_needing_more: List[Dict[str, Any]],
     window: int = 3,
+    target_ratio: float = TARGET_MISMATCH_RATIO,
 ) -> str:
-    """Build context for retry prompt when compressions were too aggressive.
+    """Build context for retry prompt when segments still need more shortening.
 
     Формирует информацию для повторного запроса к модели с указанием,
-    какие сегменты были сокращены слишком сильно и на сколько нужно
-    смягчить сокращение.
+    какие сегменты всё ещё имеют слишком высокий ratio и нуждаются
+    в дополнительном сокращении.
 
     Args:
         items: Полный список сегментов.
-        aggressive_results: Результаты слишком агрессивных сокращений.
+        segments_needing_more: Сегменты, требующие дополнительного сокращения.
         window: Размер контекстного окна.
+        target_ratio: Целевой максимальный ratio.
 
     Returns:
         Строка с контекстом для повторного запроса.
@@ -764,72 +762,65 @@ def build_retry_prompt_context(
         if idx is not None:
             index_to_pos[idx] = pos
     
-    for idx, result in aggressive_results.items():
+    for item in segments_needing_more:
+        idx = item.get("index")
+        if idx is None:
+            continue
+            
         pos = index_to_pos.get(idx)
         if pos is None:
             continue
         
+        analysis = item.get("analysis") or {}
+        current_ratio = get_combined_mismatch_ratio(analysis)
+        current_text = join_text_lines(item.get("text", ""))
         context = build_context_window(items, pos, window=window)
         
         segments_info.append({
             "index": idx,
-            "original_text": result.original_text,
-            "previous_attempt": result.shortened_text,
-            "shortening_percent": round(result.shortening_percent, 1),
-            "target_max_percent": MAX_SHORTENING_PERCENT,
+            "current_text": current_text,
+            "current_mismatch_ratio": round(current_ratio, 2) if current_ratio else None,
+            "target_ratio": target_ratio,
             "context": context,
-            "instruction": f"Сократи мягче! Предыдущая попытка убрала {result.shortening_percent:.1f}% текста, нужно не более {MAX_SHORTENING_PERCENT}%.",
+            "instruction": f"Сократи ещё! Текущий ratio={current_ratio:.2f}, нужно <= {target_ratio}.",
         })
     
     return json.dumps({"retry_segments": segments_info}, ensure_ascii=False, separators=(",", ":"))
 
 
-def apply_with_shortening_control(
+def apply_all_compressions(
     items: List[Dict[str, Any]],
     compressed_texts: Dict[int, str],
-    max_percent: float = MAX_SHORTENING_PERCENT,
-    tolerance: float = TOLERANCE_PERCENT,
-) -> tuple[List[Dict[str, Any]], Dict[int, ShorteningResult]]:
-    """Apply compressed texts with shortening level control.
+) -> List[Dict[str, Any]]:
+    """Apply all compressed texts without filtering.
 
-    Применяет только те сокращения, которые не превышают допустимый уровень.
-    Возвращает обновлённый список и информацию о сегментах, которые были
-    сокращены слишком агрессивно и требуют повторной попытки.
+    Применяет все сокращения от модели без проверки уровня сокращения.
+    Новая логика: нет ограничения на процент сокращения.
 
     Args:
         items: Исходный список сегментов.
         compressed_texts: Словарь index -> new_text от модели.
-        max_percent: Максимально допустимый процент сокращения.
-        tolerance: Допуск в процентах.
 
     Returns:
-        Tuple из:
-        - Обновлённого списка items (с применёнными приемлемыми сокращениями)
-        - Словаря слишком агрессивных результатов для повторной обработки
+        Обновлённый список items.
     """
-    acceptable, too_aggressive = filter_aggressive_compressions(
-        items, compressed_texts, max_percent, tolerance
-    )
-    
-    # Применяем только приемлемые сокращения
-    if acceptable:
-        items = apply_compressed_texts(items, acceptable)
-    
-    return items, too_aggressive
+    return apply_compressed_texts(items, compressed_texts)
 
 
 def get_compression_stats(
     items: List[Dict[str, Any]],
     compressed_texts: Dict[int, str],
+    target_ratio: float = TARGET_MISMATCH_RATIO,
 ) -> Dict[str, Any]:
     """Get statistics about compression results.
 
     Собирает статистику по всем сокращениям: средний процент, мин/макс,
-    количество приемлемых и агрессивных.
+    количество успешных (ratio <= target) и требующих дополнительной работы.
 
     Args:
-        items: Исходный список сегментов.
+        items: Список сегментов после применения сокращений и пересчёта analysis.
         compressed_texts: Словарь index -> new_text от модели.
+        target_ratio: Целевой максимальный ratio.
 
     Returns:
         Словарь со статистикой.
@@ -837,17 +828,18 @@ def get_compression_stats(
     if not compressed_texts:
         return {
             "total_segments": 0,
-            "acceptable_count": 0,
-            "aggressive_count": 0,
+            "target_achieved_count": 0,
+            "still_need_shortening_count": 0,
             "avg_shortening_percent": 0.0,
             "min_shortening_percent": 0.0,
             "max_shortening_percent": 0.0,
         }
     
-    acceptable, too_aggressive = filter_aggressive_compressions(items, compressed_texts)
-    
-    # Собираем все проценты сокращения
+    # Собираем все проценты сокращения и статистику по ratio
     percentages: List[float] = []
+    target_achieved = 0
+    still_need = 0
+    
     index_to_item: Dict[int, Dict[str, Any]] = {}
     for item in items:
         idx = item.get("index")
@@ -858,14 +850,26 @@ def get_compression_stats(
         item = index_to_item.get(idx)
         if item is None:
             continue
+        
+        # Для корректного подсчёта нужен оригинальный текст
+        # Если item уже изменён, то text уже новый — нужно хранить original отдельно
+        # Здесь предполагаем что items ещё не изменены
         original_text = join_text_lines(item.get("text", ""))
         pct = calculate_shortening_percent(original_text, new_text)
         percentages.append(pct)
+        
+        # Проверяем достигнут ли target ratio
+        analysis = item.get("analysis") or {}
+        combined = get_combined_mismatch_ratio(analysis)
+        if combined is not None and combined <= target_ratio:
+            target_achieved += 1
+        else:
+            still_need += 1
     
     return {
         "total_segments": len(compressed_texts),
-        "acceptable_count": len(acceptable),
-        "aggressive_count": len(too_aggressive),
+        "target_achieved_count": target_achieved,
+        "still_need_shortening_count": still_need,
         "avg_shortening_percent": sum(percentages) / len(percentages) if percentages else 0.0,
         "min_shortening_percent": min(percentages) if percentages else 0.0,
         "max_shortening_percent": max(percentages) if percentages else 0.0,
@@ -900,30 +904,49 @@ def recompute_full_analysis(
 
 
 def main() -> None:
-    """Простейший CLI для отладки.
+    """CLI для работы со скиллом сокращения субтитров.
 
     Режимы:
     - --mode payload:  читает input.json и печатает payload для агента;
     - --mode apply:    читает input.json и response.json (map index->text),
                        применяет изменения и пересчитывает analysis, пишет
-                       результат в output.json.
+                       результат в output.json;
+    - --mode show:     показывает сокращённые субтитры в формате {index: text}.
     """
 
     import argparse
 
     parser = argparse.ArgumentParser(description="Subtitle shortener helper CLI")
     parser.add_argument("input", help="Input JSON with analyzed subtitles")
-    parser.add_argument("--mode", choices=["payload", "apply"], default="payload")
+    parser.add_argument("--mode", choices=["payload", "apply", "show"], default="payload")
     parser.add_argument("--response", help="Path to agent JSON response (for mode=apply)")
     parser.add_argument("--output", help="Path to save updated JSON (for mode=apply)")
+    parser.add_argument("--min-ratio", type=float, default=MIN_MISMATCH_RATIO_FOR_SHORTENING,
+                       help="Minimum mismatch ratio for segment selection (default: 1.5)")
 
     args = parser.parse_args()
 
     items = load_items(args.input)
+    
+    # Выводим статистику по загруженным субтитрам
+    total_items = len(items)
+    segments_for_shortening = collect_segments_for_agent(items, min_ratio=args.min_ratio)
+    print(f"Загружено субтитров: {total_items}", file=__import__('sys').stderr)
+    print(f"Субтитров для сокращения (ratio >= {args.min_ratio}): {len(segments_for_shortening)}", 
+          file=__import__('sys').stderr)
 
     if args.mode == "payload":
-        payload = build_agent_payload(items)
+        payload = build_agent_payload(items, min_ratio=args.min_ratio)
         print(payload)
+        return
+    
+    if args.mode == "show":
+        # Показываем уже сокращённые субтитры
+        shortened = format_shortened_subtitles(items)
+        if shortened:
+            print(json.dumps(shortened, ensure_ascii=False, indent=2))
+        else:
+            print("{}")
         return
 
     # mode == "apply"
@@ -934,9 +957,32 @@ def main() -> None:
         raw = f.read()
 
     compressed = parse_agent_response(raw)
-    items = apply_compressed_texts(items, compressed)
+    print(f"Получено сокращений от модели: {len(compressed)}", file=__import__('sys').stderr)
+    
+    # Применяем все сокращения (без ограничения на %)
+    items = apply_all_compressions(items, compressed)
     items = recompute_full_analysis(items)
+    
+    # Проверяем какие сегменты всё ещё нуждаются в сокращении
+    still_need = get_segments_needing_further_shortening(items)
+    if still_need:
+        print(f"Сегментов, требующих дополнительного сокращения: {len(still_need)}", 
+              file=__import__('sys').stderr)
+        for item in still_need:
+            idx = item.get("index")
+            analysis = item.get("analysis") or {}
+            ratio = get_combined_mismatch_ratio(analysis)
+            print(f"  - index={idx}, ratio={ratio:.2f}" if ratio else f"  - index={idx}", 
+                  file=__import__('sys').stderr)
+    
     save_items(args.output, items)
+    print(f"Результат сохранён в: {args.output}", file=__import__('sys').stderr)
+    
+    # Выводим сокращённые субтитры
+    shortened = format_shortened_subtitles(items)
+    if shortened:
+        print("\nСокращённые субтитры:")
+        print(json.dumps(shortened, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":  # pragma: no cover

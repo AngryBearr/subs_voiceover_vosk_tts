@@ -1,6 +1,6 @@
 ---
 name: subtitle-shortener-skill
-description: Сжатие критичных субтитров (is_critical=true, combined mismatch_ratio>=1.5) с контролем уровня сокращения (≤30%) и итеративными повторами при слишком агрессивном сжатии.
+description: Сжатие субтитров с высоким mismatch_ratio (>= 1.5). Модель сокращает текст на любое значение, главное — достичь ratio <= 1.5 после пересчёта.
 ---
 
 # Subtitle Shortener Skill
@@ -8,9 +8,9 @@ description: Сжатие критичных субтитров (is_critical=tru
 ## Когда использовать
 
 - JSON-сабы с полем `analysis` (см. `assets/subs_analyzed.json`)
-- Нужно сократить реплики с `analysis.is_critical == true` и комбинированным `mismatch_ratio >= 1.5`
-- Комбинированный ratio = `min(mismatch_ratio, extended_mismatch_ratio)` — используется меньшее значение
-- Требуется контроль уровня сокращения (не более 30%)
+- Нужно сократить реплики с `mismatch_ratio >= 1.5` ИЛИ `extended_mismatch_ratio >= 1.5`
+- **Нет ограничения** на процент сокращения — модель сокращает сколько нужно
+- Цель: достичь `mismatch_ratio <= 1.5` после пересчёта
 
 ---
 
@@ -29,48 +29,61 @@ uv run python .opencode/skill/subtitle-shortener-skill/scripts/subtitle_shortene
 
 # Режим apply — применение ответа модели и пересчёт analysis
 uv run python .opencode/skill/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py skill_test/subs_analyzed.json --mode apply --response temp/response.json --output temp/output.json
+
+# Режим show — показать уже сокращённые субтитры в формате {index: text}
+uv run python .opencode/skill/subtitle-shortener-skill/scripts/subtitle_shortener_skill.py temp/output.json --mode show
 ```
 
 ### Аргументы CLI
 
-| Аргумент     | Описание                                                  |
-|--------------|-----------------------------------------------------------|
-| `input`      | Путь к JSON с проанализированными субтитрами (позиционный)|
-| `--mode`     | `payload` (по умолчанию) или `apply`                      |
-| `--response` | Путь к JSON-ответу модели (обязателен для `mode=apply`)   |
-| `--output`   | Путь для сохранения результата (обязателен для `mode=apply`) |
+| Аргумент       | Описание                                                  |
+|----------------|-----------------------------------------------------------|
+| `input`        | Путь к JSON с проанализированными субтитрами (позиционный)|
+| `--mode`       | `payload` (по умолчанию), `apply` или `show`              |
+| `--response`   | Путь к JSON-ответу модели (обязателен для `mode=apply`)   |
+| `--output`     | Путь для сохранения результата (обязателен для `mode=apply`) |
+| `--min-ratio`  | Минимальный ratio для отбора (по умолчанию 1.5)           |
 
 ---
 
 ## Константы
 
 ```python
-MAX_SHORTENING_PERCENT = 30.0  # макс. сокращение
-TOLERANCE_PERCENT = 5.0        # допуск ±5%
-MAX_COMPRESSION_ATTEMPTS = 5   # лимит попыток
+TARGET_MISMATCH_RATIO = 1.5      # Целевой максимальный ratio после сокращения
+MIN_MISMATCH_RATIO_FOR_SHORTENING = 1.5  # Порог для отбора сегментов
+MAX_COMPRESSION_ATTEMPTS = 5     # Лимит попыток
 ```
+
+**ВАЖНО:** Ограничение MAX_SHORTENING_PERCENT = 30% **УДАЛЕНО**. 
+Модель теперь может сокращать текст на любой процент, главное — 
+достичь `ratio <= 1.5` после пересчёта.
 
 ## Пайплайн
 
 1. `load_items(path)` — загрузка JSON
-2. `build_agent_payload(items)` — формирование payload для модели
-3. Модель возвращает `{"index": "новый текст", ...}`
-4. `parse_agent_response(raw)` — парсинг ответа
-5. `apply_with_shortening_control(items, compressed)` — применение с проверкой уровня
-6. Если есть слишком агрессивные — `build_retry_prompt_context()` и повтор
+2. `collect_segments_for_agent(items)` — сбор сегментов с `ratio >= 1.5`
+3. `build_agent_payload(items)` — формирование payload для модели
+4. Модель возвращает `{"index": "новый текст", ...}`
+5. `parse_agent_response(raw)` — парсинг ответа
+6. `apply_all_compressions(items, compressed)` — применение всех сокращений
 7. `recompute_full_analysis(items)` — пересчёт таймингов
-8. `save_items(path, items)` — сохранение
+8. `get_segments_needing_further_shortening(items)` — проверка, нужны ли ещё итерации
+9. Если есть — `build_retry_prompt_context()` и повтор
+10. `save_items(path, items)` — сохранение
+11. `format_shortened_subtitles(items)` — вывод результата в формате `{index: text}`
 
 ## Основные функции
 
 | Функция | Назначение |
 |---------|------------|
+| `collect_segments_for_agent(items)` | Сбор сегментов с `ratio >= 1.5` (без проверки `is_critical`) |
 | `build_agent_payload(items)` | JSON-payload для модели |
 | `parse_agent_response(raw)` | `dict[int, str]` из ответа модели |
-| `apply_with_shortening_control(items, compressed)` | Применяет приемлемые, возвращает агрессивные |
-| `filter_aggressive_compressions(items, compressed)` | Разделяет на приемлемые/агрессивные |
-| `build_retry_prompt_context(items, aggressive)` | Контекст для повтора с мягким сжатием |
-| `calculate_shortening_percent(orig, new)` | % сокращения |
+| `apply_all_compressions(items, compressed)` | Применяет все сокращения (без ограничений) |
+| `get_segments_needing_further_shortening(items)` | Находит сегменты с `ratio > 1.5` после сокращения |
+| `build_retry_prompt_context(items, segments)` | Контекст для повтора |
+| `format_shortened_subtitles(items)` | `{index: text}` для сокращённых |
+| `print_shortened_subtitles(items)` | Печать сокращённых в JSON |
 | `recompute_full_analysis(items)` | Пересчёт `analysis` для всех |
 
 ## Формат ответа модели
@@ -79,13 +92,26 @@ MAX_COMPRESSION_ATTEMPTS = 5   # лимит попыток
 {"1": "Сокращённый текст...", "8": "Другой текст..."}
 ```
 
+## Формат вывода сокращённых субтитров
+
+После обработки можно вывести сокращённые субтитры:
+
+```json
+{
+  "1": "Из этой малазийской деревушки...",
+  "8": "Вы видите начало приключения!",
+  "9": "Им дали две минуты захватить всё с лодки!"
+}
+```
+
 ## Пример: итеративное сжатие
 
 ```python
 from scripts.subtitle_shortener_skill import (
     load_items, save_items, build_agent_payload, parse_agent_response,
-    apply_with_shortening_control, recompute_full_analysis,
-    build_retry_prompt_context, MAX_COMPRESSION_ATTEMPTS,
+    apply_all_compressions, recompute_full_analysis,
+    get_segments_needing_further_shortening, build_retry_prompt_context,
+    format_shortened_subtitles, MAX_COMPRESSION_ATTEMPTS,
 )
 
 items = load_items("input.json")
@@ -94,23 +120,30 @@ for attempt in range(1, MAX_COMPRESSION_ATTEMPTS + 1):
     payload = build_agent_payload(items)
     # ... отправка payload модели, получение raw_response ...
     compressed = parse_agent_response(raw_response)
-    items, too_aggressive = apply_with_shortening_control(items, compressed)
+    items = apply_all_compressions(items, compressed)
+    items = recompute_full_analysis(items)
     
-    if not too_aggressive:
+    # Проверяем, нужны ли ещё итерации
+    still_need = get_segments_needing_further_shortening(items)
+    if not still_need:
         break
     
-    retry_context = build_retry_prompt_context(items, too_aggressive)
+    retry_context = build_retry_prompt_context(items, still_need)
     # ... повторный запрос с retry_context ...
 
-items = recompute_full_analysis(items)
 save_items("output.json", items)
+
+# Вывод сокращённых субтитров
+shortened = format_shortened_subtitles(items)
+print(shortened)  # {"1": "...", "8": "...", ...}
 ```
 
 ## Правила сжатия для промпта
 
 - Сжимать только сегменты из `segments`
 - Использовать `context` для связности, не трогать соседние реплики
-- Цель: уменьшить текст на 15–25%, не более 30%
+- **Нет ограничения на процент сокращения** — сокращай сколько нужно
+- Цель: достичь `mismatch_ratio <= 1.5` после пересчёта
 - Нельзя: менять смысл, добавлять факты, переводить
 
 ---
@@ -147,41 +180,28 @@ save_items("output.json", items)
 
 ---
 
-## ⚠️ ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА НА АГРЕССИВНОЕ СЖАТИЕ
+## Проверка результатов
 
-**Этот шаг НЕЛЬЗЯ пропускать!**
+После сокращения **обязательно**:
 
-После каждого сокращения от модели **обязательно** выполнить:
-
-```python
-items, too_aggressive = apply_with_shortening_control(items, compressed)
-
-if too_aggressive:
-    # Сегменты сжаты слишком сильно (>35%)
-    # ОБЯЗАТЕЛЬНО запросить повторное, более мягкое сжатие
-    retry_context = build_retry_prompt_context(items, too_aggressive)
-    # ... повторный запрос к модели с retry_context ...
-```
-
-### Критерии агрессивного сжатия
-
-- Сокращение > 35% (30% + 5% допуск) от длины оригинала
-- Такие сокращения **не применяются** к субтитрам
-- Требуется повторный запрос с инструкцией сократить мягче
+1. Пересчитать `analysis` через `recompute_full_analysis(items)`
+2. Проверить `get_segments_needing_further_shortening(items)`
+3. Если есть сегменты с `ratio > 1.5` — повторить сокращение
 
 ### Цикл проверки
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  1. Получить сжатые тексты от модели                    │
-│  2. Проверить каждый на % сокращения                    │
-│  3. Если есть агрессивные (>35%):                       │
-│     → НЕ применять их                                   │
+│  2. Применить все сокращения (apply_all_compressions)   │
+│  3. Пересчитать analysis (recompute_full_analysis)      │
+│  4. Проверить ratio каждого сокращённого сегмента       │
+│  5. Если есть с ratio > 1.5:                            │
 │     → Сформировать retry-контекст                       │
-│     → Запросить повторное сжатие (мягче)                │
+│     → Запросить дополнительное сокращение               │
 │     → Вернуться к шагу 2                                │
-│  4. Применить только приемлемые сокращения              │
-│  5. Пересчитать analysis                                │
+│  6. Сохранить результат                                 │
+│  7. Вывести сокращённые субтитры в формате {idx: text}  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -196,17 +216,17 @@ if too_aggressive:
   "text": "Исходный текст...",
   "duration_sec": 2.28,
   "estimated_sec": 3.92,
-  "mismatch_ratio": 1.35,
-  "extended_mismatch_ratio": 1.72
+  "mismatch_ratio": 1.72,
+  "extended_mismatch_ratio": 1.35
 }
 ```
 
-**Важно:** Поле `mismatch_ratio` в payload содержит комбинированное значение
-(минимум из `mismatch_ratio` и `extended_mismatch_ratio`), по которому принимается
-решение о необходимости сжатия. Поле `extended_mismatch_ratio` может быть `null`,
-если для сегмента нет зазора до следующего субтитра.
+**Важно:** 
+- Сегмент попадает в payload если `mismatch_ratio >= 1.5` ИЛИ `extended_mismatch_ratio >= 1.5`
+- Флаг `is_critical` **НЕ используется** для отбора
+- Поле `extended_mismatch_ratio` может быть `null`
 
 ## Resources
 
-- `scripts/subtitle_shortener_skill.py` — основная логика + CLI (`--mode payload|apply`)
+- `scripts/subtitle_shortener_skill.py` — основная логика + CLI (`--mode payload|apply|show`)
 - `assets/subs_analyzed.json` — пример входных данных
