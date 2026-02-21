@@ -674,9 +674,9 @@ def get_segments_needing_further_shortening(
         extended_ratio = analysis.get("extended_mismatch_ratio")
         
         needs_more = False
-        if mismatch_ratio is not None and mismatch_ratio >= target_ratio:
+        if mismatch_ratio is not None and mismatch_ratio > target_ratio:
             needs_more = True
-        if extended_ratio is not None and extended_ratio >= target_ratio:
+        if extended_ratio is not None and extended_ratio > target_ratio:
             needs_more = True
             
         if needs_more:
@@ -923,6 +923,8 @@ def main() -> None:
     parser.add_argument("--output", help="Path to save updated JSON (for mode=apply)")
     parser.add_argument("--min-ratio", type=float, default=MIN_MISMATCH_RATIO_FOR_SHORTENING,
                        help="Minimum mismatch ratio for segment selection (default: 1.5)")
+    parser.add_argument("--limit", type=int, help="Limit number of segments in payload")
+    parser.add_argument("--offset", type=int, default=0, help="Start from segment at this offset")
 
     args = parser.parse_args()
 
@@ -936,8 +938,24 @@ def main() -> None:
           file=__import__('sys').stderr)
 
     if args.mode == "payload":
-        payload = build_agent_payload(items, min_ratio=args.min_ratio)
-        print(payload)
+        ensure_shortening_meta(items)
+        segments_dict = collect_segments_for_agent(items, min_ratio=args.min_ratio)
+        segments_list = list(segments_dict.values())
+        
+        # Apply offset and limit
+        total_segments = len(segments_list)
+        start = max(0, min(args.offset, total_segments))
+        end = total_segments
+        if args.limit:
+            end = min(start + args.limit, total_segments)
+        
+        sliced_segments = segments_list[start:end]
+        
+        print(f"Выбрано сегментов для payload: {len(sliced_segments)} (всего доступно: {total_segments}, offset={args.offset}, limit={args.limit or 'нет'})", 
+              file=__import__('sys').stderr)
+        
+        payload = {"segments": [seg.to_dict() for seg in sliced_segments]}
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return
     
     if args.mode == "show":

@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable, List, Union
+from typing import Any, Iterable, List, Union, Optional
 
 from utils.subs_utils import ensure_folder_exists
 from .synthesize import (
@@ -40,6 +40,9 @@ def synthesize_json_lines(
     output_folder: str = "./tts_out",
     file_prefix: str = "tts_",
     voice: int = 0,
+    voice_male: Optional[int] = None,
+    voice_female: Optional[int] = None,
+    gender_key: str = "gender",
     default_speech_rate: float = 1.0,
     use_analysis_speech_rate: bool = False,
     base_speech_rate: float = 1.25,
@@ -80,6 +83,15 @@ def synthesize_json_lines(
 
         outname = os.path.join(output_folder, f"{file_prefix}{file_id}.wav")
 
+        chosen_voice = voice
+        if isinstance(entry, dict) and (voice_male is not None or voice_female is not None):
+            gender_raw = entry.get(gender_key)
+            gender = str(gender_raw).strip().lower() if gender_raw is not None else ""
+            if gender.startswith(("f", "ж")) and voice_female is not None:
+                chosen_voice = int(voice_female)
+            elif gender.startswith(("m", "м")) and voice_male is not None:
+                chosen_voice = int(voice_male)
+
         speech_rate = float(default_speech_rate)
         if use_analysis_speech_rate:
             analysis = entry.get("analysis") if isinstance(entry, dict) else None
@@ -93,7 +105,7 @@ def synthesize_json_lines(
         try:
             synthesize_text(
                 text=text,
-                voice=voice,
+                voice=chosen_voice,
                 speech_rate=speech_rate,
                 model_path=model_path,
                 device=device,

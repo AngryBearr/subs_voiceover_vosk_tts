@@ -46,10 +46,20 @@ def _deep_update(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_pipeline_config(config_path: Path) -> Dict[str, Any]:
-    defaults_path = Path(__file__).parent / "pipeline_config.json"
+    base_dir = Path(__file__).parent
+
+    defaults_path = base_dir / "pipeline_config.json"
+    if not defaults_path.exists():
+        defaults_path = base_dir / "pipeline_config_vosk.json"
+
+    if not defaults_path.exists():
+        raise FileNotFoundError(
+            "No pipeline defaults found. Expected pipeline_config.json or pipeline_config_vosk.json in repo root."
+        )
+
     defaults = _load_json(defaults_path)
     if not isinstance(defaults, dict):
-        raise ValueError("pipeline_config.json must be a JSON object")
+        raise ValueError(f"{defaults_path.name} must be a JSON object")
 
     if config_path and config_path.exists():
         user = _load_json(config_path)
@@ -130,6 +140,9 @@ def run_pipeline(
         output_folder=str(segments_dir),
         file_prefix=file_prefix,
         voice=int(tts_cfg.get("voice", 0)),
+        voice_male=tts_cfg.get("voice_male"),
+        voice_female=tts_cfg.get("voice_female"),
+        gender_key=str(tts_cfg.get("gender_key", "gender")),
         default_speech_rate=float(tts_cfg.get("base_speech_rate", 1.25)),
         use_analysis_speech_rate=bool(tts_cfg.get("use_analysis_speech_rate", True)),
         base_speech_rate=float(tts_cfg.get("base_speech_rate", 1.25)),
