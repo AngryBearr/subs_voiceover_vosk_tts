@@ -1,7 +1,6 @@
 ---
 name: skill-creator
-description: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Claude's capabilities with specialized knowledge, workflows, or tool integrations.
-license: Complete terms in LICENSE.txt
+description: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Gemini CLI's capabilities with specialized knowledge, workflows, or tool integrations.
 ---
 
 # Skill Creator
@@ -10,10 +9,7 @@ This skill provides guidance for creating effective skills.
 
 ## About Skills
 
-Skills are modular, self-contained packages that extend Claude's capabilities by providing
-specialized knowledge, workflows, and tools. Think of them as "onboarding guides" for specific
-domains or tasks—they transform Claude from a general-purpose agent into a specialized agent
-equipped with procedural knowledge that no model can fully possess.
+Skills are modular, self-contained packages that extend Gemini CLI's capabilities by providing specialized knowledge, workflows, and tools. Think of them as "onboarding guides" for specific domains or tasks—they transform Gemini CLI from a general-purpose agent into a specialized agent equipped with procedural knowledge that no model can fully possess.
 
 ### What Skills Provide
 
@@ -26,9 +22,9 @@ equipped with procedural knowledge that no model can fully possess.
 
 ### Concise is Key
 
-The context window is a public good. Skills share the context window with everything else Claude needs: system prompt, conversation history, other Skills' metadata, and the actual user request.
+The context window is a public good. Skills share the context window with everything else Gemini CLI needs: system prompt, conversation history, other Skills' metadata, and the actual user request.
 
-**Default assumption: Claude is already very smart.** Only add context Claude doesn't already have. Challenge each piece of information: "Does Claude really need this explanation?" and "Does this paragraph justify its token cost?"
+**Default assumption: Gemini CLI is already very smart.** Only add context Gemini CLI doesn't already have. Challenge each piece of information: "Does Gemini CLI really need this explanation?" and "Does this paragraph justify its token cost?"
 
 Prefer concise examples over verbose explanations.
 
@@ -42,7 +38,7 @@ Match the level of specificity to the task's fragility and variability:
 
 **Low freedom (specific scripts, few parameters)**: Use when operations are fragile and error-prone, consistency is critical, or a specific sequence must be followed.
 
-Think of Claude as exploring a path: a narrow bridge with cliffs needs specific guardrails (low freedom), while an open field allows many routes (high freedom).
+Think of Gemini CLI as exploring a path: a narrow bridge with cliffs needs specific guardrails (low freedom), while an open field allows many routes (high freedom).
 
 ### Anatomy of a Skill
 
@@ -56,7 +52,7 @@ skill-name/
 │   │   └── description: (required)
 │   └── Markdown instructions (required)
 └── Bundled Resources (optional)
-    ├── scripts/          - Executable code (Python/Bash/etc.)
+    ├── scripts/          - Executable code (Node.js/Python/Bash/etc.)
     ├── references/       - Documentation intended to be loaded into context as needed
     └── assets/           - Files used in output (templates, icons, fonts, etc.)
 ```
@@ -65,39 +61,41 @@ skill-name/
 
 Every SKILL.md consists of:
 
-- **Frontmatter** (YAML): Contains `name` and `description` fields. These are the only fields that Claude reads to determine when the skill gets used, thus it is very important to be clear and comprehensive in describing what the skill is, and when it should be used.
+- **Frontmatter** (YAML): Contains `name` and `description` fields. These are the only fields that Gemini CLI reads to determine when the skill gets used, thus it is very important to be clear and comprehensive in describing what the skill is, and when it should be used.
 - **Body** (Markdown): Instructions and guidance for using the skill. Only loaded AFTER the skill triggers (if at all).
 
 #### Bundled Resources (optional)
 
 ##### Scripts (`scripts/`)
 
-Executable code (Python/Bash/etc.) for tasks that require deterministic reliability or are repeatedly rewritten.
+Executable code (Node.js/Python/Bash/etc.) for tasks that require deterministic reliability or are repeatedly rewritten.
 
 - **When to include**: When the same code is being rewritten repeatedly or deterministic reliability is needed
-- **Example**: `scripts/rotate_pdf.py` for PDF rotation tasks
+- **Example**: `scripts/rotate_pdf.cjs` for PDF rotation tasks
 - **Benefits**: Token efficient, deterministic, may be executed without loading into context
-- **Note**: Scripts may still need to be read by Claude for patching or environment-specific adjustments
+- **Agentic Ergonomics**: Scripts must output LLM-friendly stdout. Suppress standard tracebacks. Output clear, concise success/failure messages, and paginate or truncate outputs (e.g., "Success: First 50 lines of processed file...") to prevent context window overflow.
+- **Note**: Scripts may still need to be read by Gemini CLI for patching or environment-specific adjustments
 
 ##### References (`references/`)
 
-Documentation and reference material intended to be loaded as needed into context to inform Claude's process and thinking.
+Documentation and reference material intended to be loaded as needed into context to inform Gemini CLI's process and thinking.
 
-- **When to include**: For documentation that Claude should reference while working
+- **When to include**: For documentation that Gemini CLI should reference while working
 - **Examples**: `references/finance.md` for financial schemas, `references/mnda.md` for company NDA template, `references/policies.md` for company policies, `references/api_docs.md` for API specifications
 - **Use cases**: Database schemas, API documentation, domain knowledge, company policies, detailed workflow guides
-- **Benefits**: Keeps SKILL.md lean, loaded only when Claude determines it's needed
+- **Benefits**: Keeps SKILL.md lean, loaded only when Gemini CLI determines it's needed
 - **Best practice**: If files are large (>10k words), include grep search patterns in SKILL.md
-- **Avoid duplication**: Information should live in either SKILL.md or references files, not both. Prefer references files for detailed information unless it's truly core to the skill—this keeps SKILL.md lean while making information discoverable without hogging the context window. Keep only essential procedural instructions and workflow guidance in SKILL.md; move detailed reference material, schemas, and examples to references files.
+- **Avoid duplication**: Information should live in either SKILL.md or
+  references files, not both. Prefer references files for detailed information unless it's truly core to the skill—this keeps SKILL.md lean while making information discoverable without hogging the context window. Keep only essential procedural instructions and workflow guidance in SKILL.md; move detailed reference material, schemas, and examples to references files.
 
 ##### Assets (`assets/`)
 
-Files not intended to be loaded into context, but rather used within the output Claude produces.
+Files not intended to be loaded into context, but rather used within the output Gemini CLI produces.
 
 - **When to include**: When the skill needs files that will be used in the final output
 - **Examples**: `assets/logo.png` for brand assets, `assets/slides.pptx` for PowerPoint templates, `assets/frontend-template/` for HTML/React boilerplate, `assets/font.ttf` for typography
 - **Use cases**: Templates, images, icons, boilerplate code, fonts, sample documents that get copied or modified
-- **Benefits**: Separates output resources from documentation, enables Claude to use files without loading them into context
+- **Benefits**: Separates output resources from documentation, enables Gemini CLI to use files without loading them into context
 
 #### What to Not Include in a Skill
 
@@ -109,7 +107,7 @@ A skill should only contain essential files that directly support its functional
 - CHANGELOG.md
 - etc.
 
-The skill should only contain the information needed for an AI agent to do the job at hand. It should not contain auxilary context about the process that went into creating it, setup and testing procedures, user-facing documentation, etc. Creating additional documentation files just adds clutter and confusion.
+The skill should only contain the information needed for an AI agent to do the job at hand. It should not contain auxiliary context about the process that went into creating it, setup and testing procedures, user-facing documentation, etc. Creating additional documentation files just adds clutter and confusion.
 
 ### Progressive Disclosure Design Principle
 
@@ -117,7 +115,7 @@ Skills use a three-level loading system to manage context efficiently:
 
 1. **Metadata (name + description)** - Always in context (~100 words)
 2. **SKILL.md body** - When skill triggers (<5k words)
-3. **Bundled resources** - As needed by Claude (Unlimited because scripts can be executed without reading into context window)
+3. **Bundled resources** - As needed by Gemini CLI (Unlimited because scripts can be executed without reading into context window)
 
 #### Progressive Disclosure Patterns
 
@@ -132,8 +130,7 @@ Keep SKILL.md body to the essentials and under 500 lines to minimize context blo
 
 ## Quick start
 
-Extract text with pdfplumber:
-[code example]
+Extract text with pdfplumber: [code example]
 
 ## Advanced features
 
@@ -142,7 +139,7 @@ Extract text with pdfplumber:
 - **Examples**: See [EXAMPLES.md](EXAMPLES.md) for common patterns
 ```
 
-Claude loads FORMS.md, REFERENCE.md, or EXAMPLES.md only when needed.
+Gemini CLI loads FORMS.md, REFERENCE.md, or EXAMPLES.md only when needed.
 
 **Pattern 2: Domain-specific organization**
 
@@ -158,7 +155,7 @@ bigquery-skill/
     └── marketing.md (campaigns, attribution)
 ```
 
-When a user asks about sales metrics, Claude only reads sales.md.
+When a user asks about sales metrics, Gemini CLI only reads sales.md.
 
 Similarly, for skills supporting multiple frameworks or variants, organize by variant:
 
@@ -171,33 +168,30 @@ cloud-deploy/
     └── azure.md (Azure deployment patterns)
 ```
 
-When the user chooses AWS, Claude only reads aws.md.
+When the user chooses AWS, Gemini CLI only reads aws.md.
 
 **Pattern 3: Conditional details**
 
 Show basic content, link to advanced content:
 
 ```markdown
-# DOCX Processing
+# CSV Processing
 
-## Creating documents
+## Basic Analysis
 
-Use docx-js for new documents. See [DOCX-JS.md](DOCX-JS.md).
+Use pandas for loading and basic queries. See [PANDAS.md](PANDAS.md).
 
-## Editing documents
+## Advanced Operations
 
-For simple edits, modify the XML directly.
+For massive files that exceed memory, see [STREAMING.md](STREAMING.md). For timestamp normalization, see [TIMESTAMPS.md](TIMESTAMPS.md).
 
-**For tracked changes**: See [REDLINING.md](REDLINING.md)
-**For OOXML details**: See [OOXML.md](OOXML.md)
+Gemini CLI reads REDLINING.md or OOXML.md only when the user needs those features.
 ```
-
-Claude reads REDLINING.md or OOXML.md only when the user needs those features.
 
 **Important guidelines:**
 
 - **Avoid deeply nested references** - Keep references one level deep from SKILL.md. All reference files should link directly from SKILL.md.
-- **Structure longer reference files** - For files longer than 100 lines, include a table of contents at the top so Claude can see the full scope when previewing.
+- **Structure longer reference files** - For files longer than 100 lines, include a table of contents at the top so Gemini CLI can see the full scope when previewing.
 
 ## Skill Creation Process
 
@@ -205,12 +199,21 @@ Skill creation involves these steps:
 
 1. Understand the skill with concrete examples
 2. Plan reusable skill contents (scripts, references, assets)
-3. Initialize the skill (run init_skill.py)
+3. Initialize the skill (run node init_skill.cjs)
 4. Edit the skill (implement resources and write SKILL.md)
-5. Package the skill (run package_skill.py)
-6. Iterate based on real usage
+5. Package the skill (run node package_skill.cjs)
+6. Install and reload the skill
+7. Iterate based on real usage
 
 Follow these steps in order, skipping only if there is a clear reason why they are not applicable.
+
+### Skill Naming
+
+- Use lowercase letters, digits, and hyphens only; normalize user-provided titles to hyphen-case (e.g., "Plan Mode" -> `plan-mode`).
+- When generating names, generate a name under 64 characters (letters, digits, hyphens).
+- Prefer short, verb-led phrases that describe the action.
+- Namespace by tool when it improves clarity or triggering (e.g., `gh-address-comments`, `linear-address-issue`).
+- Name the skill folder exactly after the skill name.
 
 ### Step 1: Understanding the Skill with Concrete Examples
 
@@ -225,7 +228,7 @@ For example, when building an image-editor skill, relevant questions include:
 - "I can imagine users asking for things like 'Remove the red-eye from this image' or 'Rotate this image'. Are there other ways you imagine this skill being used?"
 - "What would a user say that should trigger this skill?"
 
-To avoid overwhelming users, avoid asking too many questions in a single message. Start with the most important questions and follow up as needed for better effectiveness.
+**Avoid interrogation loops:** Do not ask more than one or two clarifying questions at a time. Bias toward action: propose a concrete list of features or examples based on your initial understanding, and ask the user to refine them.
 
 Conclude this step when there is a clear sense of the functionality the skill should support.
 
@@ -239,7 +242,7 @@ To turn concrete examples into an effective skill, analyze each example by:
 Example: When building a `pdf-editor` skill to handle queries like "Help me rotate this PDF," the analysis shows:
 
 1. Rotating a PDF requires re-writing the same code each time
-2. A `scripts/rotate_pdf.py` script would be helpful to store in the skill
+2. A `scripts/rotate_pdf.cjs` script would be helpful to store in the skill
 
 Example: When designing a `frontend-webapp-builder` skill for queries like "Build me a todo app" or "Build me a dashboard to track my steps," the analysis shows:
 
@@ -259,12 +262,14 @@ At this point, it is time to actually create the skill.
 
 Skip this step only if the skill being developed already exists, and iteration or packaging is needed. In this case, continue to the next step.
 
-When creating a new skill from scratch, always run the `init_skill.py` script. The script conveniently generates a new template skill directory that automatically includes everything a skill requires, making the skill creation process much more efficient and reliable.
+When creating a new skill from scratch, always run the `init_skill.cjs` script. The script conveniently generates a new template skill directory that automatically includes everything a skill requires, making the skill creation process much more efficient and reliable.
+
+**Note:** Use the absolute path to the script as provided in the `available_resources` section.
 
 Usage:
 
 ```bash
-scripts/init_skill.py <skill-name> --path <output-directory>
+node <path-to-skill-creator>/scripts/init_skill.cjs <skill-name> --path <output-directory>
 ```
 
 The script:
@@ -272,13 +277,13 @@ The script:
 - Creates the skill directory at the specified path
 - Generates a SKILL.md template with proper frontmatter and TODO placeholders
 - Creates example resource directories: `scripts/`, `references/`, and `assets/`
-- Adds example files in each directory that can be customized or deleted
+- Adds example files (`scripts/example_script.cjs`, `references/example_reference.md`, `assets/example_asset.txt`) that can be customized or deleted
 
 After initialization, customize or remove the generated SKILL.md and example files as needed.
 
 ### Step 4: Edit the Skill
 
-When editing the (newly-generated or existing) skill, remember that the skill is being created for another instance of Claude to use. Include information that would be beneficial and non-obvious to Claude. Consider what procedural knowledge, domain-specific details, or reusable assets would help another Claude instance execute these tasks more effectively.
+When editing the (newly-generated or existing) skill, remember that the skill is being created for another instance of Gemini CLI to use. Include information that would be beneficial and non-obvious to Gemini CLI. Consider what procedural knowledge, domain-specific details, or reusable assets would help another Gemini CLI instance execute these tasks more effectively.
 
 #### Learn Proven Design Patterns
 
@@ -306,10 +311,11 @@ Any example files and directories not needed for the skill should be deleted. Th
 Write the YAML frontmatter with `name` and `description`:
 
 - `name`: The skill name
-- `description`: This is the primary triggering mechanism for your skill, and helps Claude understand when to use the skill.
+- `description`: This is the primary triggering mechanism for your skill, and helps Gemini CLI understand when to use the skill.
   - Include both what the Skill does and specific triggers/contexts for when to use it.
-  - Include all "when to use" information here - Not in the body. The body is only loaded after triggering, so "When to Use This Skill" sections in the body are not helpful to Claude.
-  - Example description for a `docx` skill: "Comprehensive document creation, editing, and analysis with support for tracked changes, comments, formatting preservation, and text extraction. Use when Claude needs to work with professional documents (.docx files) for: (1) Creating new documents, (2) Modifying or editing content, (3) Working with tracked changes, (4) Adding comments, or any other document tasks"
+  - **Must be a single-line string** (e.g., `description: Data ingestion...`). Quotes are optional.
+  - Include all "when to use" information here - Not in the body. The body is only loaded after triggering, so "When to Use This Skill" sections in the body are not helpful to Gemini CLI.
+  - Example: `description: Data ingestion, cleaning, and transformation for tabular data. Use when Gemini CLI needs to work with CSV/TSV files to analyze large datasets, normalize schemas, or merge sources.`
 
 Do not include any other fields in YAML frontmatter.
 
@@ -319,22 +325,23 @@ Write instructions for using the skill and its bundled resources.
 
 ### Step 5: Packaging a Skill
 
-Once development of the skill is complete, it must be packaged into a distributable .skill file that gets shared with the user. The packaging process automatically validates the skill first to ensure it meets all requirements:
+Once development of the skill is complete, it must be packaged into a distributable .skill file that gets shared with the user. The packaging process automatically validates the skill first (checking YAML and ensuring no TODOs remain) to ensure it meets all requirements:
+
+**Note:** Use the absolute path to the script as provided in the `available_resources` section.
 
 ```bash
-scripts/package_skill.py <path/to/skill-folder>
+node <path-to-skill-creator>/scripts/package_skill.cjs <path/to/skill-folder>
 ```
 
 Optional output directory specification:
 
 ```bash
-scripts/package_skill.py <path/to/skill-folder> ./dist
+node <path-to-skill-creator>/scripts/package_skill.cjs <path/to/skill-folder> ./dist
 ```
 
 The packaging script will:
 
 1. **Validate** the skill automatically, checking:
-
    - YAML frontmatter format and required fields
    - Skill naming conventions and directory structure
    - Description completeness and quality
@@ -344,7 +351,26 @@ The packaging script will:
 
 If validation fails, the script will report the errors and exit without creating a package. Fix any validation errors and run the packaging command again.
 
-### Step 6: Iterate
+### Step 6: Installing and Reloading a Skill
+
+Once the skill is packaged into a `.skill` file, offer to install it for the user. Ask whether they would like to install it locally in the current folder (workspace scope) or at the user level (user scope).
+
+If the user agrees to an installation, perform it immediately using the `run_shell_command` tool:
+
+- **Locally (workspace scope)**:
+  ```bash
+  gemini skills install <path/to/skill-name.skill> --scope workspace
+  ```
+- **User level (user scope)**:
+  ```bash
+  gemini skills install <path/to/skill-name.skill> --scope user
+  ```
+
+**Important:** After the installation is complete, notify the user that they MUST manually execute the `/skills reload` command in their interactive Gemini CLI session to enable the new skill. They can then verify the installation by running `/skills list`.
+
+Note: You (the agent) cannot execute the `/skills reload` command yourself; it must be done by the user in an interactive instance of Gemini CLI. Do not attempt to run it on their behalf.
+
+### Step 7: Iterate
 
 After testing the skill, users may request improvements. Often this happens right after using the skill, with fresh context of how the skill performed.
 
