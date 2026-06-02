@@ -33,6 +33,7 @@ DEFAULT_CONTEXT_WINDOW = 3
 DEFAULT_MAX_ITERATIONS = 15
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_CONCURRENCY = 5
+DEFAULT_REASONING_EFFORT = "max"
 MIN_WORDS_RESULT = 3
 
 SYSTEM_PROMPT = """\
@@ -128,18 +129,23 @@ def shorten_via_opencode(
     model: str,
     system_prompt: str,
     user_prompt: str,
+    reasoning_effort: Optional[str] = None,
 ) -> Optional[str]:
     """Call opencode CLI to shorten a subtitle."""
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    cmd = [
+        "opencode",
+        "run",
+        "--model", model,
+        "--format", "json",
+    ]
+    if reasoning_effort:
+        cmd.extend(["--variant", reasoning_effort])
+    cmd.append(full_prompt)
+
     try:
         result = subprocess.run(
-            [
-                "opencode",
-                "run",
-                "--model", model,
-                "--format", "json",
-                full_prompt,
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=120,
@@ -184,6 +190,7 @@ def shorten_via_deepseek_sync(
     user_prompt: str,
     api_key: str,
     base_url: str = "https://api.deepseek.com",
+    reasoning_effort: Optional[str] = None,
 ) -> Optional[str]:
     """Call DeepSeek API synchronously."""
     try:
@@ -194,6 +201,10 @@ def shorten_via_deepseek_sync(
 
     client = OpenAI(api_key=api_key, base_url=base_url)
     try:
+        extra_body = {}
+        if reasoning_effort:
+            extra_body["reasoning_effort"] = reasoning_effort
+
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -201,6 +212,7 @@ def shorten_via_deepseek_sync(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
+            extra_body=extra_body if extra_body else None,
             max_tokens=200,
         )
         return response.choices[0].message.content.strip()
@@ -216,6 +228,7 @@ async def shorten_via_deepseek_async(
     api_key: str,
     base_url: str = "https://api.deepseek.com",
     semaphore: Optional[asyncio.Semaphore] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Optional[str]:
     """Call DeepSeek API asynchronously."""
     try:
@@ -226,6 +239,10 @@ async def shorten_via_deepseek_async(
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     try:
+        extra_body = {}
+        if reasoning_effort:
+            extra_body["reasoning_effort"] = reasoning_effort
+
         if semaphore:
             async with semaphore:
                 response = await client.chat.completions.create(
@@ -236,6 +253,7 @@ async def shorten_via_deepseek_async(
                     ],
                     temperature=0.3,
                     max_tokens=200,
+                    extra_body=extra_body if extra_body else None,
                 )
         else:
             response = await client.chat.completions.create(
@@ -246,6 +264,7 @@ async def shorten_via_deepseek_async(
                 ],
                 temperature=0.3,
                 max_tokens=200,
+                extra_body=extra_body if extra_body else None,
             )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -376,6 +395,7 @@ def shorten_subtitles_opencode(
     model: str,
     context_window: int,
     min_words: int,
+    reasoning_effort: Optional[str] = None,
 ) -> List[ShortenResult]:
     """Shorten subtitles sequentially via opencode CLI."""
     system_prompt = SYSTEM_PROMPT.format(min_words=min_words)
@@ -389,7 +409,7 @@ def shorten_subtitles_opencode(
         context = build_context(items, target_idx, context_window)
         user_prompt = build_user_prompt(context, min_words)
 
-        response = shorten_via_opencode(model, system_prompt, user_prompt)
+        response = shorten_via_opencode(model, system_prompt, user_prompt, reasoning_effort)
         shortened = parse_shortened_response(response)
 
         if shortened and validate_shortened_text(original_text, shortened, min_words):
@@ -422,6 +442,7 @@ async def shorten_subtitles_deepseek(
     api_key: str,
     base_url: str,
     concurrency: int,
+    reasoning_effort: Optional[str] = None,
 ) -> List[ShortenResult]:
     """Shorten subtitles in parallel via DeepSeek API."""
     system_prompt = SYSTEM_PROMPT.format(min_words=min_words)
@@ -436,7 +457,7 @@ async def shorten_subtitles_deepseek(
         user_prompt = build_user_prompt(context, min_words)
 
         response = await shorten_via_deepseek_async(
-            model, system_prompt, user_prompt, api_key, base_url, semaphore
+            model, system_prompt, user_prompt, api_key, base_url, semaphore, reasoning_effort
         )
         shortened = parse_shortened_response(response)
 
@@ -586,6 +607,12 @@ def main(argv: List[str] | None = None) -> int:
         default="",
         help="Extra args for analyze_text (e.g. '--avg-chars-per-sec 13')",
     )
+    parser.add_argument(
+        "--reasoning-effort",
+        default=DEFAULT_REASONING_EFFORT,
+        choices=["minimal", "low", "medium", "high", "max"],
+        help=f"Reasoning effort for model (default: {DEFAULT_REASONING_EFFORT})",
+    )
 
     args = parser.parse_args(argv)
 
@@ -644,6 +671,7 @@ def main(argv: List[str] | None = None) -> int:
                 args.model,
                 args.context_window,
                 args.min_words,
+                args.reasoning_effort,
             )
         else:
             results = asyncio.run(shorten_subtitles_deepseek(
@@ -655,6 +683,7 @@ def main(argv: List[str] | None = None) -> int:
                 api_key,
                 args.base_url,
                 args.concurrency,
+                args.reasoning_effort,
             ))
 
         # Apply results

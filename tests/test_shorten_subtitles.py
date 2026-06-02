@@ -344,9 +344,12 @@ class TestCLI:
         parser.add_argument("--api-key")
         parser.add_argument("--base-url", default="https://api.deepseek.com")
         parser.add_argument("--analyze-args", default="")
+        parser.add_argument("--reasoning-effort", default="max",
+                           choices=["minimal", "low", "medium", "high", "max"])
 
         args = parser.parse_args(["test.json"])
         assert args.mode == "opencode"
         assert args.model == "deepseek-v4-flash"
         assert args.threshold == 1.5
         assert args.max_iterations == 15
+        assert args.reasoning_effort == "max"
