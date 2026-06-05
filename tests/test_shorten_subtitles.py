@@ -1,4 +1,4 @@
-"""Tests for utils.shorten_subtitles module."""
+"""Tests for utils.shorten_helpers module."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import pytest
 from pathlib import Path
 from typing import Any, Dict, List
 
-from utils.shorten_subtitles import (
+from utils.shorten_helpers import (
     build_context,
     build_user_prompt,
     parse_shortened_response,
@@ -320,36 +320,53 @@ class TestApplyShortening:
 
 
 # ---------------------------------------------------------------------------
-# Tests: CLI argument parsing
+# Tests: CLI argument parsing (deepseek)
 # ---------------------------------------------------------------------------
 
 
-class TestCLI:
+class TestCLIDeepseek:
     def test_default_args(self) -> None:
-        """Test default argument values."""
-        from utils.shorten_subtitles import main
+        """Test default argument values for deepseek script."""
         import argparse
+        from utils.shorten_helpers import add_common_args
 
-        # We can't easily test main() directly, but we can test arg parsing
         parser = argparse.ArgumentParser()
-        parser.add_argument("input")
-        parser.add_argument("--mode", choices=["opencode", "deepseek"], default="opencode")
-        parser.add_argument("--model", default="deepseek-v4-flash")
-        parser.add_argument("--threshold", type=float, default=1.5)
-        parser.add_argument("--context-window", type=int, default=3)
-        parser.add_argument("--max-iterations", type=int, default=15)
-        parser.add_argument("--min-words", type=int, default=3)
+        add_common_args(parser)
         parser.add_argument("--concurrency", type=int, default=5)
-        parser.add_argument("--output-dir", default="output/shortened")
         parser.add_argument("--api-key")
         parser.add_argument("--base-url", default="https://api.deepseek.com")
-        parser.add_argument("--analyze-args", default="")
-        parser.add_argument("--reasoning-effort", default="max",
-                           choices=["minimal", "low", "medium", "high", "max"])
 
         args = parser.parse_args(["test.json"])
-        assert args.mode == "opencode"
         assert args.model == "deepseek-v4-flash"
         assert args.threshold == 1.5
         assert args.max_iterations == 15
         assert args.reasoning_effort == "max"
+        assert args.concurrency == 5
+
+
+# ---------------------------------------------------------------------------
+# Tests: OpenCode helpers
+# ---------------------------------------------------------------------------
+
+
+class TestOpenCodeHelpers:
+    def test_parse_model_string_with_provider(self) -> None:
+        """Test parsing model string with provider prefix."""
+        from utils.shorten_subtitles_opencode import _parse_model_string
+
+        result = _parse_model_string("opencode-go/deepseek-v4-flash")
+        assert result == {"providerID": "opencode-go", "modelID": "deepseek-v4-flash"}
+
+    def test_parse_model_string_deepseek(self) -> None:
+        """Test parsing deepseek model name without provider."""
+        from utils.shorten_subtitles_opencode import _parse_model_string
+
+        result = _parse_model_string("deepseek-v4-flash")
+        assert result == {"providerID": "deepseek", "modelID": "deepseek-v4-flash"}
+
+    def test_parse_model_string_other(self) -> None:
+        """Test parsing other model name without provider."""
+        from utils.shorten_subtitles_opencode import _parse_model_string
+
+        result = _parse_model_string("mimo-v2.5")
+        assert result == {"providerID": "opencode-go", "modelID": "mimo-v2.5"}

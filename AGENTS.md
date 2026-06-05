@@ -1,8 +1,8 @@
 # AGENTS.md
 - Ты находишься в Windows.
-- В репозитории есть virtual environment `vosk_env`, перед запуском скриптов всегда активируй его.
+- В репозитории есть virtual environment `subs_venv`, перед запуском скриптов всегда активируй его.
 - Скрипты запускай из корня репозитория через `uv` в виде модулей, например: `uv run -m utils.srt_to_json ...`.
-- Для установки или удаления пакетов используй `uv pip install <package>` или `uv pip uninstall <package>`, но только после активации `vosk_env`.
+- Для установки или удаления пакетов используй `uv pip install <package>` или `uv pip uninstall <package>`, но только после активации `subs_venv`.
 
 ## Скрипты
 - Всегда типизируй код.
