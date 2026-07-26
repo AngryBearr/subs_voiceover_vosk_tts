@@ -7,6 +7,10 @@ Two approaches to shorten subtitles that are too long for their duration:
 
 Both use the same shortening logic and iterative loop from `utils.shorten_helpers`.
 
+The recommended orchestration command runs Flash shortening and then uses direct
+DeepSeek V4 Pro to inspect every Flash-changed subtitle and every unchanged subtitle
+that remains critical.
+
 ---
 
 ## Prerequisites
@@ -43,7 +47,8 @@ JSON file with analyzed subtitles (output of `utils.analyze_text`):
 ]
 ```
 
-Subtitles with `analysis.is_checked = true` and `mismatch_ratio > threshold` will be shortened.
+Checked subtitles use `extended_mismatch_ratio` when present, otherwise
+`mismatch_ratio`; values above the threshold require shortening.
 
 ---
 
@@ -57,16 +62,27 @@ Both scripts accept these arguments:
 | `--model` | `deepseek-v4-flash` | Model name |
 | `--threshold` | `1.5` | Mismatch ratio threshold for shortening |
 | `--context-window` | `3` | Number of surrounding subtitles for context |
-| `--max-iterations` | `15` | Maximum number of iterations |
+| `--context-source` | (disabled) | Full-episode analyzed JSON used only for real neighboring context |
+| `--max-iterations` | `3` | Maximum number of iterations |
 | `--min-words` | `3` | Minimum words in shortened text |
 | `--output-dir`, `-o` | `output/shortened` | Output directory |
-| `--reasoning-effort` | `max` | Reasoning effort: `minimal`, `low`, `medium`, `high`, `max` |
+| `--avg-chars-per-sec` | `13` | TTS speed used to calculate character budgets |
+| `--batch-size` | `5` | Number of subtitles per API call (max: 25) |
+| `--stuck-threshold` | `5` | Iterations without change before skipping subtitle |
+| `--early-stop-patience` | (disabled) | Stop after N consecutive iterations with < 2 changes |
 
 ---
 
 ## Method 1: Direct DeepSeek API
 
 Uses DeepSeek API directly via OpenAI-compatible client.
+
+By default it explicitly disables thinking and requests JSON mode. `--thinking-effort high|max`
+is an explicit, more expensive opt-in (DeepSeek does not provide savings for low/medium effort).
+Usage and the V4 Flash direct-API estimate (cache miss $0.14/M, hit $0.0028/M,
+output $0.28/M) are saved as `{stem}_final.usage.json`.
+The estimate is explicitly labeled `pricing_model: deepseek-v4-flash`; custom models
+still require their own price interpretation.
 
 ### Setup
 
@@ -86,8 +102,9 @@ uv run -m utils.shorten_subtitles_deepseek input.json
 uv run -m utils.shorten_subtitles_deepseek input.json \
     --model deepseek-v4-flash \
     --concurrency 10 \
-    --max-iterations 5 \
+    --max-iterations 3 \
     --threshold 1.3 \
+    --batch-size 10 \
     -o output/my_shortened
 
 # Override API key
@@ -104,6 +121,7 @@ uv run -m utils.shorten_subtitles_deepseek input.json --base-url https://api.dee
 | `--concurrency` | `5` | Max parallel API calls |
 | `--api-key` | (from .env) | DeepSeek API key |
 | `--base-url` | `https://api.deepseek.com` | API base URL |
+| `--thinking-effort` | disabled | Explicit opt-in: `high` or `max` |
 
 ### Available Models
 
@@ -117,6 +135,8 @@ deepseek-v4-pro
 ## Method 2: OpenCode HTTP API
 
 Starts an `opencode serve` instance and sends prompts via HTTP API. Avoids cold start on multiple requests.
+The documented server API does not guarantee provider thinking/JSON controls or token usage;
+the non-thinking and cost guarantees above apply only to the direct DeepSeek path.
 
 ### Usage
 
@@ -188,18 +208,146 @@ Each iteration produces:
 - `{stem}_analyzed.json` — Initial analysis result
 - `{stem}_iter{NN}.json` — Result after each iteration
 - `{stem}_final.json` — Final result
+- `{stem}_final.usage.json` — Direct DeepSeek token usage and cost estimate
+
+## Direct DeepSeek V4 Pro review
+
+### Recommended Flash + Pro pipeline
+
+```bash
+uv run -m utils.shorten_review_pipeline skill_test/subs_analyzed.json \
+  --context-source skill_test/S01_E01_ru_analyzed.json \
+  --api-key sk-xxx --output-dir output/skill_test_shortened_reviewed
+```
+
+The API key is shared by both stages (and may instead come from
+`DEEPSEEK_API_KEY`). Combined-pipeline defaults are one non-thinking Flash iteration,
+Flash batch 6/concurrency 3, then Pro context window 3, concurrency 3, and
+a conservative 50,000-token input estimate. Stage artifacts are under `flash/`
+and `pro/`; the refreshed final is `{input_stem}_reviewed.json` at the output
+root, alongside combined pipeline report and usage files. If Pro fails entirely,
+the command exits nonzero while retaining the Flash final, usage, and failure
+report.
+
+Use pipeline `--pro-concurrency N` or standalone reviewer `--concurrency N` to
+change the Pro request limit (default: `3` for both). Independent requests within
+each Pro stage run in bounded parallel, while the critic → editor → targeted
+compaction → verifier → repair → reverify stage barriers remain in place.
+
+The reviewer selects the unique-index union of Flash-changed and remaining-critical
+targets. Pro uses three separated roles: a non-thinking critic evaluates every target;
+a high-thinking editor receives only critic failures, formal failures, and
+remaining-critical targets (batches of at most two); a fresh non-thinking blind
+verifier sees only original/full context/candidate. A verifier failure gets at most one
+single-target high-thinking repair and one fresh blind verification. API or malformed
+responses never count as verified, and the safest locally valid candidate is retained
+but reported unresolved.
+
+Experiment 1 applies a semantic hard gate to known risks. The final verifier must return
+one strict, explicit check for every deterministic risk hint and relevant critic issue;
+missing, duplicate, malformed, or failed required checks cannot verify a target. A critic
+failure or known semantic risk also requires a locally valid editor or repair candidate,
+so a generic pass over an unchanged lossy Flash candidate is insufficient. If an editor
+candidate is valid except for exceeding `max_chars`, it is retained diagnostically and
+gets at most one single-target high-thinking compaction request. The compacted result is
+formally validated before blind verification. A hard-gated target that still lacks valid
+recovery may use the existing single bounded repair attempt, but there are no additional
+retries. Reports expose targeted-compaction request counts, decisions, stage errors, and
+rejected candidates with reasons in per-target lineage. When any gate remains unmet, the
+safest prior locally valid candidate is retained and the target is conservatively reported
+unresolved. Repair candidates remain provisional until their fresh reverification passes
+all required checks; otherwise the reviewer restores the prior candidate and its verifier
+fields while retaining both attempts and the rejected repair in diagnostics.
+
+With `--context-source`, windows are based on each unique subtitle `index` position in
+the full episode. Non-target neighbors come from that source while current target text
+is overlaid by index. The source is rejected for duplicate indices, missing targets, or
+target/source text mismatch. Reports label this `context_mode: full` and otherwise use
+`context_mode: sparse`.
+
+```bash
+# Review the current skill test result (recommended default)
+uv run -m utils.review_shortened_subtitles_deepseek \
+  skill_test/subs_analyzed.json \
+  output/shorten_skill_test_last_retry_paid/subs_analyzed_final_final_final_final.json \
+  --context-source skill_test/S01_E01_ru_analyzed.json \
+  --batch-size 4 --concurrency 3 -o output/reviewed_skill_test
+```
+
+The legacy `--thinking-mode` and pipeline risk-threshold options remain accepted for
+command compatibility but do not override quality routing: critic/verifier are always
+non-thinking, while editor/compaction/repair always use high thinking.
+
+Pro receives `original_text` and `current_text` for context. Reports contain stage
+usage, per-target Flash/editor/compaction/repair/final lineage (including rejected
+candidates), critic and verifier verdicts/issues and required checks,
+and `automated_verified_count` (not a human quality rate). Combined usage sums each Pro
+stage once. A top-level `shortening.status` is resolved only when the target is locally
+within budget and passes final blind verification; otherwise the pipeline uses
+`completed_with_unresolved` and lists unresolved indices.
+
+The default model is `deepseek-v4-pro`. The default batch size is 4, and batches use an
+estimated 50,000 input-token limit; use `--batch-size`, `--max-input-tokens`, and
+`--context-window` to tune them. A full-file one-request design is intentionally
+avoided for reliability even though the official model context is 1M tokens.
+The tokenizer-free estimate deliberately treats every input character as a token and
+adds fixed message overhead, making it conservative for Cyrillic. The default
+`--target-ratio 1.5` must match the threshold/target ratio used by the Flash shortening
+run; override it when Flash used another value. Refreshed timing metadata from the
+shortened file is preferred, with original timing as fallback.
+
+For shortened input `name.json`, outputs are predictable:
+
+- `name_reviewed.json` — final subtitles;
+- `name_review.report.json` — selection, routing, acceptance, fallback, and errors;
+- `name_review.usage.json` — cache hit/miss, completion/reasoning tokens and Pro cost.
+
+The Pro estimate uses direct prices: cache miss $0.435/M, cache hit $0.003625/M,
+and output $0.87/M, explicitly labeled `pricing_model: deepseek-v4-pro`.
 
 ---
 
 ## How It Works
 
 1. **Analyze** — Run `analyze_subtitles` to find critical subtitles
-2. **Select** — Pick subtitles with `mismatch_ratio > threshold`
-3. **Shorten** — Send prompts to LLM with context (surrounding subtitles)
-4. **Validate** — Check shortened text meets requirements (min words, not just "...")
-5. **Apply** — Replace original text with shortened version
-6. **Re-analyze** — Run analysis again to check progress
-7. **Repeat** — Until no subtitles need shortening or max iterations reached
+2. **Select** — Use `extended_mismatch_ratio` when present, otherwise `mismatch_ratio` (excluding stuck)
+3. **Batch** — Group subtitles into batches of `--batch-size`
+4. **Shorten** — Send batched prompts to LLM with context (surrounding subtitles)
+5. **Validate** — Require changed, strictly shorter text within `max_chars`, preserving numbers and explicit negations
+6. **Apply** — Replace original text with shortened version
+7. **Re-analyze** — Run analysis again to check progress
+8. **Repeat** — Until no subtitles need shortening or max iterations reached
+
+### Adaptive Strategy
+
+The system uses two strategies depending on the iteration number:
+
+- **Iterations 1-2**: "Shorten" — asks the model to shorten the text while preserving meaning
+- **Iterations 3+**: "Rephrase" — asks the model to restructure the sentence for a more compact form
+
+When the strategy changes, all tracking counters (stuck detection, early stopping) are reset, giving subtitles a fresh chance with the new approach.
+
+### Stuck Detection
+
+If a subtitle's text hasn't changed for `--stuck-threshold` consecutive iterations (within the same strategy), it's marked as "stuck" and excluded from further processing. This prevents wasting API calls on subtitles that can't be shortened.
+
+The stuck counter resets when the strategy changes (e.g., from "shorten" to "rephrase").
+
+### Early Stopping
+
+If `--early-stop-patience` is set, the loop stops after N consecutive iterations where fewer than 2 subtitles were actually changed. This prevents running unnecessary iterations when the system has converged.
+
+The patience counter resets when the strategy changes or when an iteration produces 2+ changes.
+
+### Batching
+
+Multiple subtitles are sent in a single API call (controlled by `--batch-size`). This reduces:
+- Number of API calls (5-25x fewer)
+- System prompt duplication (sent once per batch instead of per subtitle)
+- Overall cost
+
+The model returns a JSON array with results for each subtitle in the batch.
+Overlapping context is represented once in compact JSON rather than repeated for every target.
 
 ---
 
@@ -227,8 +375,9 @@ Each iteration produces:
 ```bash
 uv run -m utils.shorten_subtitles_deepseek subs_analyzed.json \
     --threshold 1.3 \
-    --max-iterations 10 \
-    --concurrency 8
+    --max-iterations 3 \
+    --concurrency 8 \
+    --batch-size 10
 ```
 
 ### Shorten with OpenCode, orcarouter provider
@@ -237,7 +386,8 @@ uv run -m utils.shorten_subtitles_deepseek subs_analyzed.json \
 uv run -m utils.shorten_subtitles_opencode subs_analyzed.json \
     --model orcarouter/deepseek/deepseek-v4-flash \
     --threshold 1.5 \
-    --max-iterations 5
+    --max-iterations 3 \
+    --batch-size 8
 ```
 
 ### Use existing opencode server
@@ -250,3 +400,31 @@ opencode serve --port 4096
 uv run -m utils.shorten_subtitles_opencode subs_analyzed.json \
     --server-url http://localhost:4096
 ```
+
+### Enable early stopping
+
+```bash
+uv run -m utils.shorten_subtitles_deepseek subs_analyzed.json \
+    --early-stop-patience 3 \
+    --batch-size 10
+```
+
+### Cost-optimized run
+
+```bash
+uv run -m utils.shorten_subtitles_deepseek subs_analyzed.json \
+    --batch-size 8 \
+    --stuck-threshold 3 \
+    --early-stop-patience 3 \
+    --max-iterations 3
+```
+
+Recommended cheap command for the repository fixture (this command performs paid API calls):
+
+```bash
+uv run -m utils.shorten_subtitles_deepseek skill_test/subs_analyzed.json \
+  --threshold 1.5 --avg-chars-per-sec 13 --batch-size 8 --max-iterations 3
+```
+
+Batch sizes 5–10 are the recommended starting point. Larger batches are not always
+cheaper because they increase context and retry scope.

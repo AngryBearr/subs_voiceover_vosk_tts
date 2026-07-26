@@ -1,0 +1,789 @@
+"""Production DeepSeek Pro critic, editor, and blind-verifier workflow."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import copy
+import json
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Sequence
+
+from utils.analyze_text import join_text_lines
+from utils.shorten_helpers import calculate_budget, load_api_key, load_json, save_json, target_min_words, validate_context_source
+from utils.shorten_subtitles_deepseek import dynamic_max_tokens, shorten_via_deepseek_async
+
+DEFAULT_MODEL = "deepseek-v4-pro"
+DEFAULT_BATCH_SIZE = 4
+DEFAULT_MAX_INPUT_TOKENS = 50_000
+ThinkingMode = Literal["disabled", "high", "max", "auto"]
+ISSUE_CODES = {"agent", "predicate", "object", "polarity", "modality", "time", "causality",
+               "comparison", "alternative", "entity", "number", "reference", "boundary", "grammar",
+                "naturalness", "budget", "uncertain"}
+
+SEMANTIC_CONTRACT = (
+    "Оценивай материальную смысловую эквивалентность при необходимом сжатии: agent, predicate/object, "
+    "polarity, modality, time, causality/concession, comparison, число и охват alternatives, entities, "
+    "numbers и cross-line references. Можно убрать fillers, false starts, повторы, несущественные примеры "
+    "и детали, если центральные утверждения сохранены; буквальное совпадение не требуется. Естественный "
+    "фрагмент допустим в реальном соседнем контексте. Читай candidate вслух и в склейке с соседними "
+    "строками; missing required object/goal, broken case attachment, ambiguous antecedent и editor notation "
+    "являются predicate/grammar/reference/naturalness ошибками. Контекст служит грамматике и референтам; "
+    "запрещено импортировать факт из соседней строки."
+)
+CRITIC_PROMPT = SEMANTIC_CONTRACT + (
+    " Ты независимый критик и не редактируешь. Для каждой цели верни строго JSON: "
+    '{"results":[{"index":1,"verdict":"pass|fail|uncertain","issues":[]}]}. '
+    "pass требует пустой issues; fail/uncertain — непустой список только из фиксированных issue codes: "
+    + ",".join(sorted(ISSUE_CODES)) + "."
+)
+EDITOR_PROMPT = SEMANTIC_CONTRACT + (
+    " Ты редактор. Исправь только указанные issues, не показывай рассуждения. budget-only означает: "
+    "сохрани всю семантику при уплотнении, особенно межстрочное сравнение/reference; сначала попробуй "
+    "компактный список alternatives. Мысленно склей цель с реальными соседними строками и сохрани "
+    "грамматическое присоединение и падеж. Не оставляй переходный predicate без обязательного object/goal. "
+    "При конкурирующих antecedents предпочитай компактное явное существительное неоднозначному местоимению. "
+    "Сохраняй материальные time/modality/comparison anchors и все alternatives естественными союзами; "
+    "никогда не используй slash notation. Нельзя удалять центральное отношение или predicate ради лимита. "
+    "Верни строго JSON: "
+    '{"results":[{"index":1,"decision":"candidate|unresolved","candidate":"текст"}]}. '
+    "candidate должен быть естественным и не длиннее max_chars."
+)
+VERIFIER_PROMPT = SEMANTIC_CONTRACT + (
+    " Ты слепой финальный проверяющий. Оцени только original, полный context и candidate. "
+    "Не считай естественные в соседнем контексте фрагменты ошибкой и не требуй опущенных деталей, если "
+    "центральный смысл сохранён. required_checks перечисляет обязательные риски именно этой цели; явно "
+    "оцени каждый ровно один раз. Для каждой цели верни строго JSON: "
+    '{"results":[{"index":1,"verdict":"pass|fail|uncertain","issues":[],"required_checks":'
+    '[{"issue":"alternative","verdict":"pass|fail"}]}]}. '
+    "pass требует пустой issues; fail/uncertain — непустой список только из фиксированных issue codes: "
+    + ",".join(sorted(ISSUE_CODES)) + ". Все required_checks должны быть pass для общего pass."
+)
+COMPACTION_PROMPT = SEMANTIC_CONTRACT + (
+    " Ты выполняешь единственную точечную попытку уплотнения отклонённого editor candidate. Сократи его "
+    "ровно настолько, насколько нужно для max_chars, сохранив все required_issues и смысловые anchors. "
+    "Не возвращай исходный lossy candidate. Верни строго JSON в editor schema: "
+    '{"results":[{"index":1,"decision":"candidate|unresolved","candidate":"текст"}]}.'
+)
+SYSTEM_PROMPT = CRITIC_PROMPT
+
+
+@dataclass(frozen=True)
+class ReviewTarget:
+    position: int
+    index: int
+    original_text: str
+    shortened_text: str
+    max_chars: int
+    effective_duration_sec: float
+    compression_percent: float
+    min_words: int
+    requires_shortening: bool
+
+
+def _indexed(items: Sequence[Dict[str, Any]], label: str) -> Dict[int, Dict[str, Any]]:
+    result: Dict[int, Dict[str, Any]] = {}
+    for item in items:
+        index = item.get("index")
+        if not isinstance(index, int):
+            raise ValueError(f"{label}: missing_or_invalid_index")
+        if index in result:
+            raise ValueError(f"{label}: duplicate_index:{index}")
+        result[index] = item
+    return result
+
+
+def select_changed_targets(original: List[Dict[str, Any]], shortened: List[Dict[str, Any]],
+                           avg_chars_per_sec: float = 13.0, target_ratio: float = 1.5,
+                           min_words: int = 3) -> List[ReviewTarget]:
+    """Select changed union remaining-critical, once and in target order."""
+    originals, current = _indexed(original, "original"), _indexed(shortened, "shortened")
+    if set(originals) != set(current):
+        raise ValueError(f"subtitle index sets differ: {sorted(set(originals) ^ set(current))}")
+    targets: List[ReviewTarget] = []
+    for position, item in enumerate(shortened):
+        index = int(item["index"])
+        old, now = join_text_lines(originals[index].get("text", "")).strip(), join_text_lines(item.get("text", "")).strip()
+        analysis = item.get("analysis", {})
+        ratio = analysis.get("extended_mismatch_ratio")
+        ratio = ratio if isinstance(ratio, (int, float)) else analysis.get("mismatch_ratio")
+        critical = bool(analysis.get("is_checked") and isinstance(ratio, (int, float)) and ratio > target_ratio)
+        if old == now and not critical:
+            continue
+        budget_source = item if any(isinstance(analysis.get(k), (int, float)) and analysis[k] > 0
+                                    for k in ("effective_duration_sec", "available_duration_sec", "duration_sec")) else originals[index]
+        budget = calculate_budget(budget_source, target_ratio, avg_chars_per_sec)
+        targets.append(ReviewTarget(position, index, old, now, budget.max_chars, budget.effective_duration_sec,
+                                    round(max(0.0, 100 * (1 - len(now) / max(1, len(old)))), 1),
+                                    1 if len(old.split()) <= 1 else min(2, target_min_words(old, min_words)),
+                                    critical))
+    return targets
+
+
+def route_targets(targets: Sequence[ReviewTarget], mode: ThinkingMode,
+                  high_risk_threshold: float) -> Dict[Optional[str], List[ReviewTarget]]:
+    """Compatibility helper; quality workflow itself uses fixed stage routing."""
+    if mode != "auto":
+        return {None if mode == "disabled" else mode: list(targets)}
+    return {None: [t for t in targets if not t.requires_shortening and t.compression_percent < high_risk_threshold],
+            "high": [t for t in targets if t.requires_shortening or t.compression_percent >= high_risk_threshold]}
+
+
+def review_validation_error(target: ReviewTarget, candidate: str, max_chars: Optional[int] = None) -> Optional[str]:
+    text, limit = candidate.strip(), target.max_chars if max_chars is None else max_chars
+    if not text:
+        return "missing"
+    if len(text) > limit:
+        return f"too_long:{len(text)}>{limit}"
+    if "/" in text and "/" not in target.original_text:
+        return "slash_added"
+    numbers = set(re.findall(r"\d+(?:[.,]\d+)?", target.original_text))
+    if numbers - set(re.findall(r"\d+(?:[.,]\d+)?", text)):
+        return "numbers_missing:" + ",".join(sorted(numbers - set(re.findall(r"\d+(?:[.,]\d+)?", text))))
+    negative_markers = ("не", "нет", "никогда", "нельзя")
+    original_is_negative = any(
+        re.search(rf"\b{marker}\b", target.original_text, re.I)
+        for marker in negative_markers
+    )
+    candidate_is_negative = any(
+        re.search(rf"\b{marker}\b", text, re.I)
+        for marker in negative_markers
+    )
+    if original_is_negative and not candidate_is_negative:
+        return "negations_missing"
+    return None
+
+
+def semantic_risk_issues(original: str, candidate: str) -> List[str]:
+    """Return conservative semantic-loss hints for editor routing, never rejection."""
+    source = original.lower().replace("ё", "е")
+    result = candidate.lower().replace("ё", "е")
+    hints: List[str] = []
+
+    def lost_any(phrases: Sequence[str]) -> bool:
+        return any(phrase in source and phrase not in result for phrase in phrases)
+
+    if lost_any(("сегодня", "потом", "все время", "всё время", "сейчас", "сначала",
+                 "наконец", "вчера", "завтра", "теперь")):
+        hints.append("time")
+    if lost_any(("конечно", "по-моему", "по моему", "пожалуй", "может быть",
+                 "возможно", "вероятно")):
+        hints.append("modality")
+    if lost_any(("потому что", "так как", "поэтому", "из-за", "из за", "чтобы",
+                 "хотя", "несмотря на")):
+        hints.append("causality")
+    if lost_any(("столько", "сколько", "как будто", "чем", "по сравнению", "а не")):
+        hints.append("comparison")
+    if len(re.findall(r"\bили\b", result)) < len(re.findall(r"\bили\b", source)):
+        hints.append("alternative")
+    reference_phrases = ("по ним", "у нас", "у меня", "с нами", "с ним", "с ней",
+                         "для них", "от него", "от нее", "к нему", "к ней")
+    if lost_any(reference_phrases):
+        hints.append("reference")
+    demonstratives = re.findall(
+        r"\b(?:этот|эта|это|эти|этого|этой|этому|этим|этом)\s+[а-я-]+",
+        source,
+    )
+    if any(phrase not in result for phrase in demonstratives):
+        hints.append("reference")
+    return list(dict.fromkeys(hints))
+
+
+def build_context(original: List[Dict[str, Any]], items: List[Dict[str, Any]], targets: Sequence[ReviewTarget],
+                  window: int, context_source: Optional[List[Dict[str, Any]]] = None) -> str:
+    source = context_source or original
+    positions = {int(item["index"]): pos for pos, item in enumerate(source)}
+    current = {int(item["index"]): join_text_lines(item.get("text", "")) for item in items}
+    wanted: set[int] = set()
+    for target in targets:
+        pos = positions[target.index]
+        wanted.update(range(max(0, pos - window), min(len(source), pos + window + 1)))
+    payload = [{"index": source[pos]["index"], "original_text": join_text_lines(source[pos].get("text", "")),
+                "current_text": current.get(int(source[pos]["index"]), join_text_lines(source[pos].get("text", "")))}
+               for pos in sorted(wanted)]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def build_prompt(original: List[Dict[str, Any]], items: List[Dict[str, Any]],
+                 targets: Sequence[ReviewTarget], window: int, retry: bool = False,
+                 retry_errors: Optional[Dict[int, str]] = None) -> str:
+    """Compatibility prompt builder used by token-aware callers."""
+    payload = [{"index": t.index, "original_text": t.original_text, "shortened_text": t.shortened_text,
+                "max_chars": t.max_chars, "min_words": t.min_words} for t in targets]
+    prompt = "Контекст:" + build_context(original, items, targets, window) + "\nЦели:" + json.dumps(payload, ensure_ascii=False)
+    if retry:
+        prompt += "\nОшибки:" + json.dumps({str(t.index): (retry_errors or {}).get(t.index, "invalid_result") for t in targets}, ensure_ascii=False)
+    return prompt
+
+
+def estimate_input_tokens(system_prompt: str, user_prompt: str) -> int:
+    return len(system_prompt) + len(user_prompt) + 2_000
+
+
+def split_batches(original: List[Dict[str, Any]], items: List[Dict[str, Any]],
+                  targets: Sequence[ReviewTarget], batch_size: int, max_input_tokens: int,
+                  window: int) -> tuple[List[List[ReviewTarget]], List[ReviewTarget]]:
+    batches: List[List[ReviewTarget]] = []
+    oversized: List[ReviewTarget] = []
+    pending = _chunks(targets, batch_size)
+    while pending:
+        group = pending.pop(0)
+        if estimate_input_tokens(SYSTEM_PROMPT, build_prompt(original, items, group, window)) <= max_input_tokens:
+            batches.append(group)
+        elif len(group) == 1:
+            oversized.extend(group)
+        else:
+            middle = len(group) // 2
+            pending[0:0] = [group[:middle], group[middle:]]
+    return batches, oversized
+
+
+def parse_assessments(response: Optional[str], expected: set[int]) -> Dict[int, tuple[str, List[str]]]:
+    """Strictly parse complete, unique critic/verifier results."""
+    try:
+        data = json.loads(response or "")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    values = data.get("results") if isinstance(data, dict) and set(data) == {"results"} else None
+    if not isinstance(values, list):
+        return {}
+    parsed: Dict[int, tuple[str, List[str]]] = {}
+    for value in values:
+        if not isinstance(value, dict) or set(value) != {"index", "verdict", "issues"}:
+            return {}
+        index, verdict, issues = value["index"], value["verdict"], value["issues"]
+        if not isinstance(index, int) or index not in expected or index in parsed or verdict not in {"pass", "fail", "uncertain"}:
+            return {}
+        if not isinstance(issues, list) or any(not isinstance(x, str) or x not in ISSUE_CODES for x in issues):
+            return {}
+        if (verdict == "pass") != (not issues):
+            return {}
+        parsed[index] = (verdict, issues)
+    return parsed if set(parsed) == expected else {}
+
+
+def parse_verifications(
+    response: Optional[str], required: Dict[int, List[str]]
+) -> Dict[int, tuple[str, List[str], Dict[str, str]]]:
+    """Strictly parse verifier results and require one explicit check per known risk."""
+    try:
+        data = json.loads(response or "")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    values = data.get("results") if isinstance(data, dict) and set(data) == {"results"} else None
+    if not isinstance(values, list):
+        return {}
+    parsed: Dict[int, tuple[str, List[str], Dict[str, str]]] = {}
+    for value in values:
+        if not isinstance(value, dict) or set(value) != {"index", "verdict", "issues", "required_checks"}:
+            return {}
+        index = value["index"]
+        if not isinstance(index, int) or index not in required or index in parsed:
+            return {}
+        base = parse_assessments(json.dumps({"results": [{
+            "index": index, "verdict": value["verdict"], "issues": value["issues"]
+        }]}), {index})
+        checks_raw = value["required_checks"]
+        if not base or not isinstance(checks_raw, list):
+            return {}
+        checks: Dict[str, str] = {}
+        for check in checks_raw:
+            if (not isinstance(check, dict) or set(check) != {"issue", "verdict"}
+                    or check.get("issue") not in required[index]
+                    or check["issue"] in checks or check.get("verdict") not in {"pass", "fail"}):
+                return {}
+            checks[check["issue"]] = check["verdict"]
+        if set(checks) != set(required[index]):
+            return {}
+        verdict, issues = base[index]
+        if verdict == "pass" and any(result != "pass" for result in checks.values()):
+            return {}
+        parsed[index] = (verdict, issues, checks)
+    return parsed if set(parsed) == set(required) else {}
+
+
+def _parse_editor(response: Optional[str], expected: set[int]) -> Dict[int, tuple[str, str]]:
+    try:
+        data = json.loads(response or "")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    values = data.get("results") if isinstance(data, dict) and set(data) == {"results"} else None
+    result: Dict[int, tuple[str, str]] = {}
+    if not isinstance(values, list):
+        return result
+    for value in values:
+        if (not isinstance(value, dict) or set(value) != {"index", "decision", "candidate"}
+                or value.get("index") not in expected or value["index"] in result
+                or value.get("decision") not in {"candidate", "unresolved"} or not isinstance(value.get("candidate"), str)):
+            return {}
+        result[value["index"]] = (value["decision"], value["candidate"].strip())
+    return result if set(result) == expected else {}
+
+
+def pro_usage_summary(total: Dict[str, int]) -> Dict[str, Any]:
+    cost = (total.get("prompt_cache_miss_tokens", 0) * .435 + total.get("prompt_cache_hit_tokens", 0) * .003625
+            + total.get("completion_tokens", 0) * .87) / 1_000_000
+    return {
+        **total,
+        "estimated_cost_usd": round(cost, 8),
+        "pricing_model": DEFAULT_MODEL,
+        "pricing_usd_per_million": {
+            "input_cache_miss": 0.435,
+            "input_cache_hit": 0.003625,
+            "output": 0.87,
+        },
+    }
+
+
+def review_max_tokens(targets: Sequence[ReviewTarget], effort: Optional[str]) -> int:
+    base = dynamic_max_tokens([target.max_chars for target in targets])
+    return max(base, 8192) if effort == "high" else max(base, 16384) if effort == "max" else base
+
+
+def _chunks(values: Sequence[ReviewTarget], size: int) -> List[List[ReviewTarget]]:
+    return [list(values[i:i + max(1, size)]) for i in range(0, len(values), max(1, size))]
+
+
+def _split_stage_batches(
+    targets: Sequence[ReviewTarget],
+    batch_size: int,
+    system_prompt: str,
+    prompt_factory: Any,
+    max_input_tokens: int,
+) -> tuple[List[List[ReviewTarget]], List[ReviewTarget]]:
+    """Split using the exact stage prompt, reporting oversized single targets."""
+    batches: List[List[ReviewTarget]] = []
+    oversized: List[ReviewTarget] = []
+    pending = _chunks(targets, batch_size)
+    while pending:
+        group = pending.pop(0)
+        if estimate_input_tokens(system_prompt, prompt_factory(group)) <= max_input_tokens:
+            batches.append(group)
+        elif len(group) == 1:
+            oversized.extend(group)
+        else:
+            middle = len(group) // 2
+            pending[0:0] = [group[:middle], group[middle:]]
+    return batches, oversized
+
+
+async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[str, Any]], api_key: str,
+                           model: str = DEFAULT_MODEL, thinking_mode: ThinkingMode = "auto",
+                           high_risk_threshold: float = 35.0, context_window: int = 3,
+                           batch_size: int = DEFAULT_BATCH_SIZE, max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
+                           min_words: int = 3, avg_chars_per_sec: float = 13.0, target_ratio: float = 1.5,
+                           base_url: str = "https://api.deepseek.com", client: Any = None,
+                           context_source: Optional[List[Dict[str, Any]]] = None,
+                           concurrency: int = 3) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    """Run critic, conditional editor, blind verifier, and one bounded repair."""
+    del thinking_mode, high_risk_threshold
+    if context_source is not None:
+        validate_context_source(original, context_source)
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
+    targets = select_changed_targets(original, shortened, avg_chars_per_sec, target_ratio, min_words)
+    risk_hints = {
+        target.index: semantic_risk_issues(target.original_text, target.shortened_text)
+        for target in targets
+    }
+    output, usage = copy.deepcopy(shortened), {}
+    stage_names = ("critic", "editor", "compaction", "verifier", "repair", "reverify")
+    stage_usage: Dict[str, Dict[str, int]] = {name: {} for name in stage_names}
+    stage_requests: Dict[str, int] = {name: 0 for name in stage_names}
+    lineage = {t.index: {"flash": t.shortened_text, "editor": None, "compaction": None,
+                          "repair": None, "rejected": [], "final": t.shortened_text} for t in targets}
+    assessments: Dict[str, Dict[int, tuple[str, List[str]]]] = {"critic": {}, "verifier": {}}
+    verifier_history: Dict[int, List[Dict[str, Any]]] = {target.index: [] for target in targets}
+    verifier_checks: Dict[int, Dict[str, str]] = {target.index: {} for target in targets}
+    stage_errors: Dict[str, Dict[int, str]] = {name: {} for name in stage_names}
+    decisions: Dict[str, Dict[int, Optional[str]]] = {"editor": {}, "compaction": {}, "repair": {}}
+    valid_recovery: set[int] = set()
+    blocked: set[int] = set()
+    owns_client = client is None
+    if owns_client:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=60.0, max_retries=0
+        )
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def call(stage: str, system: str, prompt: str, effort: Optional[str], group: Sequence[ReviewTarget]) -> Optional[str]:
+        stage_requests[stage] += 1
+        request_number = stage_requests[stage]
+        indices = [target.index for target in group]
+        print(f"Pro {stage} request {request_number} start: {indices}", flush=True)
+        response = await shorten_via_deepseek_async(model, system, prompt, api_key, base_url,
+                                                    semaphore=semaphore,
+                                                    reasoning_effort=effort, max_tokens=review_max_tokens(group, effort),
+                                                    client=client, usage_total=stage_usage[stage], api_retries=2)
+        status = "completed" if response is not None else "error"
+        print(f"Pro {stage} request {request_number} {status}: {indices}", flush=True)
+        return response
+
+    def context(group: Sequence[ReviewTarget], current_items: List[Dict[str, Any]]) -> str:
+        return build_context(original, current_items, group, context_window, context_source)
+
+    try:
+        def critic_prompt(group: Sequence[ReviewTarget]) -> str:
+            payload = [{"index": t.index, "original": t.original_text, "candidate": t.shortened_text,
+                        "max_chars": t.max_chars} for t in group]
+            return "Context:" + context(group, shortened) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
+
+        critic_batches, oversized = _split_stage_batches(
+            targets, batch_size, CRITIC_PROMPT, critic_prompt, max_input_tokens
+        )
+        for target in oversized:
+            assessments["critic"][target.index] = ("uncertain", ["uncertain"])
+            stage_errors["critic"][target.index] = "input_too_large"
+            blocked.add(target.index)
+        critic_responses = await asyncio.gather(*(
+            call("critic", CRITIC_PROMPT, critic_prompt(group), None, group)
+            for group in critic_batches
+        ))
+        for group, response in zip(critic_batches, critic_responses):
+            parsed = parse_assessments(response, {t.index for t in group})
+            for t in group:
+                assessments["critic"][t.index] = parsed.get(t.index, ("uncertain", ["uncertain"]))
+                if not parsed:
+                    stage_errors["critic"][t.index] = (
+                        "api_failure" if response is None else "parse_failure"
+                    )
+
+        editor_targets = [
+            target for target in targets
+            if (target.requires_shortening
+                or assessments["critic"][target.index][0] != "pass"
+                or review_validation_error(target, target.shortened_text) is not None
+                or risk_hints[target.index])
+        ]
+        for target in editor_targets:
+            initial_error = review_validation_error(target, target.shortened_text)
+            if initial_error is not None:
+                stage_errors["editor"][target.index] = f"formal_error:{initial_error}"
+        editor_targets = [t for t in editor_targets if t.index not in blocked]
+
+        def normalized_editor_issues(target: ReviewTarget) -> List[str]:
+            issues = list(assessments["critic"][target.index][1]) + risk_hints[target.index]
+            formal_error = review_validation_error(target, target.shortened_text)
+            if (target.requires_shortening or
+                    (formal_error is not None and formal_error.startswith("too_long:"))):
+                issues.append("budget")
+            return list(dict.fromkeys(issues))
+
+        def editor_prompt(group: Sequence[ReviewTarget]) -> str:
+            payload = [{"index": t.index, "original": t.original_text, "candidate": lineage[t.index]["final"],
+                        "issues": normalized_editor_issues(t), "max_chars": t.max_chars,
+                        "requires_shortening": t.requires_shortening} for t in group]
+            return "Context:" + context(group, output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
+
+        editor_batches, oversized = _split_stage_batches(
+            editor_targets, min(2, batch_size), EDITOR_PROMPT, editor_prompt, max_input_tokens
+        )
+        for target in oversized:
+            stage_errors["editor"][target.index] = "input_too_large"
+            decisions["editor"][target.index] = None
+            blocked.add(target.index)
+        editor_prompts = [editor_prompt(group) for group in editor_batches]
+        editor_responses = await asyncio.gather(*(
+            call("editor", EDITOR_PROMPT, prompt, "high", group)
+            for group, prompt in zip(editor_batches, editor_prompts)
+        ))
+        for group, response in zip(editor_batches, editor_responses):
+            parsed = _parse_editor(response, {t.index for t in group})
+            for t in group:
+                decision, candidate = parsed.get(t.index, ("unresolved", ""))
+                decisions["editor"][t.index] = decision if parsed else None
+                error = review_validation_error(t, candidate) if decision == "candidate" else None
+                if not parsed:
+                    stage_errors["editor"][t.index] = (
+                        "api_failure" if response is None else "parse_failure"
+                    )
+                elif decision == "unresolved":
+                    stage_errors["editor"][t.index] = "unresolved"
+                elif error is not None:
+                    stage_errors["editor"][t.index] = f"formal_error:{error}"
+                    lineage[t.index]["rejected"].append({"stage": "editor", "candidate": candidate,
+                                                         "reason": error})
+                else:
+                    stage_errors["editor"].pop(t.index, None)
+                    lineage[t.index]["editor"] = candidate
+                    lineage[t.index]["final"] = candidate
+                    output[t.position]["text"] = [candidate] if isinstance(output[t.position].get("text"), list) else candidate
+                    valid_recovery.add(t.index)
+
+        compaction_targets = [
+            t for t in editor_targets
+            if stage_errors["editor"].get(t.index, "").startswith("formal_error:too_long:")
+        ]
+
+        def compaction_prompt(target: ReviewTarget) -> str:
+            rejected = lineage[target.index]["rejected"][-1]["candidate"]
+            payload = [{"index": target.index, "original": target.original_text,
+                        "context": json.loads(context([target], output)),
+                        "rejected_candidate": rejected, "current_length": len(rejected),
+                        "max_chars": target.max_chars, "excess": len(rejected) - target.max_chars,
+                        "required_issues": normalized_editor_issues(target)}]
+            return "Targets:" + json.dumps(payload, ensure_ascii=False)
+
+        compaction_responses = await asyncio.gather(*(
+            call("compaction", COMPACTION_PROMPT, compaction_prompt(target), "high", [target])
+            for target in compaction_targets
+        ))
+        for target, response in zip(compaction_targets, compaction_responses):
+            parsed = _parse_editor(response, {target.index})
+            decision, candidate = parsed.get(target.index, ("unresolved", ""))
+            decisions["compaction"][target.index] = decision if parsed else None
+            error = review_validation_error(target, candidate) if decision == "candidate" else None
+            if not parsed:
+                stage_errors["compaction"][target.index] = "api_failure" if response is None else "parse_failure"
+            elif decision == "unresolved":
+                stage_errors["compaction"][target.index] = "unresolved"
+            elif error is not None:
+                stage_errors["compaction"][target.index] = f"formal_error:{error}"
+                lineage[target.index]["rejected"].append({"stage": "compaction", "candidate": candidate,
+                                                           "reason": error})
+            else:
+                lineage[target.index]["compaction"] = candidate
+                lineage[target.index]["final"] = candidate
+                output[target.position]["text"] = ([candidate] if isinstance(output[target.position].get("text"), list)
+                                                    else candidate)
+                valid_recovery.add(target.index)
+
+        async def verify(group: Sequence[ReviewTarget], stage: str = "verifier") -> None:
+            # Deliberately contains no lineage, critic result, source label, or editor history.
+            required = {t.index: list(dict.fromkeys(risk_hints[t.index] + assessments["critic"][t.index][1]))
+                        for t in group}
+            payload = [{"index": t.index, "original": t.original_text,
+                        "candidate": lineage[t.index]["final"], "max_chars": t.max_chars,
+                        "required_checks": required[t.index]} for t in group]
+            response = await call(stage, VERIFIER_PROMPT, "Context:" + context(group, output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False), None, group)
+            parsed = parse_verifications(response, required)
+            for t in group:
+                parsed_value = parsed.get(t.index)
+                assessments["verifier"][t.index] = (parsed_value[0], parsed_value[1]) if parsed_value else ("uncertain", ["uncertain"])
+                verifier_checks[t.index] = parsed_value[2] if parsed_value else {}
+                if not parsed:
+                    error = "api_failure" if response is None else "parse_failure"
+                    stage_errors[stage][t.index] = error
+                elif parsed[t.index][0] != "pass":
+                    error = parsed[t.index][0]
+                    stage_errors[stage][t.index] = error
+                else:
+                    error = None
+                verdict, issues = assessments["verifier"][t.index]
+                verifier_history[t.index].append({
+                    "stage": stage,
+                    "verdict": verdict,
+                    "issues": issues,
+                    "required_checks": verifier_checks[t.index],
+                    "error": error,
+                })
+
+        publishable = [t for t in targets if t.index not in blocked and
+                       review_validation_error(t, str(lineage[t.index]["final"])) is None]
+
+        def verifier_prompt(group: Sequence[ReviewTarget]) -> str:
+            required = {t.index: list(dict.fromkeys(risk_hints[t.index] + assessments["critic"][t.index][1]))
+                        for t in group}
+            payload = [{"index": t.index, "original": t.original_text,
+                        "candidate": lineage[t.index]["final"], "max_chars": t.max_chars,
+                        "required_checks": required[t.index]} for t in group]
+            return "Context:" + context(group, output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
+
+        verifier_batches, oversized = _split_stage_batches(
+            publishable, batch_size, VERIFIER_PROMPT, verifier_prompt, max_input_tokens
+        )
+        for target in oversized:
+            stage_errors["verifier"][target.index] = "input_too_large"
+            blocked.add(target.index)
+        await asyncio.gather(*(verify(group) for group in verifier_batches))
+        failed = [
+            t for t in targets
+            if (t.index not in blocked
+                and (assessments["verifier"].get(t.index, ("uncertain", []))[0] != "pass"
+                     or ((risk_hints[t.index] or assessments["critic"][t.index][0] != "pass")
+                         and t.index not in valid_recovery)))
+        ]
+        repair_requests: List[tuple[ReviewTarget, str]] = []
+        for t in failed:
+            issues = list(assessments["verifier"].get(
+                t.index, ("uncertain", ["uncertain"])
+            )[1]) + risk_hints[t.index] + assessments["critic"][t.index][1]
+            issues = list(dict.fromkeys(issues))
+            payload = [{"index": t.index, "original": t.original_text, "candidate": lineage[t.index]["final"],
+                        "issues": issues, "max_chars": t.max_chars,
+                        "requires_shortening": t.requires_shortening}]
+            repair_requests.append((t, "Context:" + context([t], output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)))
+        repair_responses = await asyncio.gather(*(
+            call("repair", EDITOR_PROMPT, prompt, "high", [target])
+            for target, prompt in repair_requests
+        ))
+        repaired: List[ReviewTarget] = []
+        repair_snapshots: Dict[int, Dict[str, Any]] = {}
+        for (t, _), response in zip(repair_requests, repair_responses):
+            parsed = _parse_editor(response, {t.index})
+            decision, candidate = parsed.get(t.index, ("unresolved", ""))
+            decisions["repair"][t.index] = decision if parsed else None
+            error = review_validation_error(t, candidate) if decision == "candidate" else None
+            if not parsed:
+                stage_errors["repair"][t.index] = (
+                    "api_failure" if response is None else "parse_failure"
+                )
+            elif decision == "unresolved":
+                stage_errors["repair"][t.index] = "unresolved"
+            elif error is not None:
+                stage_errors["repair"][t.index] = f"formal_error:{error}"
+                lineage[t.index]["rejected"].append({"stage": "repair", "candidate": candidate,
+                                                        "reason": error})
+            else:
+                repair_snapshots[t.index] = {
+                    "final": lineage[t.index]["final"],
+                    "output_text": copy.deepcopy(output[t.position].get("text")),
+                    "assessment": assessments["verifier"].get(t.index, ("uncertain", ["uncertain"])),
+                    "checks": dict(verifier_checks[t.index]),
+                    "valid_recovery": t.index in valid_recovery,
+                }
+                lineage[t.index]["repair"], lineage[t.index]["final"] = candidate, candidate
+                output[t.position]["text"] = [candidate] if isinstance(output[t.position].get("text"), list) else candidate
+                repaired.append(t)
+        await asyncio.gather(*(verify([target], "reverify") for target in repaired))
+        for target in repaired:
+            required = list(dict.fromkeys(
+                risk_hints[target.index] + assessments["critic"][target.index][1]
+            ))
+            verdict = assessments["verifier"][target.index][0]
+            checks = verifier_checks[target.index]
+            formal_error = review_validation_error(target, str(lineage[target.index]["final"]))
+            reverify_passed = (
+                verdict == "pass"
+                and set(checks) == set(required)
+                and all(value == "pass" for value in checks.values())
+                and formal_error is None
+            )
+            if reverify_passed:
+                valid_recovery.add(target.index)
+                continue
+            snapshot = repair_snapshots[target.index]
+            attempted = str(lineage[target.index]["repair"])
+            history_error = verifier_history[target.index][-1]["error"]
+            reason = str(history_error or (f"formal_error:{formal_error}" if formal_error else f"verdict:{verdict}"))
+            lineage[target.index]["rejected"].append({
+                "stage": "reverify", "candidate": attempted, "reason": reason,
+            })
+            lineage[target.index]["final"] = snapshot["final"]
+            output[target.position]["text"] = snapshot["output_text"]
+            assessments["verifier"][target.index] = snapshot["assessment"]
+            verifier_checks[target.index] = snapshot["checks"]
+            if not snapshot["valid_recovery"]:
+                valid_recovery.discard(target.index)
+    finally:
+        if owns_client:
+            await client.close()
+
+    unresolved: List[int] = []
+    outcomes: List[Dict[str, Any]] = []
+    for target in targets:
+        final = str(lineage[target.index]["final"])
+        verdict, issues = assessments["verifier"].get(target.index, ("uncertain", ["uncertain"]))
+        required = list(dict.fromkeys(risk_hints[target.index] + assessments["critic"][target.index][1]))
+        hard_gate_needs_recovery = bool(required) or assessments["critic"][target.index][0] != "pass"
+        checks_pass = set(verifier_checks[target.index]) == set(required) and all(
+            value == "pass" for value in verifier_checks[target.index].values()
+        )
+        verified = (verdict == "pass" and checks_pass and review_validation_error(target, final) is None
+                    and (not hard_gate_needs_recovery or target.index in valid_recovery))
+        if not verified:
+            unresolved.append(target.index)
+        output[target.position]["text"] = [final] if isinstance(output[target.position].get("text"), list) else final
+        lineage[target.index]["final"] = final
+        outcomes.append({"index": target.index, "outcome": "verified" if verified else "unresolved",
+                         "critic_verdict": assessments["critic"][target.index][0],
+                         "critic_issues": assessments["critic"][target.index][1],
+                         "risk_hints": risk_hints[target.index],
+                         "verifier_verdict": verdict, "verifier_issues": issues,
+                         "verifier_required_checks": verifier_checks[target.index],
+                         "verifier_history": verifier_history[target.index],
+                         "editor_decision": decisions["editor"].get(target.index),
+                         "compaction_decision": decisions["compaction"].get(target.index),
+                         "repair_decision": decisions["repair"].get(target.index),
+                         "stage_errors": {stage: errors[target.index] for stage, errors in stage_errors.items()
+                                          if target.index in errors},
+                         "lineage": lineage[target.index]})
+    for totals in stage_usage.values():
+        for key, value in totals.items():
+            usage[key] = usage.get(key, 0) + value
+    report = {"total": len(shortened), "selected": len(targets), "selected_indices": [t.index for t in targets],
+              "automated_verified_count": len(targets) - len(unresolved),
+              "unresolved_indices": unresolved, "fallback": unresolved, "outcomes": outcomes,
+              "risk_hints": {str(index): hints for index, hints in risk_hints.items() if hints},
+              "stages": {name: {"usage": values, "requests": stage_requests[name]}
+                         for name, values in stage_usage.items()},
+              "retries": {"targeted_compactions": stage_requests["compaction"],
+                          "bounded_repairs": stage_requests["repair"],
+                          "fresh_reverifications": stage_requests["reverify"]},
+              "context_mode": "full" if context_source is not None else "sparse"}
+    print(
+        f"Pro review completed: {len(targets) - len(unresolved)}/{len(targets)} verified, "
+        f"{len(unresolved)} unresolved",
+        flush=True,
+    )
+    return output, report, {**pro_usage_summary(usage), "stages": {k: pro_usage_summary(v) for k, v in stage_usage.items()}}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the standalone Pro review CLI parser."""
+    parser = argparse.ArgumentParser(description="Review shortened subtitles with separated DeepSeek Pro roles.")
+    parser.add_argument("original")
+    parser.add_argument("shortened")
+    parser.add_argument("--context-source")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--thinking-mode",
+        choices=["disabled", "high", "max", "auto"],
+        default="auto",
+        help="Deprecated compatibility option; fixed stage routing is always enforced",
+    )
+    parser.add_argument("--context-window", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--concurrency", type=int, default=3)
+    parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
+    parser.add_argument("--min-words", type=int, default=3)
+    parser.add_argument("--avg-chars-per-sec", type=float, default=13.0)
+    parser.add_argument("--target-ratio", type=float, default=1.5)
+    parser.add_argument("--output-dir", "-o", default="output/reviewed")
+    parser.add_argument("--api-key")
+    parser.add_argument("--base-url", default="https://api.deepseek.com")
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    api_key = args.api_key or load_api_key("DEEPSEEK_API_KEY")
+    if not api_key:
+        print("ERROR: DeepSeek API key not found.", file=sys.stderr)
+        return 1
+    original_path, shortened_path = Path(args.original), Path(args.shortened)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output, report, usage = asyncio.run(review_subtitles(load_json(original_path), load_json(shortened_path), api_key,
+            args.model, args.thinking_mode, 35.0, args.context_window, args.batch_size, args.max_input_tokens,
+            args.min_words, args.avg_chars_per_sec, args.target_ratio, args.base_url,
+            context_source=load_json(Path(args.context_source)) if args.context_source else None,
+            concurrency=args.concurrency))
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    stem = shortened_path.stem
+    save_json(output_dir / f"{stem}_reviewed.json", output)
+    report["context_source"] = str(Path(args.context_source)) if args.context_source else None
+    (output_dir / f"{stem}_review.report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / f"{stem}_review.usage.json").write_text(json.dumps(usage, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

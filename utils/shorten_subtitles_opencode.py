@@ -6,6 +6,7 @@ Usage:
   uv run -m utils.shorten_subtitles_opencode input.json --model deepseek-v4-flash
   uv run -m utils.shorten_subtitles_opencode input.json --model opencode-go/deepseek-v4-flash --concurrency 3
   uv run -m utils.shorten_subtitles_opencode input.json --server-url http://localhost:4096
+  uv run -m utils.shorten_subtitles_opencode input.json --batch-size 10
 """
 
 from __future__ import annotations
@@ -24,18 +25,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from utils.shorten_helpers import (
+    DEFAULT_BATCH_SIZE,
     DEFAULT_CONCURRENCY,
     DEFAULT_MODEL,
-    SYSTEM_PROMPT,
+    MAX_BATCH_SIZE,
     ShortenFunc,
     ShortenResult,
     add_common_args,
-    build_context,
-    build_user_prompt,
+    build_batch_context,
+    build_batch_user_prompt,
+    calculate_budget,
+    get_system_prompt,
     load_json,
-    parse_shortened_response,
+    parse_batch_response,
     run_iterative_shortening,
+    target_min_words,
     validate_shortened_text,
+    validation_error,
 )
 from utils.analyze_text import join_text_lines
 
@@ -88,7 +94,6 @@ class OpenCodeServer:
             env=_make_server_env(),
         )
 
-        # Wait for server to become healthy
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
@@ -174,7 +179,6 @@ def _parse_model_string(model: str) -> Dict[str, str]:
         provider_id, model_id = model.split("/", 1)
         return {"providerID": provider_id, "modelID": model_id}
 
-    # Infer provider from model name
     if model.startswith("deepseek"):
         return {"providerID": "opencode-go", "modelID": model}
     return {"providerID": "opencode-go", "modelID": model}
@@ -242,7 +246,7 @@ async def _http_delete(
                 url, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
-                pass  # Ignore errors on cleanup
+                pass
     except Exception:
         pass
 
@@ -295,13 +299,11 @@ async def send_prompt(
         print(f"  HTTP error: {e}", file=sys.stderr)
         return None
 
-    # Extract text from response parts
     parts = data.get("parts", [])
     text_parts = [p for p in parts if p.get("type") == "text"]
     if not text_parts:
         return None
 
-    # Concatenate all text parts
     return "".join(p.get("text", "") for p in text_parts).strip()
 
 
@@ -319,53 +321,92 @@ async def delete_session(
 # ---------------------------------------------------------------------------
 
 
-async def _shorten_one(
+async def _shorten_batch(
     base_url: str,
     items: List[Dict[str, Any]],
-    target_idx: int,
-    position: int,
-    total: int,
+    batch_indices: List[int],
+    batch_pos: int,
+    total_batches: int,
     model: str,
     context_window: int,
     min_words: int,
     system_prompt: str,
+    strategy: str,
+    avg_chars_per_sec: float,
+    target_ratio: float,
+    context_items: Optional[List[Dict[str, Any]]] = None,
     reasoning_effort: Optional[str] = None,
     auth_header: Optional[Dict[str, str]] = None,
-) -> ShortenResult:
-    """Shorten a single subtitle via opencode."""
-    item = items[target_idx]
-    original_text = join_text_lines(item.get("text", ""))
-    print(f"  [{position}/{total}] Subtitle #{item.get('index', target_idx+1)}: {original_text[:50]}...")
+) -> List[ShortenResult]:
+    """Shorten a batch of subtitles via opencode."""
+    sub_numbers = [items[idx].get("index", idx + 1) for idx in batch_indices]
+    print(
+        f"  [{batch_pos}/{total_batches}] Batch: "
+        f"#{', #'.join(str(n) for n in sub_numbers)}"
+    )
 
-    context = build_context(items, target_idx, context_window)
-    user_prompt = build_user_prompt(context, min_words)
+    batch_context = build_batch_context(items, batch_indices, context_window, context_items)
+    budgets = {idx: calculate_budget(items[idx], target_ratio, avg_chars_per_sec) for idx in batch_indices}
+    target_minimums = {
+        idx: target_min_words(join_text_lines(items[idx].get("text", "")), min_words)
+        for idx in batch_indices
+    }
+    targets = [
+        {
+            "index": items[idx].get("index", idx + 1),
+            **budgets[idx].__dict__,
+            "min_words": target_minimums[idx],
+        }
+        for idx in batch_indices
+    ]
+    user_prompt = build_batch_user_prompt(batch_context, min_words, strategy, targets)
 
-    # Create a dedicated session for this subtitle
-    session_id = await create_session(base_url, title=f"shorten-{target_idx}", auth_header=auth_header)
+    session_id = await create_session(
+        base_url,
+        title=f"shorten-batch-{batch_pos}",
+        auth_header=auth_header,
+    )
     try:
         response = await send_prompt(
             base_url, session_id, system_prompt, user_prompt,
             model, reasoning_effort, auth_header=auth_header,
         )
-        shortened = parse_shortened_response(response)
+        results_map = parse_batch_response(response, batch_indices, items)
 
-        if shortened and validate_shortened_text(original_text, shortened, min_words):
-            print(f"    -> Shortened: {shortened[:50]}...")
-            return ShortenResult(
-                index=target_idx,
-                original_text=original_text,
-                shortened_text=shortened,
-                success=True,
+        results: List[ShortenResult] = []
+        for idx in batch_indices:
+            original_text = join_text_lines(items[idx].get("text", ""))
+            shortened = results_map.get(idx)
+
+            error = validation_error(
+                original_text,
+                shortened or "",
+                target_minimums[idx],
+                budgets[idx].max_chars,
             )
-        else:
-            print(f"    -> Failed, keeping original")
-            return ShortenResult(
-                index=target_idx,
-                original_text=original_text,
-                shortened_text=original_text,
-                success=False,
-                error="Failed to get valid shortened text",
-            )
+            if error is None and shortened:
+                results.append(
+                    ShortenResult(
+                        index=idx,
+                        original_text=original_text,
+                        shortened_text=shortened,
+                        success=True,
+                    )
+                )
+            else:
+                results.append(
+                    ShortenResult(
+                        index=idx,
+                        original_text=original_text,
+                        shortened_text=original_text,
+                        success=False,
+                        error=error or "validation_failed",
+                    )
+                )
+
+        batch_success = sum(1 for r in results if r.success)
+        print(f"    -> {batch_success}/{len(results)} shortened")
+        return results
     finally:
         await delete_session(base_url, session_id, auth_header=auth_header)
 
@@ -379,23 +420,37 @@ async def shorten_subtitles_opencode(
     base_url: str,
     concurrency: int,
     reasoning_effort: Optional[str] = None,
+    strategy: str = "shorten",
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    avg_chars_per_sec: float = 13.0,
+    target_ratio: float = 1.0,
     auth_header: Optional[Dict[str, str]] = None,
+    context_items: Optional[List[Dict[str, Any]]] = None,
 ) -> List[ShortenResult]:
-    """Shorten subtitles in parallel via opencode HTTP API."""
-    system_prompt = SYSTEM_PROMPT.format(min_words=min_words)
+    """Shorten subtitles in parallel via opencode HTTP API with batching."""
+    system_prompt = get_system_prompt(strategy, min_words)
     semaphore = asyncio.Semaphore(concurrency)
+    batch_size = max(1, min(batch_size, MAX_BATCH_SIZE))
 
-    async def process_one(target_idx: int, position: int) -> ShortenResult:
+    batches = [
+        target_indices[i : i + batch_size]
+        for i in range(0, len(target_indices), batch_size)
+    ]
+    total_batches = len(batches)
+
+    async def process_batch(
+        batch_indices: List[int], batch_pos: int
+    ) -> List[ShortenResult]:
         async with semaphore:
-            return await _shorten_one(
-                base_url, items, target_idx, position, len(target_indices),
-                model, context_window, min_words, system_prompt,
-                reasoning_effort, auth_header=auth_header,
+            return await _shorten_batch(
+                base_url, items, batch_indices, batch_pos, total_batches,
+                model, context_window, min_words, system_prompt, strategy,
+                avg_chars_per_sec, target_ratio, context_items, reasoning_effort, auth_header=auth_header,
             )
 
-    tasks = [process_one(idx, i + 1) for i, idx in enumerate(target_indices)]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    tasks = [process_batch(batch, i + 1) for i, batch in enumerate(batches)]
+    batch_results = await asyncio.gather(*tasks)
+    return [r for batch in batch_results for r in batch]
 
 
 # ---------------------------------------------------------------------------
@@ -417,11 +472,20 @@ def make_opencode_shorten_func(
         context_window: int,
         min_words: int,
         reasoning_effort: Optional[str] = None,
+        strategy: str = "shorten",
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        avg_chars_per_sec: float = 13.0,
+        target_ratio: float = 1.0,
+        context_items: Optional[List[Dict[str, Any]]] = None,
     ) -> List[ShortenResult]:
-        return asyncio.run(shorten_subtitles_opencode(
-            items, target_indices, model, context_window, min_words,
-            base_url, concurrency, reasoning_effort, auth_header=auth_header,
-        ))
+        return asyncio.run(
+            shorten_subtitles_opencode(
+                items, target_indices, model, context_window, min_words,
+                base_url, concurrency, reasoning_effort, strategy,
+                batch_size, avg_chars_per_sec, target_ratio, auth_header=auth_header,
+                context_items=context_items,
+            )
+        )
 
     return _shorten
 
@@ -465,7 +529,6 @@ def main(argv: List[str] | None = None) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load input
     print(f"Loading: {input_path}")
     items = load_json(input_path)
     print(f"Total subtitles: {len(items)}")
@@ -473,7 +536,6 @@ def main(argv: List[str] | None = None) -> int:
     stem = input_path.stem
 
     if args.server_url:
-        # Use existing server — need auth header since server may have password
         base_url = args.server_url.rstrip("/")
         auth_header = _get_auth_header()
         print(f"Using existing server: {base_url}")
@@ -488,10 +550,13 @@ def main(argv: List[str] | None = None) -> int:
             min_words=args.min_words,
             output_dir=output_dir,
             stem=stem,
-            reasoning_effort=args.reasoning_effort,
+            reasoning_effort=None,
+            avg_chars_per_sec=args.avg_chars_per_sec,
+            batch_size=args.batch_size,
+            stuck_threshold=args.stuck_threshold,
+            early_stop_patience=args.early_stop_patience,
         )
     else:
-        # Start our own server — no auth needed (clean env)
         server = OpenCodeServer(port=args.port, hostname=args.hostname)
         try:
             server.start()
@@ -506,7 +571,11 @@ def main(argv: List[str] | None = None) -> int:
                 min_words=args.min_words,
                 output_dir=output_dir,
                 stem=stem,
-                reasoning_effort=args.reasoning_effort,
+                reasoning_effort=None,
+                avg_chars_per_sec=args.avg_chars_per_sec,
+                batch_size=args.batch_size,
+                stuck_threshold=args.stuck_threshold,
+                early_stop_patience=args.early_stop_patience,
             )
         finally:
             server.stop()
