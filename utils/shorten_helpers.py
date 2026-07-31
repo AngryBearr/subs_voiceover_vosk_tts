@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from utils.analyze_text import analyze_subtitles, join_text_lines
+from utils.shortening_domain import CharacterRateBudgetEstimator, TimingWindow
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -84,10 +85,10 @@ def calculate_budget(
     item: Dict[str, Any], target_ratio: float, avg_chars_per_sec: float
 ) -> ShorteningBudget:
     """Calculate a stable character budget from saved effective duration."""
-    analysis = item.get("analysis", {})
     _, duration = _stable_durations(item)
     text = join_text_lines(item.get("text", ""))
-    max_chars = max(1, int(float(duration) * avg_chars_per_sec * target_ratio))
+    window = TimingWindow.from_item(item)
+    max_chars = CharacterRateBudgetEstimator(avg_chars_per_sec).max_chars(window, target_ratio)
     reduction = max(0.0, (1.0 - max_chars / max(1, len(text))) * 100.0)
     return ShorteningBudget(float(duration), len(text), max_chars, round(reduction, 1))
 
@@ -105,34 +106,14 @@ def target_min_words(text: str, configured_min_words: int) -> int:
 def _stable_durations(item: Dict[str, Any]) -> tuple[float, float]:
     """Return immutable base/effective durations, deriving legacy values once."""
     analysis = item.get("analysis", {})
-    base = analysis.get("available_duration_sec")
-    effective = analysis.get("effective_duration_sec")
-    estimated = analysis.get("estimated_sec")
-    if not isinstance(base, (int, float)) or base <= 0:
-        duration = analysis.get("duration_sec")
-        ratio = analysis.get("mismatch_ratio")
-        if isinstance(duration, (int, float)) and duration > 0:
-            base = float(duration)
-        elif isinstance(estimated, (int, float)) and isinstance(ratio, (int, float)) and ratio > 0:
-            base = float(estimated) / float(ratio)
-        else:
-            base = max(0.0, (item.get("end", 0) - item.get("start", 0)) / 1000.0)
-    if not isinstance(effective, (int, float)) or effective <= 0:
-        extended = analysis.get("extended_duration_sec")
-        extended_ratio = analysis.get("extended_mismatch_ratio")
-        if isinstance(extended, (int, float)) and extended > 0:
-            effective = float(extended)
-        elif isinstance(estimated, (int, float)) and isinstance(extended_ratio, (int, float)) and extended_ratio > 0:
-            effective = float(estimated) / float(extended_ratio)
-        else:
-            effective = base
-    analysis["available_duration_sec"] = float(base)
-    analysis["effective_duration_sec"] = float(effective)
-    return float(base), float(effective)
+    window = TimingWindow.from_item(item)
+    analysis.update(window.as_analysis_fields())
+    return window.base_duration_sec, window.effective_duration_sec
 
 
 def refresh_analysis(
-    items: List[Dict[str, Any]], avg_chars_per_sec: float, threshold: float
+    items: List[Dict[str, Any]], avg_chars_per_sec: float, threshold: float,
+    preserve_saved_timing: bool = False,
 ) -> Dict[str, Any]:
     """Refresh each item while preserving legacy effective timing without drift."""
     saved = [(_stable_durations(item), bool(item.get("analysis", {}).get("is_checked"))) for item in items]
@@ -143,8 +124,10 @@ def refresh_analysis(
         analysis = item.get("analysis", {})
         has_timing = (item.get("end", 0) - item.get("start", 0)) > 0
         (base, effective), was_checked = saved[index]
-        if has_timing:
+        if has_timing and not preserve_saved_timing:
             base, effective = _stable_durations(item)
+        elif preserve_saved_timing:
+            analysis["is_checked"] = was_checked
         elif base > 0 and was_checked:
             analysis["is_checked"] = True
         if not analysis.get("is_checked") or base <= 0 or effective <= 0:
@@ -172,6 +155,30 @@ def refresh_analysis(
         if analysis["is_critical"]:
             critical.append(item)
     return {"items": timed_result["items"], "checked_count": checked_count, "critical_items": critical}
+
+
+def hydrate_context_timing(
+    items: List[Dict[str, Any]],
+    context_items: List[Dict[str, Any]],
+    avg_chars_per_sec: float,
+    threshold: float,
+) -> List[Dict[str, Any]]:
+    """Copy real-neighbor timing from a full context onto sparse target items."""
+    targets = copy.deepcopy(items)
+    context = copy.deepcopy(context_items)
+    validate_context_source(targets, context)
+    context_result = refresh_analysis(context, avg_chars_per_sec, threshold)
+    context_by_index = {int(item["index"]): item for item in context_result["items"]}
+    hydrated: List[Dict[str, Any]] = []
+    for target in targets:
+        source = context_by_index[int(target["index"])]
+        source_analysis = source.get("analysis", {})
+        target_analysis = target.setdefault("analysis", {})
+        target_analysis["available_duration_sec"] = source_analysis.get("available_duration_sec")
+        target_analysis["effective_duration_sec"] = source_analysis.get("effective_duration_sec")
+        target_analysis["is_checked"] = source_analysis.get("is_checked", False)
+        hydrated.append(target)
+    return hydrated
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +689,10 @@ def run_iterative_shortening(
     batch_size = max(1, min(batch_size, MAX_BATCH_SIZE))
 
     print("\nRunning initial analysis...")
-    result = refresh_analysis(items, avg_chars_per_sec, threshold)
+    preserve_saved_timing = context_items is not None
+    if context_items is not None:
+        items = hydrate_context_timing(items, context_items, avg_chars_per_sec, threshold)
+    result = refresh_analysis(items, avg_chars_per_sec, threshold, preserve_saved_timing)
     items = result["items"]
     critical_count = len(result["critical_items"])
     print(f"Critical subtitles: {critical_count}")
@@ -771,7 +781,9 @@ def run_iterative_shortening(
                 stuck_count[idx] = 0
 
         print("Re-analyzing...")
-        result = refresh_analysis(current_items, avg_chars_per_sec, threshold)
+        result = refresh_analysis(
+            current_items, avg_chars_per_sec, threshold, preserve_saved_timing
+        )
         current_items = result["items"]
         critical_after = len(result["critical_items"])
         print(f"Critical after re-analysis: {critical_after}")
@@ -796,7 +808,9 @@ def run_iterative_shortening(
     save_json(final_path, current_items)
     print(f"\nFinal result: {final_path}")
 
-    final_result = refresh_analysis(current_items, avg_chars_per_sec, threshold)
+    final_result = refresh_analysis(
+        current_items, avg_chars_per_sec, threshold, preserve_saved_timing
+    )
     final_critical = len(final_result["critical_items"])
     print(f"\nSummary:")
     print(f"  Total subtitles: {len(current_items)}")

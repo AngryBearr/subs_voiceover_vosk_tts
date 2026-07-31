@@ -15,29 +15,32 @@ from typing import Any, Dict, List, Literal, Optional, Sequence
 from utils.analyze_text import join_text_lines
 from utils.shorten_helpers import calculate_budget, load_api_key, load_json, save_json, target_min_words, validate_context_source
 from utils.shorten_subtitles_deepseek import dynamic_max_tokens, shorten_via_deepseek_async
+from utils.semantic_plan import PLANNER_PROMPT, SemanticPlan, parse_semantic_plans
+from utils.semantic_requirements import PLANNER_ISSUE_CODES, SemanticRequirement, extract_semantic_requirements
 
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_MAX_INPUT_TOKENS = 50_000
+MAX_EXPLICIT_VERIFIER_CHECKS = 6
 ThinkingMode = Literal["disabled", "high", "max", "auto"]
-ISSUE_CODES = {"agent", "predicate", "object", "polarity", "modality", "time", "causality",
-               "comparison", "alternative", "entity", "number", "reference", "boundary", "grammar",
-                "naturalness", "budget", "uncertain"}
+ISSUE_CODES = set(PLANNER_ISSUE_CODES) | {"grammar", "naturalness", "budget", "uncertain"}
 
 SEMANTIC_CONTRACT = (
     "Оценивай материальную смысловую эквивалентность при необходимом сжатии: agent, predicate/object, "
     "polarity, modality, time, causality/concession, comparison, число и охват alternatives, entities, "
-    "numbers и cross-line references. Можно убрать fillers, false starts, повторы, несущественные примеры "
-    "и детали, если центральные утверждения сохранены; буквальное совпадение не требуется. Естественный "
-    "фрагмент допустим в реальном соседнем контексте. Читай candidate вслух и в склейке с соседними "
-    "строками; missing required object/goal, broken case attachment, ambiguous antecedent и editor notation "
-    "являются predicate/grammar/reference/naturalness ошибками. Контекст служит грамматике и референтам; "
-    "запрещено импортировать факт из соседней строки."
+    "numbers и cross-line references. semantic_requirements are concrete source obligations. "
+    "Spatial/reference anchors нельзя заменять расплывчатым там/туда/это без однозначного эквивалента; "
+    "буквальное совпадение не требуется, допускается эквивалентная парафраза; fillers и детали можно убрать. Естественный "
+    "фрагмент допустим в соседнем контексте. Читай вслух и в склейке; missing required object/goal, "
+    "broken case attachment, ambiguous antecedent и editor notation "
+    "являются predicate/grammar/reference/naturalness ошибками; запрещено импортировать факт из соседней строки. "
+    "semantic_plan и semantic_requirements являются только входными свидетельствами: в output возвращай только "
+    "схему ответа текущего этапа и не копируй вложенные поля входа."
 )
 CRITIC_PROMPT = SEMANTIC_CONTRACT + (
     " Ты независимый критик и не редактируешь. Для каждой цели верни строго JSON: "
     '{"results":[{"index":1,"verdict":"pass|fail|uncertain","issues":[]}]}. '
-    "pass требует пустой issues; fail/uncertain — непустой список только из фиксированных issue codes: "
+    "pass требует пустой issues; fail/uncertain — непустой список: "
     + ",".join(sorted(ISSUE_CODES)) + "."
 )
 EDITOR_PROMPT = SEMANTIC_CONTRACT + (
@@ -53,14 +56,16 @@ EDITOR_PROMPT = SEMANTIC_CONTRACT + (
     "candidate должен быть естественным и не длиннее max_chars."
 )
 VERIFIER_PROMPT = SEMANTIC_CONTRACT + (
-    " Ты слепой финальный проверяющий. Оцени только original, полный context и candidate. "
-    "Не считай естественные в соседнем контексте фрагменты ошибкой и не требуй опущенных деталей, если "
-    "центральный смысл сохранён. required_checks перечисляет обязательные риски именно этой цели; явно "
-    "оцени каждый ровно один раз. Для каждой цели верни строго JSON: "
+    " Ты слепой финальный проверяющий. Естественный фрагмент в соседнем контексте допустим. "
+    "required_checks are evaluated exactly once; all must pass for overall pass. Two-way entailment: every original proposition is recoverable from candidate "
+    "and every candidate claim is supported by original; preserve agent/person, tense, and speech act/mood. "
+    "Omitted or non-listed semantic-plan obligations are still evaluated holistically by two-way entailment; "
+    "an omitted label is never assumed passed. "
+    "JSON: "
     '{"results":[{"index":1,"verdict":"pass|fail|uncertain","issues":[],"required_checks":'
     '[{"issue":"alternative","verdict":"pass|fail"}]}]}. '
     "pass требует пустой issues; fail/uncertain — непустой список только из фиксированных issue codes: "
-    + ",".join(sorted(ISSUE_CODES)) + ". Все required_checks должны быть pass для общего pass."
+    + ",".join(sorted(ISSUE_CODES)) + "."
 )
 COMPACTION_PROMPT = SEMANTIC_CONTRACT + (
     " Ты выполняешь единственную точечную попытку уплотнения отклонённого editor candidate. Сократи его "
@@ -158,38 +163,20 @@ def review_validation_error(target: ReviewTarget, candidate: str, max_chars: Opt
 
 
 def semantic_risk_issues(original: str, candidate: str) -> List[str]:
-    """Return conservative semantic-loss hints for editor routing, never rejection."""
-    source = original.lower().replace("ё", "е")
-    result = candidate.lower().replace("ё", "е")
-    hints: List[str] = []
+    """Project extracted semantic requirements to legacy unique issue labels."""
+    return list(dict.fromkeys(requirement.issue for requirement in extract_semantic_requirements(original, candidate)))
 
-    def lost_any(phrases: Sequence[str]) -> bool:
-        return any(phrase in source and phrase not in result for phrase in phrases)
 
-    if lost_any(("сегодня", "потом", "все время", "всё время", "сейчас", "сначала",
-                 "наконец", "вчера", "завтра", "теперь")):
-        hints.append("time")
-    if lost_any(("конечно", "по-моему", "по моему", "пожалуй", "может быть",
-                 "возможно", "вероятно")):
-        hints.append("modality")
-    if lost_any(("потому что", "так как", "поэтому", "из-за", "из за", "чтобы",
-                 "хотя", "несмотря на")):
-        hints.append("causality")
-    if lost_any(("столько", "сколько", "как будто", "чем", "по сравнению", "а не")):
-        hints.append("comparison")
-    if len(re.findall(r"\bили\b", result)) < len(re.findall(r"\bили\b", source)):
-        hints.append("alternative")
-    reference_phrases = ("по ним", "у нас", "у меня", "с нами", "с ним", "с ней",
-                         "для них", "от него", "от нее", "к нему", "к ней")
-    if lost_any(reference_phrases):
-        hints.append("reference")
-    demonstratives = re.findall(
-        r"\b(?:этот|эта|это|эти|этого|этой|этому|этим|этом)\s+[а-я-]+",
-        source,
-    )
-    if any(phrase not in result for phrase in demonstratives):
-        hints.append("reference")
-    return list(dict.fromkeys(hints))
+def build_required_checks(risk_hints: Sequence[str], critic_issues: Sequence[str]) -> List[str]:
+    """Build the bounded, stable ordered list of explicit verifier diagnostics."""
+    result: List[str] = []
+    for issue in list(risk_hints) + list(critic_issues):
+        if issue == "uncertain" or issue in result:
+            continue
+        result.append(issue)
+        if len(result) == MAX_EXPLICIT_VERIFIER_CHECKS:
+            break
+    return result
 
 
 def build_context(original: List[Dict[str, Any]], items: List[Dict[str, Any]], targets: Sequence[ReviewTarget],
@@ -259,6 +246,7 @@ def parse_assessments(response: Optional[str], expected: set[int]) -> Dict[int, 
             return {}
         if not isinstance(issues, list) or any(not isinstance(x, str) or x not in ISSUE_CODES for x in issues):
             return {}
+        issues = list(dict.fromkeys(issues))
         if (verdict == "pass") != (not issues):
             return {}
         parsed[index] = (verdict, issues)
@@ -374,10 +362,10 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                            model: str = DEFAULT_MODEL, thinking_mode: ThinkingMode = "auto",
                            high_risk_threshold: float = 35.0, context_window: int = 3,
                            batch_size: int = DEFAULT_BATCH_SIZE, max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
-                           min_words: int = 3, avg_chars_per_sec: float = 13.0, target_ratio: float = 1.5,
-                           base_url: str = "https://api.deepseek.com", client: Any = None,
-                           context_source: Optional[List[Dict[str, Any]]] = None,
-                           concurrency: int = 3) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+                            min_words: int = 3, avg_chars_per_sec: float = 13.0, target_ratio: float = 1.5,
+                            base_url: str = "https://api.deepseek.com", client: Any = None,
+                            context_source: Optional[List[Dict[str, Any]]] = None,
+                            concurrency: int = 3, enable_planner: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     """Run critic, conditional editor, blind verifier, and one bounded repair."""
     del thinking_mode, high_risk_threshold
     if context_source is not None:
@@ -385,12 +373,19 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
     targets = select_changed_targets(original, shortened, avg_chars_per_sec, target_ratio, min_words)
+    deterministic_requirements: Dict[int, tuple[SemanticRequirement, ...]] = {
+        target.index: tuple(extract_semantic_requirements(target.original_text, target.shortened_text))
+        for target in targets
+    }
+    semantic_plans: Dict[int, Optional[SemanticPlan]] = {target.index: None for target in targets}
+    semantic_requirements: Dict[int, tuple[SemanticRequirement, ...]] = dict(deterministic_requirements)
     risk_hints = {
-        target.index: semantic_risk_issues(target.original_text, target.shortened_text)
+        target.index: list(dict.fromkeys(requirement.issue for requirement in semantic_requirements[target.index]))
         for target in targets
     }
     output, usage = copy.deepcopy(shortened), {}
-    stage_names = ("critic", "editor", "compaction", "verifier", "repair", "reverify")
+    stage_names = (("planner", "critic", "editor", "compaction", "verifier", "repair", "reverify")
+                   if enable_planner else ("critic", "editor", "compaction", "verifier", "repair", "reverify"))
     stage_usage: Dict[str, Dict[str, int]] = {name: {} for name in stage_names}
     stage_requests: Dict[str, int] = {name: 0 for name in stage_names}
     lineage = {t.index: {"flash": t.shortened_text, "editor": None, "compaction": None,
@@ -410,14 +405,17 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
         )
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def call(stage: str, system: str, prompt: str, effort: Optional[str], group: Sequence[ReviewTarget]) -> Optional[str]:
+    async def call(stage: str, system: str, prompt: str, effort: Optional[str], group: Sequence[ReviewTarget],
+                   max_tokens_override: Optional[int] = None) -> Optional[str]:
         stage_requests[stage] += 1
         request_number = stage_requests[stage]
         indices = [target.index for target in group]
         print(f"Pro {stage} request {request_number} start: {indices}", flush=True)
         response = await shorten_via_deepseek_async(model, system, prompt, api_key, base_url,
                                                     semaphore=semaphore,
-                                                    reasoning_effort=effort, max_tokens=review_max_tokens(group, effort),
+                                                     reasoning_effort=effort,
+                                                     max_tokens=(max_tokens_override if max_tokens_override is not None
+                                                                 else review_max_tokens(group, effort)),
                                                     client=client, usage_total=stage_usage[stage], api_retries=2)
         status = "completed" if response is not None else "error"
         print(f"Pro {stage} request {request_number} {status}: {indices}", flush=True)
@@ -426,14 +424,104 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
     def context(group: Sequence[ReviewTarget], current_items: List[Dict[str, Any]]) -> str:
         return build_context(original, current_items, group, context_window, context_source)
 
+    def planner_context(group: Sequence[ReviewTarget]) -> str:
+        source = context_source or original
+        positions = {int(item["index"]): pos for pos, item in enumerate(source)}
+        wanted: set[int] = set()
+        for target in group:
+            pos = positions[target.index]
+            wanted.update(range(max(0, pos - context_window), min(len(source), pos + context_window + 1)))
+        payload = [{"index": source[pos]["index"],
+                    "original_text": join_text_lines(source[pos].get("text", ""))}
+                   for pos in sorted(wanted)]
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def plan_field(target: ReviewTarget) -> Dict[str, Any]:
+        return {"semantic_plan": semantic_plans[target.index].as_dict()} if enable_planner and semantic_plans[target.index] else {}
+
+    def merged_requirements(target: ReviewTarget) -> tuple[SemanticRequirement, ...]:
+        values = (list(semantic_plans[target.index].requirements) if semantic_plans[target.index] else [])
+        values.extend(deterministic_requirements[target.index])
+        result: list[SemanticRequirement] = []
+        seen: set[tuple[str, str]] = set()
+        for requirement in values:
+            key = (requirement.issue, requirement.source_anchor.lower().replace("ё", "е"))
+            if key not in seen:
+                seen.add(key)
+                result.append(requirement)
+        return tuple(result)
+
     try:
+        if enable_planner:
+            def planner_prompt(group: Sequence[ReviewTarget]) -> str:
+                payload = [{"index": t.index, "source_text": t.original_text,
+                            "max_chars": t.max_chars,
+                            "deterministic_requirements": [r.as_dict() for r in deterministic_requirements[t.index]]}
+                           for t in group]
+                return "Original-only context:" + planner_context(group) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
+
+            planner_batches, oversized = _split_stage_batches(
+                targets, min(2, batch_size), PLANNER_PROMPT, planner_prompt, max_input_tokens
+            )
+            for target in oversized:
+                stage_errors["planner"][target.index] = "input_too_large"
+                blocked.add(target.index)
+            planner_responses = await asyncio.gather(*(
+                call("planner", PLANNER_PROMPT, planner_prompt(group), None, group, max_tokens_override=8192)
+                for group in planner_batches
+            ))
+            failed_planner_groups: List[List[ReviewTarget]] = []
+            for group, response in zip(planner_batches, planner_responses):
+                expected = {t.index: t.original_text for t in group}
+                try:
+                    parsed_plans = parse_semantic_plans(response, expected)
+                except ValueError:
+                    parsed_plans = {}
+                if not parsed_plans:
+                    failed_planner_groups.append(group)
+                    provisional_error = "api_failure" if response is None else "parse_failure"
+                    for target in group:
+                        stage_errors["planner"][target.index] = provisional_error
+                else:
+                    for target in group:
+                        plan = parsed_plans[target.index]
+                        semantic_plans[target.index] = plan
+                        semantic_requirements[target.index] = merged_requirements(target)
+
+            retry_targets = [target for group in failed_planner_groups for target in group]
+            retry_responses = await asyncio.gather(*(
+                call("planner", PLANNER_PROMPT, planner_prompt([target]), None, [target], max_tokens_override=8192)
+                for target in retry_targets
+            ))
+            for target, response in zip(retry_targets, retry_responses):
+                expected = {target.index: target.original_text}
+                try:
+                    parsed_plans = parse_semantic_plans(response, expected)
+                except ValueError:
+                    parsed_plans = {}
+                if parsed_plans:
+                    semantic_plans[target.index] = parsed_plans[target.index]
+                    semantic_requirements[target.index] = merged_requirements(target)
+                    stage_errors["planner"].pop(target.index, None)
+                else:
+                    stage_errors["planner"][target.index] = (
+                        "api_failure" if response is None else "parse_failure"
+                    )
+                    blocked.add(target.index)
+            for target in targets:
+                if target.index in blocked:
+                    assessments["critic"][target.index] = ("uncertain", ["uncertain"])
+                    assessments["verifier"][target.index] = ("uncertain", ["uncertain"])
+
         def critic_prompt(group: Sequence[ReviewTarget]) -> str:
             payload = [{"index": t.index, "original": t.original_text, "candidate": t.shortened_text,
-                        "max_chars": t.max_chars} for t in group]
+                        "max_chars": t.max_chars, "semantic_requirements": [r.as_dict() for r in semantic_requirements[t.index]],
+                        **plan_field(t)} for t in group]
             return "Context:" + context(group, shortened) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
 
+        critic_targets = [target for target in targets if target.index not in blocked]
         critic_batches, oversized = _split_stage_batches(
-            targets, batch_size, CRITIC_PROMPT, critic_prompt, max_input_tokens
+            critic_targets, batch_size, CRITIC_PROMPT, critic_prompt, max_input_tokens
         )
         for target in oversized:
             assessments["critic"][target.index] = ("uncertain", ["uncertain"])
@@ -445,19 +533,34 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
         ))
         for group, response in zip(critic_batches, critic_responses):
             parsed = parse_assessments(response, {t.index for t in group})
+            if not parsed and response is not None and enable_planner:
+                retry_responses = await asyncio.gather(*(
+                    call("critic", CRITIC_PROMPT, critic_prompt([target]), None, [target])
+                    for target in group
+                ))
+                retried: Dict[int, tuple[str, List[str]]] = {}
+                for target, retry_response in zip(group, retry_responses):
+                    retry_parsed = parse_assessments(retry_response, {target.index})
+                    if retry_parsed:
+                        retried[target.index] = retry_parsed[target.index]
+                parsed = retried
             for t in group:
                 assessments["critic"][t.index] = parsed.get(t.index, ("uncertain", ["uncertain"]))
                 if not parsed:
                     stage_errors["critic"][t.index] = (
                         "api_failure" if response is None else "parse_failure"
                     )
+                elif t.index not in parsed:
+                    stage_errors["critic"][t.index] = "parse_failure"
+                else:
+                    stage_errors["critic"].pop(t.index, None)
 
         editor_targets = [
             target for target in targets
-            if (target.requires_shortening
+            if (target.index not in blocked and (target.requires_shortening
                 or assessments["critic"][target.index][0] != "pass"
                 or review_validation_error(target, target.shortened_text) is not None
-                or risk_hints[target.index])
+                or risk_hints[target.index]))
         ]
         for target in editor_targets:
             initial_error = review_validation_error(target, target.shortened_text)
@@ -476,7 +579,9 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
         def editor_prompt(group: Sequence[ReviewTarget]) -> str:
             payload = [{"index": t.index, "original": t.original_text, "candidate": lineage[t.index]["final"],
                         "issues": normalized_editor_issues(t), "max_chars": t.max_chars,
-                        "requires_shortening": t.requires_shortening} for t in group]
+                        "requires_shortening": t.requires_shortening,
+                        "semantic_requirements": [r.as_dict() for r in semantic_requirements[t.index]],
+                        **plan_field(t)} for t in group]
             return "Context:" + context(group, output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
 
         editor_batches, oversized = _split_stage_batches(
@@ -488,11 +593,22 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             blocked.add(target.index)
         editor_prompts = [editor_prompt(group) for group in editor_batches]
         editor_responses = await asyncio.gather(*(
-            call("editor", EDITOR_PROMPT, prompt, "high", group)
+            call("editor", EDITOR_PROMPT, prompt, None, group)
             for group, prompt in zip(editor_batches, editor_prompts)
         ))
         for group, response in zip(editor_batches, editor_responses):
             parsed = _parse_editor(response, {t.index for t in group})
+            if not parsed and response is not None and enable_planner:
+                retry_responses = await asyncio.gather(*(
+                    call("editor", EDITOR_PROMPT, editor_prompt([target]), None, [target])
+                    for target in group
+                ))
+                retried: Dict[int, tuple[str, str]] = {}
+                for target, retry_response in zip(group, retry_responses):
+                    retry_parsed = _parse_editor(retry_response, {target.index})
+                    if retry_parsed:
+                        retried[target.index] = retry_parsed[target.index]
+                parsed = retried
             for t in group:
                 decision, candidate = parsed.get(t.index, ("unresolved", ""))
                 decisions["editor"][t.index] = decision if parsed else None
@@ -501,6 +617,9 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                     stage_errors["editor"][t.index] = (
                         "api_failure" if response is None else "parse_failure"
                     )
+                elif t.index not in parsed:
+                    decisions["editor"][t.index] = None
+                    stage_errors["editor"][t.index] = "parse_failure"
                 elif decision == "unresolved":
                     stage_errors["editor"][t.index] = "unresolved"
                 elif error is not None:
@@ -525,15 +644,22 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                         "context": json.loads(context([target], output)),
                         "rejected_candidate": rejected, "current_length": len(rejected),
                         "max_chars": target.max_chars, "excess": len(rejected) - target.max_chars,
-                        "required_issues": normalized_editor_issues(target)}]
+                         "required_issues": normalized_editor_issues(target),
+                         "semantic_requirements": [r.as_dict() for r in semantic_requirements[target.index]],
+                         **plan_field(target)}]
             return "Targets:" + json.dumps(payload, ensure_ascii=False)
 
+        compaction_requests = [(target, compaction_prompt(target)) for target in compaction_targets]
         compaction_responses = await asyncio.gather(*(
-            call("compaction", COMPACTION_PROMPT, compaction_prompt(target), "high", [target])
-            for target in compaction_targets
+            call("compaction", COMPACTION_PROMPT, prompt, None, [target])
+            for target, prompt in compaction_requests
         ))
-        for target, response in zip(compaction_targets, compaction_responses):
+        for (target, prompt), response in zip(compaction_requests, compaction_responses):
             parsed = _parse_editor(response, {target.index})
+            if not parsed and response is not None and enable_planner:
+                retry_response = await call("compaction", COMPACTION_PROMPT, prompt, None, [target])
+                parsed = _parse_editor(retry_response, {target.index})
+                response = retry_response
             decision, candidate = parsed.get(target.index, ("unresolved", ""))
             decisions["compaction"][target.index] = decision if parsed else None
             error = review_validation_error(target, candidate) if decision == "candidate" else None
@@ -554,25 +680,44 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
 
         async def verify(group: Sequence[ReviewTarget], stage: str = "verifier") -> None:
             # Deliberately contains no lineage, critic result, source label, or editor history.
-            required = {t.index: list(dict.fromkeys(risk_hints[t.index] + assessments["critic"][t.index][1]))
+            required = {t.index: build_required_checks(risk_hints[t.index], assessments["critic"][t.index][1])
                         for t in group}
-            payload = [{"index": t.index, "original": t.original_text,
-                        "candidate": lineage[t.index]["final"], "max_chars": t.max_chars,
-                        "required_checks": required[t.index]} for t in group]
-            response = await call(stage, VERIFIER_PROMPT, "Context:" + context(group, output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False), None, group)
+            def verification_prompt(targets_for_prompt: Sequence[ReviewTarget]) -> str:
+                payload = [{"index": t.index, "original": t.original_text,
+                            "candidate": lineage[t.index]["final"], "max_chars": t.max_chars,
+                            "required_checks": required[t.index],
+                            "semantic_requirements": [r.as_dict() for r in semantic_requirements[t.index]],
+                            **plan_field(t)} for t in targets_for_prompt]
+                return "Context:" + context(targets_for_prompt, output) + "\nTargets:" + json.dumps(
+                    payload, ensure_ascii=False
+                )
+
+            response = await call(stage, VERIFIER_PROMPT, verification_prompt(group), None, group)
             parsed = parse_verifications(response, required)
+            if not parsed and response is not None and enable_planner:
+                retry_responses = await asyncio.gather(*(
+                    call(stage, VERIFIER_PROMPT, verification_prompt([target]), None, [target])
+                    for target in group
+                ))
+                retried: Dict[int, tuple[str, List[str], Dict[str, str]]] = {}
+                for target, retry_response in zip(group, retry_responses):
+                    retry_parsed = parse_verifications(retry_response, {target.index: required[target.index]})
+                    if retry_parsed:
+                        retried[target.index] = retry_parsed[target.index]
+                parsed = retried
             for t in group:
                 parsed_value = parsed.get(t.index)
                 assessments["verifier"][t.index] = (parsed_value[0], parsed_value[1]) if parsed_value else ("uncertain", ["uncertain"])
                 verifier_checks[t.index] = parsed_value[2] if parsed_value else {}
-                if not parsed:
+                if parsed_value is None:
                     error = "api_failure" if response is None else "parse_failure"
                     stage_errors[stage][t.index] = error
-                elif parsed[t.index][0] != "pass":
-                    error = parsed[t.index][0]
+                elif parsed_value[0] != "pass":
+                    error = parsed_value[0]
                     stage_errors[stage][t.index] = error
                 else:
                     error = None
+                    stage_errors[stage].pop(t.index, None)
                 verdict, issues = assessments["verifier"][t.index]
                 verifier_history[t.index].append({
                     "stage": stage,
@@ -586,11 +731,13 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                        review_validation_error(t, str(lineage[t.index]["final"])) is None]
 
         def verifier_prompt(group: Sequence[ReviewTarget]) -> str:
-            required = {t.index: list(dict.fromkeys(risk_hints[t.index] + assessments["critic"][t.index][1]))
+            required = {t.index: build_required_checks(risk_hints[t.index], assessments["critic"][t.index][1])
                         for t in group}
             payload = [{"index": t.index, "original": t.original_text,
                         "candidate": lineage[t.index]["final"], "max_chars": t.max_chars,
-                        "required_checks": required[t.index]} for t in group]
+                        "required_checks": required[t.index],
+                        "semantic_requirements": [r.as_dict() for r in semantic_requirements[t.index]],
+                        **plan_field(t)} for t in group]
             return "Context:" + context(group, output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
 
         verifier_batches, oversized = _split_stage_batches(
@@ -609,22 +756,28 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
         ]
         repair_requests: List[tuple[ReviewTarget, str]] = []
         for t in failed:
-            issues = list(assessments["verifier"].get(
-                t.index, ("uncertain", ["uncertain"])
-            )[1]) + risk_hints[t.index] + assessments["critic"][t.index][1]
-            issues = list(dict.fromkeys(issues))
+            issues = list(dict.fromkeys(
+                assessments["verifier"].get(t.index, ("uncertain", ["uncertain"]))[1]
+                + risk_hints[t.index] + assessments["critic"][t.index][1]
+            ))
             payload = [{"index": t.index, "original": t.original_text, "candidate": lineage[t.index]["final"],
                         "issues": issues, "max_chars": t.max_chars,
-                        "requires_shortening": t.requires_shortening}]
+                        "requires_shortening": t.requires_shortening,
+                        "semantic_requirements": [r.as_dict() for r in semantic_requirements[t.index]],
+                        **plan_field(t)}]
             repair_requests.append((t, "Context:" + context([t], output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)))
         repair_responses = await asyncio.gather(*(
-            call("repair", EDITOR_PROMPT, prompt, "high", [target])
+            call("repair", EDITOR_PROMPT, prompt, None, [target])
             for target, prompt in repair_requests
         ))
         repaired: List[ReviewTarget] = []
         repair_snapshots: Dict[int, Dict[str, Any]] = {}
-        for (t, _), response in zip(repair_requests, repair_responses):
+        for (t, prompt), response in zip(repair_requests, repair_responses):
             parsed = _parse_editor(response, {t.index})
+            if not parsed and response is not None and enable_planner:
+                retry_response = await call("repair", EDITOR_PROMPT, prompt, None, [t])
+                parsed = _parse_editor(retry_response, {t.index})
+                response = retry_response
             decision, candidate = parsed.get(t.index, ("unresolved", ""))
             decisions["repair"][t.index] = decision if parsed else None
             error = review_validation_error(t, candidate) if decision == "candidate" else None
@@ -651,10 +804,8 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                 repaired.append(t)
         await asyncio.gather(*(verify([target], "reverify") for target in repaired))
         for target in repaired:
-            required = list(dict.fromkeys(
-                risk_hints[target.index] + assessments["critic"][target.index][1]
-            ))
-            verdict = assessments["verifier"][target.index][0]
+            required = build_required_checks(risk_hints[target.index], assessments["critic"][target.index][1])
+            verdict, reverify_issues = assessments["verifier"][target.index]
             checks = verifier_checks[target.index]
             formal_error = review_validation_error(target, str(lineage[target.index]["final"]))
             reverify_passed = (
@@ -665,6 +816,14 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             )
             if reverify_passed:
                 valid_recovery.add(target.index)
+                continue
+            naturalness_only = (
+                verdict == "fail" and required and set(checks) == set(required)
+                and all(value == "pass" for value in checks.values())
+                and formal_error is None and reverify_issues
+                and set(reverify_issues) <= {"naturalness", "grammar"}
+            )
+            if naturalness_only:
                 continue
             snapshot = repair_snapshots[target.index]
             attempted = str(lineage[target.index]["repair"])
@@ -688,7 +847,7 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
     for target in targets:
         final = str(lineage[target.index]["final"])
         verdict, issues = assessments["verifier"].get(target.index, ("uncertain", ["uncertain"]))
-        required = list(dict.fromkeys(risk_hints[target.index] + assessments["critic"][target.index][1]))
+        required = build_required_checks(risk_hints[target.index], assessments["critic"][target.index][1])
         hard_gate_needs_recovery = bool(required) or assessments["critic"][target.index][0] != "pass"
         checks_pass = set(verifier_checks[target.index]) == set(required) and all(
             value == "pass" for value in verifier_checks[target.index].values()
@@ -701,7 +860,13 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
         lineage[target.index]["final"] = final
         outcomes.append({"index": target.index, "outcome": "verified" if verified else "unresolved",
                          "critic_verdict": assessments["critic"][target.index][0],
-                         "critic_issues": assessments["critic"][target.index][1],
+                          "critic_issues": assessments["critic"][target.index][1],
+                          "planner_status": ("disabled" if not enable_planner else
+                                              ("success" if semantic_plans[target.index] is not None else
+                                               stage_errors["planner"].get(target.index, "unresolved"))),
+                          "semantic_plan": (semantic_plans[target.index].as_dict()
+                                             if semantic_plans[target.index] is not None else None),
+                          "semantic_requirements": [r.as_dict() for r in semantic_requirements[target.index]],
                          "risk_hints": risk_hints[target.index],
                          "verifier_verdict": verdict, "verifier_issues": issues,
                          "verifier_required_checks": verifier_checks[target.index],
@@ -719,6 +884,8 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
               "automated_verified_count": len(targets) - len(unresolved),
               "unresolved_indices": unresolved, "fallback": unresolved, "outcomes": outcomes,
               "risk_hints": {str(index): hints for index, hints in risk_hints.items() if hints},
+              "semantic_plans": {str(index): plan.as_dict() for index, plan in semantic_plans.items()
+                                  if plan is not None},
               "stages": {name: {"usage": values, "requests": stage_requests[name]}
                          for name, values in stage_usage.items()},
               "retries": {"targeted_compactions": stage_requests["compaction"],
@@ -750,6 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
+    parser.add_argument("--semantic-planner", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-words", type=int, default=3)
     parser.add_argument("--avg-chars-per-sec", type=float, default=13.0)
     parser.add_argument("--target-ratio", type=float, default=1.5)
@@ -773,7 +941,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.model, args.thinking_mode, 35.0, args.context_window, args.batch_size, args.max_input_tokens,
             args.min_words, args.avg_chars_per_sec, args.target_ratio, args.base_url,
             context_source=load_json(Path(args.context_source)) if args.context_source else None,
-            concurrency=args.concurrency))
+             concurrency=args.concurrency, enable_planner=args.semantic_planner))
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

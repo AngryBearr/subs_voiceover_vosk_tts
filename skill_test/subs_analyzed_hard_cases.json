@@ -1,0 +1,182 @@
+[
+  {
+    "text": [
+      "но они, конечно, не будут делать всё это."
+    ],
+    "index": 333,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 2.0,
+      "estimated_sec": 3.1538461538461537,
+      "mismatch_ratio": 1.5018315018315018,
+      "extended_mismatch_ratio": 1.5018315018315018,
+      "words_count": 8,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "а сегодня утром пробежалась по ним рукой..."
+    ],
+    "index": 342,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 1.93,
+      "estimated_sec": 3.3076923076923075,
+      "mismatch_ratio": 1.7138302112395376,
+      "extended_mismatch_ratio": null,
+      "words_count": 7,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Бетадин этой ране не повредит, так что, да, я, пожалуй, помажу им."
+    ],
+    "index": 346,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 3.0,
+      "estimated_sec": 5.076923076923077,
+      "mismatch_ratio": 1.6923076923076923,
+      "extended_mismatch_ratio": null,
+      "words_count": 12,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "а не столько, сколько мне есть на самом деле."
+    ],
+    "index": 352,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 1.68,
+      "estimated_sec": 3.4615384615384617,
+      "mismatch_ratio": 2.0604395604395607,
+      "extended_mismatch_ratio": null,
+      "words_count": 9,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Для моей цели лучше был бы другой инструмент, но мы её всё равно достигнем."
+    ],
+    "index": 358,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 2.0,
+      "estimated_sec": 5.769230769230769,
+      "mismatch_ratio": 2.8846153846153846,
+      "extended_mismatch_ratio": null,
+      "words_count": 14,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Когда нас выбросили в море на плотах и мы получили возможность взять с собой всё, во что мы могли запустить свои руки,"
+    ],
+    "index": 379,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 4.76,
+      "estimated_sec": 9.076923076923077,
+      "mismatch_ratio": 1.9069166127989658,
+      "extended_mismatch_ratio": null,
+      "words_count": 22,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "мы схватили три или четыре ловушки для рыб и целую груду ловушек для крыс."
+    ],
+    "index": 380,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 3.2,
+      "estimated_sec": 5.6923076923076925,
+      "mismatch_ratio": 1.7788461538461537,
+      "extended_mismatch_ratio": null,
+      "words_count": 14,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Мы порасставили крысиные ловушки вокруг лагеря в первую ночь..."
+    ],
+    "index": 381,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 2.46,
+      "estimated_sec": 4.846153846153846,
+      "mismatch_ratio": 1.969981238273921,
+      "extended_mismatch_ratio": null,
+      "words_count": 9,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "А потом этот... Как его зовут?"
+    ],
+    "index": 391,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 1.4,
+      "estimated_sec": 2.3076923076923075,
+      "mismatch_ratio": 1.6483516483516483,
+      "extended_mismatch_ratio": null,
+      "words_count": 6,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Крыса пыталась забраться на плот или побегать рядом с нами или добраться до чего-то."
+    ],
+    "index": 394,
+    "start": 0,
+    "end": 0,
+    "analysis": {
+      "duration_sec": 3.4,
+      "estimated_sec": 6.461538461538462,
+      "mismatch_ratio": 1.900452488687783,
+      "extended_mismatch_ratio": null,
+      "words_count": 14,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  }
+]

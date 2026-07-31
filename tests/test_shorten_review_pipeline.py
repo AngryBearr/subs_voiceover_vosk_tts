@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import utils.shorten_review_pipeline as pipeline_module
 from utils.shorten_review_pipeline import PipelineConfig, PipelineStageError, build_parser, run_pipeline
 
 
@@ -25,6 +26,20 @@ def test_cli_defaults() -> None:
     assert (args.pro_thinking_mode, args.pro_batch_size, args.pro_context_window) == ("auto", 4, 3)
     assert args.pro_concurrency == 3
     assert (args.pro_risk_threshold, args.pro_max_input_tokens) == (35.0, 50_000)
+
+
+def test_default_pro_stage_enables_semantic_planner(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_review(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        captured.update(kwargs)
+        return args[1], {"outcomes": [], "selected_indices": [], "fallback": []}, {}
+
+    monkeypatch.setattr(pipeline_module, "review_subtitles", fake_review)
+    config = PipelineConfig(Path("input.json"), Path("output"), "key")
+    result = pipeline_module._default_pro_stage([_item("original")], [_item("short")], config)
+    assert result[0][0]["text"] == ["short"]
+    assert captured["enable_planner"] is True
 
 
 def test_pipeline_order_original_integrity_refresh_and_combined_reports(tmp_path: Path) -> None:
@@ -147,3 +162,46 @@ def test_unselected_not_required_item_does_not_become_unresolved(tmp_path: Path)
     assert report["unresolved_count"] == 1
     assert report["unresolved_indices"] == [1]
 
+
+def test_pipeline_context_hydrates_reports_and_never_processes_context_only_items(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "sparse.json"
+    context_path = tmp_path / "full.json"
+    target_text = "A very long target subtitle phrase that is critical"
+    sparse = [{"index": 2, "text": [target_text], "start": 1000, "end": 2000,
+               "analysis": {"is_checked": True}}]
+    context = [
+        {"index": 1, "text": ["Before"], "start": 0, "end": 1000},
+        {"index": 2, "text": [target_text], "start": 1000, "end": 2000},
+        {"index": 3, "text": ["Close next neighbor"], "start": 2200, "end": 3200},
+    ]
+    input_path.write_text(json.dumps(sparse), encoding="utf-8")
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+    observed: dict[str, Any] = {}
+
+    def flash(items: list[dict[str, Any]], config: PipelineConfig, output: Path,
+              stem: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        observed["flash_len"] = len(items)
+        observed["flash_timing"] = items[0]["analysis"]["effective_duration_sec"]
+        changed = copy.deepcopy(items)
+        changed[0]["text"] = ["Short target phrase"]
+        return changed, {"estimated_cost_usd": 0}
+
+    def pro(original: list[dict[str, Any]], shortened: list[dict[str, Any]],
+            config: PipelineConfig) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        observed["pro_len"] = len(original)
+        observed["pro_timing"] = original[0]["analysis"]["effective_duration_sec"]
+        return shortened, {"selected": 1, "selected_indices": [2],
+                           "outcomes": [{"index": 2, "outcome": "verified"}]}, {
+                               "estimated_cost_usd": 0}
+
+    output_dir = tmp_path / "result"
+    config = PipelineConfig(input_path, output_dir, "key", context_source=context_path)
+    final_path = run_pipeline(config, flash, pro)
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+
+    assert observed == {"flash_len": 1, "flash_timing": 1.0,
+                        "pro_len": 1, "pro_timing": 1.0}
+    assert final[0]["shortening"]["required_initially"] is True
+    assert final[0]["shortening"]["status"] == "resolved"

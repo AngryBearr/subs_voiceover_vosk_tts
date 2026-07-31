@@ -212,6 +212,41 @@ Each iteration produces:
 
 ## Direct DeepSeek V4 Pro review
 
+### Semantic quality pass
+
+Production Pro review first runs the quality-v3 original-only semantic planner.
+It receives source text, indexed original-only context, budgets, and local
+deterministic requirements - never Flash candidates, lineage, or editor data.
+The strict endpoint JSON is parsed locally into an immutable plan of atomic
+propositions and anchored requirements. Character counts and semantic
+comparison use no function tools; they remain local checks. Planner batches are
+capped at two targets. If a batch is malformed or unavailable, each target gets
+exactly one original-only individual retry; successful retries continue through
+the quality stages, while failed retries remain unresolved. Oversized single
+targets are not retried. Planner failure is fail-closed: the unchanged candidate
+is reported unresolved. Standalone review
+enables this stage by default; use `--no-semantic-planner` to opt out. Direct
+programmatic `review_subtitles` keeps planner-off as its backward-compatible
+default.
+
+The Pro pass retains the complete immutable planner guidance alongside the
+deterministic candidate-specific requirements. Requirements carry an exact
+source anchor and an English obligation, and are sent with the immutable plan
+to critic, editor, compaction, verifier, and bounded repair. Explicit verifier
+required checks remain the unique deterministic risk hints plus unique critic
+issues; planner-only guidance is still visible and participates in the general
+two-way entailment verdict, but is not promoted into a required-check label.
+In addition to time, modality, causality, comparison, alternatives, and
+references, `spatial` is a required-check gate for relations such as `вокруг
+лагеря` and `рядом с нами`. A spatial or reference anchor may be paraphrased,
+but cannot be replaced by ambiguous `там`, `туда`, or `это` without an
+unambiguous equivalent in full context.
+
+If a repaired candidate passes every semantic required check and formal
+validation but re-verification reports only grammar/naturalness, the repair is
+retained and reported as unresolved. Semantic damage, missing checks,
+uncertainty, and formal errors still use the normal rollback policy.
+
 ### Recommended Flash + Pro pipeline
 
 ```bash
@@ -236,20 +271,27 @@ compaction → verifier → repair → reverify stage barriers remain in place.
 
 The reviewer selects the unique-index union of Flash-changed and remaining-critical
 targets. Pro uses three separated roles: a non-thinking critic evaluates every target;
-a high-thinking editor receives only critic failures, formal failures, and
+a non-thinking editor receives only critic failures, formal failures, and
 remaining-critical targets (batches of at most two); a fresh non-thinking blind
-verifier sees only original/full context/candidate. A verifier failure gets at most one
-single-target high-thinking repair and one fresh blind verification. API or malformed
+verifier sees only original/full context/candidate. If a non-empty verifier,
+compaction, or repair response is malformed, planner-enabled production review
+makes at most one non-thinking, same-stage schema retry per target; a target that
+remains malformed keeps the existing parse-failure path. A verifier failure gets at
+most one single-target non-thinking repair and one fresh blind verification. API or malformed
 responses never count as verified, and the safest locally valid candidate is retained
 but reported unresolved.
 
 Experiment 1 applies a semantic hard gate to known risks. The final verifier must return
-one strict, explicit check for every deterministic risk hint and relevant critic issue;
+one strict, explicit check for every deterministic risk hint and relevant critic issue
+selected in stable order, with at most six bounded diagnostic labels; the complete
+semantic plan and merged requirements are still evaluated holistically by two-way
+entailment, and omitted labels are not assumed passed;
 missing, duplicate, malformed, or failed required checks cannot verify a target. A critic
 failure or known semantic risk also requires a locally valid editor or repair candidate,
 so a generic pass over an unchanged lossy Flash candidate is insufficient. If an editor
 candidate is valid except for exceeding `max_chars`, it is retained diagnostically and
-gets at most one single-target high-thinking compaction request. The compacted result is
+gets at most one single-target non-thinking compaction request, with one schema-only retry
+when planner mode is enabled and the response is non-empty but malformed. The compacted result is
 formally validated before blind verification. A hard-gated target that still lacks valid
 recovery may use the existing single bounded repair attempt, but there are no additional
 retries. Reports expose targeted-compaction request counts, decisions, stage errors, and
@@ -275,8 +317,9 @@ uv run -m utils.review_shortened_subtitles_deepseek \
 ```
 
 The legacy `--thinking-mode` and pipeline risk-threshold options remain accepted for
-command compatibility but do not override quality routing: critic/verifier are always
-non-thinking, while editor/compaction/repair always use high thinking.
+command compatibility but do not override quality routing: critic/editor/verifier/
+compaction/repair are always non-thinking. Planner-enabled malformed responses get at
+most one same-stage schema retry; API-empty responses do not retry.
 
 Pro receives `original_text` and `current_text` for context. Reports contain stage
 usage, per-target Flash/editor/compaction/repair/final lineage (including rejected
@@ -304,6 +347,33 @@ For shortened input `name.json`, outputs are predictable:
 
 The Pro estimate uses direct prices: cache miss $0.435/M, cache hit $0.003625/M,
 and output $0.87/M, explicitly labeled `pricing_model: deepseek-v4-pro`.
+
+### Real API hard-case smoke set
+
+`skill_test/subs_analyzed_hard_cases.json` is a 10/30-case smoke set selected from
+the real run report. It covers unresolved repair/reverify (342), editor-too-long
+and compaction (394), semantic critic failures (358/380), time/naturalness (391),
+modality/reference (346/333), context restoration (379), comparison (352), and
+spatial/time anchors (381).
+
+Run the paid, nondeterministic comparison from the repository root with the same
+explicit production flags as the full run:
+
+```bash
+uv run --python subs_env/bin/python -m utils.shorten_review_pipeline \
+  skill_test/subs_analyzed_hard_cases.json \
+  --context-source skill_test/S01_E01_ru_analyzed.json \
+  --flash-model deepseek-v4-flash --pro-model deepseek-v4-pro \
+  --threshold 1.5 --avg-chars-per-sec 13 \
+  --flash-max-iterations 1 --flash-batch-size 6 --flash-concurrency 3 \
+  --pro-batch-size 4 --pro-concurrency 3 --pro-thinking-mode auto \
+  --pro-risk-threshold 35 --pro-context-window 3 \
+  --pro-max-input-tokens 50000 \
+  --output-dir output/skill_test_hard_cases_real
+```
+
+The full 30-item set remains the release regression suite; this smaller set is
+intended for fast comparisons. The API call is paid and nondeterministic.
 
 ---
 

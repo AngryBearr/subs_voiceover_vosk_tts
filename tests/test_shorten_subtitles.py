@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import copy
 import sys
 import pytest
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from utils.shorten_helpers import (
     SYSTEM_PROMPT_SHORTEN,
     SYSTEM_PROMPT_REPHRASE,
     calculate_budget,
+    hydrate_context_timing,
     refresh_analysis,
     target_min_words,
     load_json,
@@ -578,6 +580,31 @@ def test_refresh_analysis_handles_mixed_timing_per_item() -> None:
     result = refresh_analysis([timed, saved], 13.0, 1.5)
     assert result["checked_count"] == 2
     assert result["items"][1]["analysis"]["mismatch_ratio"] != float("inf")
+
+
+def test_hydrate_context_timing_uses_real_neighbors_and_stays_stable() -> None:
+    text = "Очень длинный текст для субтитра"
+    sparse = [make_item(2, text, 1000, 2000), make_item(4, "Короткая реплика", 100000, 101000)]
+    context = [
+        make_item(1, "До", 0, 1000),
+        make_item(2, text, 1000, 2000),
+        make_item(3, "После", 2200, 3200),
+        make_item(4, "Короткая реплика", 3200, 4200),
+    ]
+    original_context = copy.deepcopy(context)
+    old = refresh_analysis(copy.deepcopy(sparse), 13.0, 1.5)
+    hydrated = hydrate_context_timing(sparse, context, 13.0, 1.5)
+    first = refresh_analysis(hydrated, 13.0, 1.5, preserve_saved_timing=True)
+
+    assert old["items"][0]["analysis"]["effective_duration_sec"] > 90.0
+    assert first["items"][0]["analysis"]["effective_duration_sec"] == pytest.approx(1.0)
+    assert first["items"][0]["analysis"]["is_critical"] is True
+    assert select_subtitles_for_shortening(first["items"], 1.5) == [0]
+    assert context == original_context
+
+    first["items"][0]["text"] = ["Короткий текст"]
+    second = refresh_analysis(first["items"], 13.0, 1.5, preserve_saved_timing=True)
+    assert second["items"][0]["analysis"]["effective_duration_sec"] == pytest.approx(1.0)
 
 
 def test_strict_budget_numbers_and_negation() -> None:

@@ -13,8 +13,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from utils.analyze_text import join_text_lines
 from utils.review_shortened_subtitles_deepseek import review_subtitles
-from utils.shorten_helpers import (calculate_budget, load_api_key, load_json, refresh_analysis,
-                                   run_iterative_shortening, save_json, validate_context_source)
+from utils.shorten_helpers import (calculate_budget, hydrate_context_timing, load_api_key,
+                                   load_json, refresh_analysis, run_iterative_shortening,
+                                   save_json, validate_context_source)
 from utils.shorten_subtitles_deepseek import make_deepseek_shorten_func, usage_summary
 
 Items = List[Dict[str, Any]]
@@ -56,8 +57,27 @@ def _write_json(path: Path, value: Dict[str, Any]) -> None:
 
 
 def _critical_count(items: Items, config: PipelineConfig) -> int:
-    analyzed = refresh_analysis(copy.deepcopy(items), config.avg_chars_per_sec, config.threshold)
+    analyzed = refresh_analysis(
+        copy.deepcopy(items), config.avg_chars_per_sec, config.threshold,
+        preserve_saved_timing=config.context_source is not None,
+    )
     return len(analyzed["critical_items"])
+
+
+def _carry_stable_timing(source: Items, targets: Items) -> Items:
+    """Keep target text/schema while carrying timing captured from source."""
+    source_by_index = {item.get("index"): item for item in source}
+    carried = copy.deepcopy(targets)
+    for target in carried:
+        source_item = source_by_index.get(target.get("index"))
+        if source_item is None:
+            continue
+        source_analysis = source_item.get("analysis", {})
+        target_analysis = target.setdefault("analysis", {})
+        for field in ("available_duration_sec", "effective_duration_sec", "is_checked"):
+            if field in source_analysis:
+                target_analysis[field] = copy.deepcopy(source_analysis[field])
+    return carried
 
 
 def _changed_count(original: Items, current: Items) -> int:
@@ -148,6 +168,7 @@ def _default_pro_stage(original: Items, shortened: Items,
         config.pro_max_input_tokens, 3, config.avg_chars_per_sec,
         config.threshold, config.base_url,
         concurrency=config.pro_concurrency,
+        enable_planner=True,
         context_source=load_json(config.context_source) if config.context_source else None,
     ))
 
@@ -156,8 +177,12 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
                  pro_stage: ProStage = _default_pro_stage) -> Path:
     """Run both stages, persist artifacts, and return the reviewed final path."""
     original = load_json(config.input_path)
-    if config.context_source:
-        validate_context_source(original, load_json(config.context_source))
+    context_items = load_json(config.context_source) if config.context_source else None
+    if context_items is not None:
+        validate_context_source(original, context_items)
+        original = hydrate_context_timing(
+            original, context_items, config.avg_chars_per_sec, config.threshold
+        )
     original_for_pro = copy.deepcopy(original)
     stem = config.input_path.stem
     flash_dir = config.output_dir / "flash"
@@ -172,6 +197,8 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
     critical_start = _critical_count(original, config)
     print("Flash stage: starting", flush=True)
     flash_output, flash_usage = flash_stage(copy.deepcopy(original), config, flash_dir, stem)
+    if context_items is not None:
+        flash_output = _carry_stable_timing(original, flash_output)
     print("Flash stage: completed", flush=True)
     flash_final_path = flash_dir / f"{stem}_final.json"
     if not flash_final_path.exists():
@@ -201,7 +228,12 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
         _write_json(pipeline_report_path, base_report)
         raise PipelineStageError(f"Pro review failed; Flash result kept at {flash_final_path}") from exc
 
-    refreshed = refresh_analysis(reviewed, config.avg_chars_per_sec, config.threshold)
+    if context_items is not None:
+        reviewed = _carry_stable_timing(original, reviewed)
+    refreshed = refresh_analysis(
+        reviewed, config.avg_chars_per_sec, config.threshold,
+        preserve_saved_timing=config.context_source is not None,
+    )
     unresolved_indices, final_items = _mark_shortening(
         original, flash_output, refreshed["items"], pro_report, config
     )
