@@ -1,0 +1,236 @@
+# Subtitle shortening experiments log
+
+**Snapshot date: 2026-08-01.** This is the empirical, decision-oriented record for
+subtitle shortening. The architecture document is normative; this log records
+what was measured, rejected, accepted, or still needs evidence.
+
+## Purpose, scope, and update rules
+
+Use this log to prevent repeated failed experiments and to make every shortening
+decision reproducible. Record the goal, fixture and provenance, backend/model,
+exact command or settings, metrics, failures, cost/accounting, decision, and next
+step. Update this file when an experiment changes a decision, adds independent
+evidence, or establishes a release-relevant limitation. Do not silently turn an
+opt-in experiment into a default.
+
+### State at this snapshot
+
+- **Committed baseline:** Phase 1-3 implementation and tests at commit `54a4e62`.
+- **Current uncommitted experimental work:** duration profiles, direct Flash
+  selection, standalone Pro duration gate, and combined-profile wiring are
+  experimental opt-ins; this log describes their measured state, not a claim that
+  they are production defaults.
+- **Ignored/temp artifacts:** generated reports, audio, caches, and smoke outputs
+  under `output/` and `/tmp/opencode` are non-durable unless explicitly copied
+  into a tracked fixture or otherwise preserved. A path in a command is not
+  evidence that the artifact is committed.
+- **Future work:** multi-cue semantic units, actual-TTS final measurement and
+  bounded compaction/reverification, and independent model-family verification
+  remain pending.
+
+## Definition of success and release criteria
+
+A release candidate must satisfy all of these working targets. They are revisable
+targets, not achieved results, and require evidence across multiple episodes,
+genres, and voices:
+
+- Zero severe silent semantic errors: dropped negation, modality, time,
+  causality, comparison, alternatives, references, spatial relations, or other
+  material propositions are not silently accepted.
+- Mean human semantic score >=9/10, with no accepted item below 7/10.
+  Automated verifier scores are not a substitute for human quality.
+- >=95% actual post-processed TTS fit among resolved items, measured at the
+  selected production settings rather than inferred from `max_chars` or a proxy.
+- <=10% unresolved on the release set, with every unresolved result explicit and
+  fail-closed.
+- <=1% parse/API failures, and zero failures counted as verified. Bounded retries,
+  stable failure reasons, and retained diagnostics are required.
+- At least five independent episodes, two genres, and two voices. Accepted-subset
+  quality must not be confused with overall coverage: a clean score on accepted
+  targets does not prove that all critical targets can be resolved.
+
+## Architecture and invariant principles
+
+The current flow is:
+
+```text
+  analyze -> Flash generate -> original-only semantic planner
+  -> Pro critic/editor/verifier/repair -> fit decision
+```
+
+The invariants are:
+
+- Timing is immutable for planning and decisions; generated text does not rewrite
+  the source timing contract.
+- The planner receives original text only. Flash candidates and editor lineage
+  cannot contaminate the semantic plan.
+- Anchors are deterministic, indexed, and auditable.
+- Retries are bounded and stage-specific; malformed or unavailable responses do
+  not become verification.
+- Unresolved is fail-closed: retain the safest locally valid text rather than
+  silently accept semantic damage.
+- Quality stages are non-thinking. Character counting, schema validation, and
+  semantic checks remain local deterministic checks where applicable.
+- Semantic verification is separate from duration measurement and fit selection.
+  `max_chars`, CPS, and exploratory duration profiles are not actual TTS proof.
+
+## Fixtures and data provenance
+
+- Tracked repository fixtures include the E01 data and the `hard10` smoke set.
+  The full E01 fixture remains the release regression reference; `hard10` is a
+  fast comparison subset selected from known hard cases.
+- Independent public E03 and E04 data were evaluated from a Drive file. Preserve
+  the authoritative file IDs, SRT byte sizes, SHA-256 values, and parsed cue
+  counts with each copied experiment report; these values are provenance checks,
+  not interchangeable fixture names. Durable provenance is: **E03: Drive file ID
+  `1brbJN4K9Sl2fg9Qvjk-pFrs0VGl-3rJo`, 156031 bytes, SHA-256
+  `1a8bee086a0afebb288095b618cf2d152ff96721bc26c77241baf606c9d984fa`, parsed
+  count 1523; E04: Drive file ID `1a0tQHjUVLg9GPJ74ysV0f9_8fIqPToou`, 104447
+  bytes, SHA-256
+  `16e2689c67a5ca6c44cb7c2598b15600ba8abff52bc91ba6dacb1899632eb6e5`, parsed
+  count 1056**.
+- `/tmp/opencode` and `output/` artifacts are non-durable/ignored unless
+  explicitly preserved. Reports without fixture identity, model, command, and
+  hash are not release evidence.
+
+## Backend and model matrix
+
+| Backend/model | Role | Guarantees and limits |
+|---|---|---|
+| DeepSeek Flash (`deepseek-v4-flash`) | Generation and direct Flash target-selection experiment | Direct API path supports explicit non-thinking and JSON requests; usage/cost metadata is available on that path. |
+| DeepSeek Pro (`deepseek-v4-pro`) | Planner, critic, editor, verifier, repair, and standalone duration gate | Non-thinking quality stages, strict local parsing, bounded retries, and fail-closed routing. |
+| Existing OpenCode HTTP path | Alternative provider/server orchestration | Its server path has weaker guarantees for JSON controls, thinking controls, and usage accounting; it is not equivalent to the direct DeepSeek API. |
+| Official ChatGPT Pro Codex path | Recommended subscription-backed test harness for future independent model-family verification | Test through the official local Codex CLI, not by copying browser state. |
+| OpenCode ChatGPT OAuth | Third-party subscription-backed experiment path | Supported by OpenCode, but not explicitly endorsed by OpenAI; it is not equivalent to the official Codex path. |
+
+Authoritative setup and reference links:
+
+- Codex: [`codex login`](https://developers.openai.com/codex/auth),
+  [`codex exec --json` and `--output-schema`](https://developers.openai.com/codex/non-interactive-mode),
+  [Codex pricing](https://developers.openai.com/codex/pricing).
+- OpenCode: `opencode auth login --provider openai`, then
+  `opencode models openai --refresh`; use the repository's existing command with
+  `--model openai/<model-from-discovery>`. See [OpenCode providers](https://opencode.ai/docs/providers/)
+  and [OpenCode server](https://opencode.ai/docs/server/).
+
+The official Codex path is the recommended subscription-backed test harness.
+OpenCode OAuth is supported by OpenCode but is not explicitly endorsed by
+OpenAI. The ordinary OpenAI SDK/Responses API still requires separately billed
+API credentials. Subscription automation is local, trusted, and rate-limited; it
+is not a public gateway. Do not use browser-cookie hacks, copied cookies, or
+local auth tokens in this repository or in experiment reports.
+
+## Decision table
+
+| # | Decision | Status | Evidence |
+|---|---|---|---|
+| 1 | Committed Phase 1-3 baseline | Accepted | Commit `54a4e62`; implemented immutable timing/planning boundaries, semantic stages, and compatibility-preserving behavior. |
+| 2 | Explicit semantic checks, bounded retries, no reasoning | Accepted | Deterministic required checks, bounded stage retries, fail-closed handling, and non-thinking quality stages are implemented and tested. |
+| 3 | Multi-candidate editor | Rejected | Verified 2 -> 1; compaction 5 -> 2; silent omission at index 16; estimated cost rose about $0.01494 -> $0.01634, without justifying the added candidates. |
+| 4 | Proposition-level verifier | Rejected | 3/5 positive result, with false-pass indices 81 and 121; parse-failure indices 20 and 77. |
+| 5 | Scalar CPS | Rejected | First-30 p25 was 9.477 versus 6.930 for the disjoint stratified-30 p25; scalar CPS is length-sensitive and unstable. |
+| 6 | Raw additive regression | Accepted as research only | Chars-only combined-60: `duration=1.877565+0.051104*chars`, R2 0.872356, MAE 0.378399, RMSE 0.545698; 5-fold MAE 0.390463, RMSE 0.556578. Raw chars+punctuation combined coefficients were `1.553941846/0.049656856/0.176788939`; new60 held-out MAE 0.389846, RMSE 0.544727, R2 0.932680. Held-out p75 margin coverage was only 66.7-76.7% in the prior two-sample transfer. |
+| 7 | Post-silence additive model | Accepted opt-in | 120 records across 3 episodes; coefficients `(0.6234919816, 0.0517855126, 0.1424302413)`; LOEO MAE 0.208, RMSE 0.288, R2 0.972; p90/p95 margins 0.311711/0.431555 sec; held-out selector counts were 99/1/19/1. |
+| 8 | Direct Flash duration selection | Accepted opt-in, not default | Real paid cost was $0.00076104: four actionable additional targets, two safely unchanged, and two actual fits. One of the fits had semantic loss until Pro repair; therefore this remains opt-in, with proxy measurement and nondeterminism caveats. |
+| 9 | Standalone Pro duration gate | Accepted opt-in | Deterministic decisions were 517/875; no-gate was 1/4 versus gate 2/4 on semantic + actual-fit outcomes. Costs were $0.01514621 without the gate and $0.00797013 with it, but request and nondeterminism differences prevent attributing the difference to the gate. |
+| 10 | Combined profile wiring | Accepted experimental, not default | Smoke cost was $0.01189873 with 0 reasoning tokens, 0 API failures, and 2 parse failures; one target was verified in that stochastic run. Conservative unresolved behavior was retained; the index-42 status bug was fixed offline. Final actual Edge measurement remains pending because of service/cache state. |
+| 11 | Multi-cue semantic units | Pending, highest priority | Current anchor checks do not yet provide the needed multi-cue proposition coverage; design and independent evaluation are still required. |
+| 12 | Actual-TTS final measurement plus one bounded compaction/reverify | Pending | Final production-equivalent TTS measurement and the single bounded recovery path have not yet been completed as release evidence. |
+| 13 | Independent model-family verifier via Codex/ChatGPT Pro | Pending | Official Codex/ChatGPT Pro path has not yet supplied an independent verifier evaluation. |
+
+## Do not repeat without new evidence
+
+Do not repeat the rejected multi-candidate editor, proposition-label hard checks,
+or scalar CPS approach without a changed design and new evidence addressing the
+failure mode. Do not make in-sample p75 margin safety claims, and do not treat a
+same-model automated score as human semantic quality. A new experiment must state
+what evidence would overturn the prior decision before spending API or
+subscription budget.
+
+## Honest readiness assessment
+
+The current evidence supports roughly **9/10 for timing/selection on tested
+same-show data**, **7/10 for semantic protection**, and **5/10 for
+completion/coverage**. Overall readiness is approximately **6-7/10**, not close
+enough to claim 10/10. The estimate is limited by small A/B samples, same-show
+sampling, limited independent episodes/genres/voices, proxy duration work, and
+pending actual-TTS and independent-model verification. It is a readiness signal,
+not a release metric.
+
+## Reproduction commands
+
+Use repository-root commands and the project convention shown below. Paths in
+angle brackets are placeholders; in particular, `<EXPERIMENTAL_PROFILE_PATH>`
+does not imply that a production profile is committed.
+
+### Calibration: raw and post-silence
+
+```bash
+uv run --python subs_env/bin/python -m utils.calibrate_tts_budget <INPUT_JSON> \
+  --output-dir output/tts_calibration
+uv run --python subs_env/bin/python -m utils.calibrate_tts_budget <INPUT_JSON> \
+  --output-dir output/tts_calibration --duration-mode post_silence \
+  --silence-dbfs -35 --silence-threshold-sec 0.5 \
+  --silence-target-sec 0.2 --silence-frame-ms 10
+```
+
+### Direct Flash profile selection
+
+```bash
+uv run --python subs_env/bin/python -m utils.shorten_subtitles_deepseek <INPUT_JSON> \
+  --duration-profile <EXPERIMENTAL_PROFILE_PATH> --duration-fit-ratio 1.0
+```
+
+### Standalone Pro gate
+
+```bash
+uv run --python subs_env/bin/python -m utils.review_shortened_subtitles_deepseek \
+  <ORIGINAL_JSON> <SHORTENED_JSON> \
+  --duration-profile <EXPERIMENTAL_PROFILE_PATH> --duration-fit-ratio 1.0
+```
+
+### Combined experimental profile
+
+```bash
+uv run --python subs_env/bin/python -m utils.shorten_review_pipeline <INPUT_JSON> \
+  --context-source <FULL_EPISODE_ANALYZED_JSON> \
+  --duration-profile <EXPERIMENTAL_PROFILE_PATH> --duration-fit-ratio 1.0 \
+  --output-dir output/experimental_combined
+```
+
+Relevant local verification commands are:
+
+```bash
+uv run --python subs_env/bin/python -m pytest -q
+uv run --python subs_env/bin/python -m pytest -q tests/test_calibrate_tts_budget.py
+uv run --python subs_env/bin/python -m pytest -q tests/test_review_shortened_subtitles_deepseek.py
+uv run --python subs_env/bin/python -m pytest -q tests/test_shorten_review_pipeline.py
+uv run --python subs_env/bin/python -m pytest -q tests/test_shorten_subtitles.py
+uv run --python subs_env/bin/python -m pytest -q tests/test_shortening_domain.py
+```
+
+Paid API runs are nondeterministic. Preserve the exact flags, model discovery
+result, fixture hashes, usage reports, and failure reports when a run is used as
+evidence.
+
+## Next experiment order and commit boundary
+
+1. Commit the current experimental opt-in foundation after review; it is ready
+   to commit as experimental work and must not become a default by implication.
+2. Implement and evaluate multi-cue semantic units in a separate next commit;
+   this is the highest-priority semantic gap.
+3. Add the actual-TTS final gate and one bounded compaction/reverify path, with
+   production-equivalent measurement and explicit unresolved accounting.
+4. Broaden model-family, episode, genre, and voice evaluation, including the
+   independent Codex/ChatGPT Pro verifier path.
+
+## Cost and accounting
+
+Direct DeepSeek API calls have token-based costs and emit usage/cost estimates;
+record the model, cache state, token counts, pricing label, and timestamp with
+each paid run. Subscription-backed calls through local Codex or OpenCode are
+accounted as subscription usage rather than stable per-token API pricing. Record
+the small A/B costs as observed run totals, but do not claim stable pricing or
+extrapolate them to production without a current provider price source. Keep
+direct API costs separate from subscription calls and from local CPU/TTS/cache
+costs.

@@ -12,8 +12,15 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from utils.shorten_subtitles_deepseek import (
+    build_parser,
+    main as deepseek_main,
     shorten_subtitles_deepseek,
     shorten_via_deepseek_async,
+)
+from utils.shortening_domain import (
+    POST_SILENCE_MEASUREMENT_LABEL,
+    CalibratedDurationModel,
+    DurationSelectionPolicy,
 )
 
 from utils.shorten_helpers import (
@@ -414,6 +421,34 @@ class TestSelectSubtitlesForShortening:
         )
         assert len(selected) == 0
 
+    def test_calibrated_selection_uses_effective_duration_and_strict_boundary(self) -> None:
+        model = CalibratedDurationModel(
+            0.0, 1.0, 0.0, POST_SILENCE_MEASUREMENT_LABEL, "v", "r", 30, 2,
+            "leave_one_episode_out", 0.0, 0.0, 1.0,
+        )
+        items = [make_item(1, "12345", 0, 1000, mismatch_ratio=100.0)]
+        items[0]["analysis"]["effective_duration_sec"] = 5.0
+        assert select_subtitles_for_shortening(items, 999.0, selection_policy=DurationSelectionPolicy(model)) == []
+        items[0]["text"] = ["123456"]
+        assert select_subtitles_for_shortening(items, 999.0, selection_policy=DurationSelectionPolicy(model)) == [0]
+
+    def test_calibrated_selection_checks_flags_exclusions_duration_and_list_punctuation(self) -> None:
+        model = CalibratedDurationModel(
+            0.0, 0.1, 0.2, POST_SILENCE_MEASUREMENT_LABEL, "v", "r", 30, 2,
+            "leave_one_episode_out", 0.0, 0.0, 1.0,
+        )
+        policy = DurationSelectionPolicy(model)
+        selected = [
+            make_item(1, ["long", "text!"], 0, 1000, mismatch_ratio=0.1),
+            make_item(2, "long text", 0, 1000, mismatch_ratio=99.0, is_checked=False),
+            make_item(3, "long text", 0, 0, mismatch_ratio=99.0),
+        ]
+        selected[0]["analysis"]["effective_duration_sec"] = 1.0
+        selected[1]["analysis"]["effective_duration_sec"] = 1.0
+        selected[2]["analysis"]["effective_duration_sec"] = 0.0
+        assert select_subtitles_for_shortening(selected, 0.0, {0}, policy) == []
+        assert select_subtitles_for_shortening(selected, 0.0, selection_policy=policy) == [0]
+
 
 # ---------------------------------------------------------------------------
 # Tests: apply_shortening
@@ -733,6 +768,137 @@ def test_iterative_loop_actual_adapter_call_shape(tmp_path: Path) -> None:
     result = run_iterative_shortening(item and [item], fake_shorten, "m", 1.5, 1, 1, 3, tmp_path, "fixture", avg_chars_per_sec=13.0)
     assert calls == [(13.0, 1.5)]
     assert result[0]["analysis"]["mismatch_ratio"] < 3.0
+
+
+def test_legacy_iterative_selection_matches_refresh_critical_items(tmp_path: Path) -> None:
+    from utils.shorten_helpers import run_iterative_shortening
+
+    items = [make_item(1, "short", 0, 1000, mismatch_ratio=1.0),
+             make_item(2, "long text with extended timing", 1000, 2000, mismatch_ratio=1.0,
+                       extended_mismatch_ratio=2.0),
+             make_item(3, "unchecked long text", 2000, 3000, mismatch_ratio=3.0, is_checked=False)]
+    expected = refresh_analysis(copy.deepcopy(items), 13.0, 1.5)
+    expected_targets = select_subtitles_for_shortening(expected["items"], 1.5)
+    captured: List[List[int]] = []
+
+    def fake_shorten(current: List[Dict[str, Any]], targets: List[int], *args: Any) -> List[ShortenResult]:
+        captured.append(targets[:])
+        return [ShortenResult(index, " ".join(current[index]["text"]),
+                              " ".join(current[index]["text"]), False) for index in targets]
+
+    run_iterative_shortening(items, fake_shorten, "m", 1.5, 1, 1, 3,
+                             tmp_path, "legacy")
+    assert captured == [expected_targets]
+    assert len(expected_targets) == len(expected["critical_items"])
+
+
+def test_iterative_policy_selection_does_not_replace_legacy_budget_ratio(tmp_path: Path) -> None:
+    from utils.shorten_helpers import run_iterative_shortening
+
+    item = make_item(1, "Очень длинный текст для бюджета", 0, 1000, mismatch_ratio=0.1)
+    item["analysis"].update({"effective_duration_sec": 1.0, "is_checked": True})
+    policy = DurationSelectionPolicy(CalibratedDurationModel(
+        0.0, 0.05, 0.0, POST_SILENCE_MEASUREMENT_LABEL, "v", "r", 30, 2,
+        "leave_one_episode_out", 0.0, 0.0, 1.0,
+    ))
+    calls: List[tuple[List[int], float]] = []
+
+    def fake_shorten(items: List[Dict[str, Any]], targets: List[int], model: str,
+                     context: int, min_words: int, effort: Any, strategy: str,
+                     batch: int, cps: float, ratio: float) -> List[ShortenResult]:
+        calls.append((targets[:], ratio))
+        original = " ".join(items[0]["text"])
+        return [ShortenResult(0, original, original, True)]
+
+    result = run_iterative_shortening([item], fake_shorten, "m", 1.5, 1, 2, 3,
+                                      tmp_path, "policy", selection_policy=policy)
+    assert calls == [([0], 1.5), ([0], 1.5)]
+    assert result[0]["text"] == item["text"]
+
+
+def _write_test_profile(path: Path) -> None:
+    path.write_text(json.dumps({
+        "schema_version": 1, "profile_type": "calibrated_post_silence_duration",
+        "measurement": POST_SILENCE_MEASUREMENT_LABEL, "voice": "v", "rate": "r",
+        "coefficients": {"intercept_sec": 0.1, "seconds_per_budget_char": 0.01,
+                         "seconds_per_punctuation": 0.01},
+        "training": {"sample_count": 30, "episode_count": 2},
+        "validation": {"method": "leave_one_episode_out", "mae_sec": 0.1,
+                        "rmse_sec": 0.2, "r_squared": 0.8},
+    }), encoding="utf-8")
+
+
+def test_deepseek_parser_duration_flags() -> None:
+    defaults = build_parser().parse_args(["input.json"])
+    assert defaults.duration_profile is None and defaults.duration_fit_ratio == 1.0
+    args = build_parser().parse_args(["input.json", "--duration-profile", "profile.json",
+                                      "--duration-fit-ratio", "1.25"])
+    assert args.duration_profile == Path("profile.json")
+    assert args.duration_fit_ratio == 1.25
+
+
+@pytest.mark.parametrize("argv", [["input.json", "--duration-fit-ratio", "0"],
+                                   ["input.json", "--duration-fit-ratio", "nan"]])
+def test_deepseek_invalid_duration_configuration_precedes_api(monkeypatch: pytest.MonkeyPatch,
+                                                               argv: List[str]) -> None:
+    monkeypatch.setattr("utils.shorten_subtitles_deepseek.load_api_key",
+                        lambda *args: pytest.fail("API key lookup must not run"))
+    assert deepseek_main(argv) == 2
+
+
+@pytest.mark.parametrize("profile_name,profile_text", [("missing.json", None),
+                                                        ("malformed.json", "not json"),
+                                                        ("rejected.json", json.dumps({"schema_version": 1}))])
+def test_deepseek_invalid_profile_precedes_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                               profile_name: str, profile_text: str | None) -> None:
+    profile_path = tmp_path / profile_name
+    if profile_text is not None:
+        profile_path.write_text(profile_text, encoding="utf-8")
+    monkeypatch.setattr("utils.shorten_subtitles_deepseek.load_api_key",
+                        lambda *args: pytest.fail("API key lookup must not run"))
+    assert deepseek_main(["input.json", "--duration-profile", str(profile_path)]) == 2
+
+
+def test_deepseek_valid_profile_metadata_and_policy_propagation(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([make_item(1, "A long subtitle", 0, 2000, mismatch_ratio=2.0)]), encoding="utf-8")
+    profile_path = tmp_path / "profile.json"
+    _write_test_profile(profile_path)
+    captured: List[Any] = []
+
+    def fake_run(**kwargs: Any) -> None:
+        captured.append(kwargs)
+
+    monkeypatch.setattr("utils.shorten_subtitles_deepseek.run_iterative_shortening", fake_run)
+    monkeypatch.setattr("utils.shorten_subtitles_deepseek.load_api_key", lambda *args: "secret")
+    assert deepseek_main([str(input_path), "--duration-profile", str(profile_path),
+                          "--output-dir", str(tmp_path / "out")]) == 0
+    assert captured[0]["shorten_func"] is not None
+    assert "secret" not in repr(captured[0]["shorten_func"])
+    assert str(profile_path) not in repr(captured[0])
+    assert isinstance(captured[0]["selection_policy"], DurationSelectionPolicy)
+    usage = json.loads((tmp_path / "out" / "input_final.usage.json").read_text(encoding="utf-8"))
+    assert usage["selection_mode"] == "calibrated_post_silence_duration"
+    assert usage["fit_ratio"] == 1.0
+    assert usage["duration_profile"]["voice"] == "v"
+    assert usage["duration_profile"]["coefficients"]["intercept_sec"] == 0.1
+    assert usage["duration_profile"]["validation"]["method"] == "leave_one_episode_out"
+    assert "secret" not in json.dumps(usage)
+    assert str(profile_path) not in json.dumps(usage)
+
+
+def test_deepseek_legacy_usage_mode_without_profile(tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr("utils.shorten_subtitles_deepseek.run_iterative_shortening", lambda **kwargs: None)
+    monkeypatch.setattr("utils.shorten_subtitles_deepseek.load_api_key", lambda *args: "secret")
+    assert deepseek_main([str(input_path), "--output-dir", str(tmp_path / "out")]) == 0
+    usage = json.loads((tmp_path / "out" / "input_final.usage.json").read_text(encoding="utf-8"))
+    assert usage["selection_mode"] == "legacy_mismatch_ratio"
+    assert "secret" not in json.dumps(usage)
+    assert "duration_profile" not in usage
 
 
 # ---------------------------------------------------------------------------

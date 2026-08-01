@@ -1,5 +1,135 @@
 # Shorten Subtitles — Subtitle Shortening Tools
 
+## Edge TTS budget calibration
+
+For empirical results, decision status, provenance, and reproduction notes, see
+the [shortening experiments log](shortening_experiments.md).
+
+The isolated `utils.calibrate_tts_budget` module measures Edge TTS audio without
+changing production shortening or budget behavior. By default it measures raw
+MP3 duration. It caches one file per subtitle/voice/settings combination and
+reports both the current budget convention (spaces included) and the legacy SPS
+convention (using `count_symbols_for_sps`).
+
+```bash
+uv run --python subs_env/bin/python -m utils.calibrate_tts_budget input.json \
+  --output-dir output/tts_calibration
+```
+
+To measure a production-like post-silence duration from the same cached MP3:
+
+```bash
+uv run --python subs_env/bin/python -m utils.calibrate_tts_budget input.json \
+  --output-dir output/tts_calibration \
+  --duration-mode post_silence \
+  --silence-dbfs -35 --silence-threshold-sec 0.5 \
+  --silence-target-sec 0.2 --silence-frame-ms 10
+```
+
+The cache key and MP3 filename do not include duration mode or silence
+parameters. Thus the post-silence report deliberately reuses the raw MP3 cache
+and recomputes measurements on every run. Each record retains
+`raw_duration_sec`; `duration_sec` is the selected raw or post-silence value,
+and CPS/model fields use that selected value. Post-silence mode decodes with
+libsndfile, performs an in-memory PCM16 WAV round-trip, and then calls the exact
+in-memory production reducer defaults (`-35 dBFS`, `0.5` seconds to `0.2`
+seconds, 10 ms frames), and measures the resulting duration after reduction.
+It still differs from actual production ffmpeg decode and does not claim
+waveform equivalence or a production guarantee.
+
+The report uses linear interpolation at positions 0 through n-1 for p10 and
+p25. `exploratory_budget_cps_p25` is a scalar CPS statistic only: CPS is
+length-sensitive and is not a production recommendation. Raw MP3 duration is
+measured before ffmpeg or silence reduction, so it includes provider silence and
+encoder padding and is not an exact production WAV equivalent. Even the much
+better post-silence profile is exploratory only and is not a hard gate for
+production budgeting or TTS.
+
+For each voice, the report also fits ordinary least-squares duration regressions:
+
+* `duration_sec = intercept_sec + seconds_per_budget_char * budget_chars`
+* the same formula plus `seconds_per_punctuation * punctuation_count`, where the
+  counter includes each `. , ! ? ; :` character (an ellipsis counts three).
+
+Models include signed residual quantiles. An `exploratory_duration_profile` is
+available only with at least 30 valid samples. It prefers the physically valid
+chars-plus-punctuation model, otherwise a physically valid chars-only model,
+and reports the coefficients plus `in_sample_p75_margin_sec`, defined as the
+maximum of zero and the signed in-sample residual p75
+(`observed_duration_sec - predicted_duration_sec`). The `margin_quantile`
+field identifies this sign convention explicitly. Both the coefficients and
+margin are fitted and evaluated on the same sample; they are not
+cross-validated, are not a production recommendation, and do not guarantee
+coverage. This exploratory calibration profile is not connected to production
+budgeting or TTS.
+
+`calibrate_tts_budget` emits only per-report, in-sample exploratory models. It
+does not produce the strict leave-one-episode-out (LOEO) profile consumed by the
+DeepSeek experiment. A current strict profile must be assembled by a separate
+validated analysis process; it is not exported automatically by calibration.
+
+### Calibrated duration profile experiments
+
+The strict calibrated profile supports two independent, explicit opt-ins. Neither
+mode is enabled by default, and neither is a production guarantee.
+
+#### Direct DeepSeek Flash: target-selection opt-in
+
+The direct Flash shortener can use the profile to change which subtitles are
+selected for shortening:
+
+```bash
+uv run -m utils.shorten_subtitles_deepseek input.json \
+  --duration-profile calibrated-profile.json \
+  --duration-fit-ratio 1.0
+```
+
+In this mode, the profile affects target selection only. The legacy mismatch
+threshold still controls the `max_chars` generation budget. It does not apply
+the reviewer candidate gate or the `duration_too_long` reason.
+
+#### Standalone DeepSeek Pro reviewer: candidate-gate opt-in
+
+The standalone DeepSeek Pro reviewer can use the same profile as a local
+post-silence point-duration gate:
+
+```bash
+uv run -m utils.review_shortened_subtitles_deepseek original.json shortened.json \
+  --duration-profile calibrated-profile.json \
+  --duration-fit-ratio 1.0
+```
+
+The profile is strict JSON with this shape (no extra fields):
+
+```json
+{
+  "schema_version": 1,
+  "profile_type": "calibrated_post_silence_duration",
+  "measurement": "edge_audio_decoded_with_libsndfile_pcm16_wav_emulation_measured_after_production_silence_reduction",
+  "voice": "ru-RU-DmitryNeural",
+  "rate": "+0%",
+  "coefficients": {
+    "intercept_sec": 0.1,
+    "seconds_per_budget_char": 0.05,
+    "seconds_per_punctuation": 0.02
+  },
+  "training": {"sample_count": 30, "episode_count": 2},
+  "validation": {
+    "method": "leave_one_episode_out",
+    "mae_sec": 0.1,
+    "rmse_sec": 0.2,
+    "r_squared": 0.8
+  }
+}
+```
+
+For the reviewer mode, `--duration-fit-ratio 1.0` means predicted post-silence
+duration must fit the effective subtitle slot. The strict point model has no
+margin: a candidate whose prediction is greater than the limit is rejected with
+the stable reason `duration_too_long`; equality passes. This gate does not
+change `max_chars`, prompts, target selection, semantic verdicts, or compaction
+policy. OpenCode and the combined pipeline remain unchanged.
+
 Two approaches to shorten subtitles that are too long for their duration:
 
 1. **Direct DeepSeek API** — `utils.shorten_subtitles_deepseek`
@@ -268,6 +398,18 @@ Use pipeline `--pro-concurrency N` or standalone reviewer `--concurrency N` to
 change the Pro request limit (default: `3` for both). Independent requests within
 each Pro stage run in bounded parallel, while the critic → editor → targeted
 compaction → verifier → repair → reverify stage barriers remain in place.
+
+The combined Flash + Pro pipeline also accepts `--duration-profile PATH`
+and `--duration-fit-ratio FLOAT` as one experimental opt-in. The same loaded
+profile is used consistently for Flash target selection, Pro changed/critical
+selection, the local Pro candidate gate, and pipeline required/status counts.
+Calibrated criticality replaces the legacy mismatch test; it is not ORed with
+it. The legacy `max_chars` budget remains unchanged. Pipeline usage and report
+metadata include only safe profile coefficients, validation provenance, and fit
+ratio - never the profile path or API key. Quality failures retain precedence
+over duration failures; a final candidate that fits `max_chars` but not the
+calibrated duration is reported as `still_over_duration`. This mode is still
+experimental and is not enabled by default. OpenCode behavior is unchanged.
 
 The reviewer selects the unique-index union of Flash-changed and remaining-critical
 targets. Pro uses three separated roles: a non-thinking critic evaluates every target;

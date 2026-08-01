@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import copy
 import json
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ from utils.shorten_helpers import (calculate_budget, hydrate_context_timing, loa
                                    load_json, refresh_analysis, run_iterative_shortening,
                                    save_json, validate_context_source)
 from utils.shorten_subtitles_deepseek import make_deepseek_shorten_func, usage_summary
+from utils.review_shortened_subtitles_deepseek import duration_profile_metadata
+from utils.shortening_domain import CalibratedDurationModel, DurationSelectionPolicy, load_calibrated_duration_profile
 
 Items = List[Dict[str, Any]]
 
@@ -41,6 +44,8 @@ class PipelineConfig:
     pro_context_window: int = 3
     pro_max_input_tokens: int = 50_000
     base_url: str = "https://api.deepseek.com"
+    duration_profile: Optional[CalibratedDurationModel] = None
+    duration_fit_ratio: float = 1.0
 
 
 FlashStage = Callable[[Items, PipelineConfig, Path, str], tuple[Items, Dict[str, Any]]]
@@ -56,12 +61,20 @@ def _write_json(path: Path, value: Dict[str, Any]) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _selection_policy(config: PipelineConfig) -> Optional[DurationSelectionPolicy]:
+    if config.duration_profile is None:
+        return None
+    return DurationSelectionPolicy(config.duration_profile, config.duration_fit_ratio)
+
+
 def _critical_count(items: Items, config: PipelineConfig) -> int:
     analyzed = refresh_analysis(
         copy.deepcopy(items), config.avg_chars_per_sec, config.threshold,
         preserve_saved_timing=config.context_source is not None,
     )
-    return len(analyzed["critical_items"])
+    return sum(_is_critical(item, config.threshold, config.duration_profile, config.duration_fit_ratio,
+                             config.avg_chars_per_sec)
+               for item in analyzed["items"])
 
 
 def _carry_stable_timing(source: Items, targets: Items) -> Items:
@@ -86,8 +99,16 @@ def _changed_count(original: Items, current: Items) -> int:
                for item in current)
 
 
-def _is_critical(item: Dict[str, Any], threshold: float) -> bool:
+def _is_critical(item: Dict[str, Any], threshold: float,
+                 duration_profile: Optional[CalibratedDurationModel] = None,
+                 duration_fit_ratio: float = 1.0,
+                 avg_chars_per_sec: float = 13.0) -> bool:
     analysis = item.get("analysis", {})
+    if duration_profile is not None:
+        budget = calculate_budget(item, threshold, avg_chars_per_sec)
+        return bool(analysis.get("is_checked") and budget.effective_duration_sec > 0
+                    and duration_profile.predict_seconds(join_text_lines(item.get("text", "")))
+                    > budget.effective_duration_sec * duration_fit_ratio)
     extended = analysis.get("extended_mismatch_ratio")
     mismatch = analysis.get("mismatch_ratio")
     effective = extended if isinstance(extended, (int, float)) else mismatch
@@ -110,7 +131,8 @@ def _mark_shortening(original: Items, flash: Items, final: Items,
         flash_text = join_text_lines(flash_item.get("text", "")).strip()
         final_text = join_text_lines(item.get("text", "")).strip()
         budget = calculate_budget(item, config.threshold, config.avg_chars_per_sec)
-        required = (_is_critical(source, config.threshold) or
+        required = (_is_critical(source, config.threshold, config.duration_profile, config.duration_fit_ratio,
+                                 config.avg_chars_per_sec) or
                     len(original_text) > calculate_budget(
                         source, config.threshold, config.avg_chars_per_sec
                     ).max_chars)
@@ -119,12 +141,17 @@ def _mark_shortening(original: Items, flash: Items, final: Items,
             "verified", "accepted", "rewrite"
         }
         over_budget = len(final_text) > budget.max_chars
+        over_duration = (required and config.duration_profile is not None and budget.effective_duration_sec > 0
+                         and config.duration_profile.predict_seconds(final_text)
+                         > budget.effective_duration_sec * config.duration_fit_ratio)
         if len(final_text.split()) <= 1 and over_budget:
             status, reason = "unresolved", "minimum_text_exceeds_budget"
         elif failed_review:
             error = str(outcome.get("error", ""))
             quality_failure = error == "decision_unresolved" or error.startswith("quality_flags:")
             status, reason = "unresolved", "quality_unresolved" if quality_failure else "review_fallback"
+        elif over_duration:
+            status, reason = "unresolved", "still_over_duration"
         elif over_budget:
             status, reason = "unresolved", "still_over_budget"
         elif required and index not in selected:
@@ -155,8 +182,13 @@ def _default_flash_stage(items: Items, config: PipelineConfig, output_dir: Path,
         reasoning_effort=None, avg_chars_per_sec=config.avg_chars_per_sec,
         batch_size=config.flash_batch_size,
         context_items=load_json(config.context_source) if config.context_source else None,
+        selection_policy=_selection_policy(config),
     )
-    return output, usage_summary(usage)
+    summary = usage_summary(usage)
+    if config.duration_profile is not None:
+        summary["selection_mode"] = "calibrated_post_silence_duration"
+        summary["duration_profile"] = duration_profile_metadata(config.duration_profile, config.duration_fit_ratio)
+    return output, summary
 
 
 def _default_pro_stage(original: Items, shortened: Items,
@@ -170,12 +202,15 @@ def _default_pro_stage(original: Items, shortened: Items,
         concurrency=config.pro_concurrency,
         enable_planner=True,
         context_source=load_json(config.context_source) if config.context_source else None,
+        duration_profile=config.duration_profile,
+        duration_fit_ratio=config.duration_fit_ratio,
     ))
 
 
 def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flash_stage,
                  pro_stage: ProStage = _default_pro_stage) -> Path:
     """Run both stages, persist artifacts, and return the reviewed final path."""
+    _selection_policy(config)
     original = load_json(config.input_path)
     context_items = load_json(config.context_source) if config.context_source else None
     if context_items is not None:
@@ -216,6 +251,10 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
                   "final": str(final_path), "pro_report": str(pro_report_path),
                   "pro_usage": str(pro_usage_path)},
     }
+    if config.duration_profile is not None:
+        base_report["duration_profile"] = duration_profile_metadata(
+            config.duration_profile, config.duration_fit_ratio
+        )
     try:
         print("Pro stage: starting", flush=True)
         reviewed, pro_report, pro_usage = pro_stage(
@@ -245,10 +284,14 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
                                     float(pro_usage.get("estimated_cost_usd", 0)), 8),
         "flash": flash_usage, "pro": pro_usage,
     }
+    if config.duration_profile is not None:
+        combined_usage["duration_profile"] = duration_profile_metadata(
+            config.duration_profile, config.duration_fit_ratio
+        )
     _write_json(pipeline_usage_path, combined_usage)
     base_report.update({
         "status": "completed_with_unresolved" if unresolved_indices else "completed", "pro": pro_report,
-        "final_critical": len(refreshed["critical_items"]),
+        "final_critical": _critical_count(refreshed["items"], config),
         "unresolved_count": len(unresolved_indices), "unresolved_indices": unresolved_indices,
         "paths": {**base_report["paths"], "pipeline_usage": str(pipeline_usage_path),
                   "pipeline_report": str(pipeline_report_path)},
@@ -256,7 +299,7 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
     _write_json(pipeline_report_path, base_report)
     print(f"Final reviewed JSON: {final_path}")
     print(f"Stages: critical {critical_start} -> {flash_critical} -> "
-          f"{len(refreshed['critical_items'])}; Flash changed {flash_changed}; "
+          f"{_critical_count(refreshed['items'], config)}; Flash changed {flash_changed}; "
           f"Pro selected {pro_report.get('selected', 0)}, fallback {len(pro_report.get('fallback', []))}")
     return final_path
 
@@ -288,12 +331,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pro-context-window", type=int, default=3)
     parser.add_argument("--pro-max-input-tokens", type=int, default=50_000)
+    parser.add_argument("--duration-profile", type=Path)
+    parser.add_argument("--duration-fit-ratio", type=float, default=1.0)
     parser.add_argument("--output-dir", "-o", default="output/shorten_review")
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        if (isinstance(args.duration_fit_ratio, bool) or not math.isfinite(args.duration_fit_ratio)
+                or args.duration_fit_ratio <= 0):
+            raise ValueError("duration_fit_ratio must be finite and positive")
+        duration_profile = (load_calibrated_duration_profile(args.duration_profile)
+                            if args.duration_profile is not None else None)
+    except ValueError as exc:
+        print(f"ERROR: invalid duration selection configuration: {exc}", file=sys.stderr)
+        return 2
     api_key = args.api_key or load_api_key("DEEPSEEK_API_KEY")
     if not api_key:
         print("ERROR: DeepSeek API key not found.", file=sys.stderr)
@@ -308,6 +362,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         pro_concurrency=args.pro_concurrency,
         pro_risk_threshold=args.pro_risk_threshold, pro_context_window=args.pro_context_window,
         pro_max_input_tokens=args.pro_max_input_tokens, base_url=args.base_url,
+        duration_profile=duration_profile, duration_fit_ratio=args.duration_fit_ratio,
     )
     try:
         run_pipeline(config)

@@ -6,17 +6,19 @@ import argparse
 import asyncio
 import copy
 import json
+import math
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence, TypedDict
 
 from utils.analyze_text import join_text_lines
 from utils.shorten_helpers import calculate_budget, load_api_key, load_json, save_json, target_min_words, validate_context_source
 from utils.shorten_subtitles_deepseek import dynamic_max_tokens, shorten_via_deepseek_async
 from utils.semantic_plan import PLANNER_PROMPT, SemanticPlan, parse_semantic_plans
 from utils.semantic_requirements import PLANNER_ISSUE_CODES, SemanticRequirement, extract_semantic_requirements
+from utils.shortening_domain import CalibratedDurationModel, load_calibrated_duration_profile
 
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_BATCH_SIZE = 4
@@ -89,6 +91,13 @@ class ReviewTarget:
     requires_shortening: bool
 
 
+class DurationDiagnostic(TypedDict):
+    predicted_duration_sec: float
+    duration_limit_sec: float
+    effective_duration_sec: float
+    fit_ratio: float
+
+
 def _indexed(items: Sequence[Dict[str, Any]], label: str) -> Dict[int, Dict[str, Any]]:
     result: Dict[int, Dict[str, Any]] = {}
     for item in items:
@@ -103,7 +112,9 @@ def _indexed(items: Sequence[Dict[str, Any]], label: str) -> Dict[int, Dict[str,
 
 def select_changed_targets(original: List[Dict[str, Any]], shortened: List[Dict[str, Any]],
                            avg_chars_per_sec: float = 13.0, target_ratio: float = 1.5,
-                           min_words: int = 3) -> List[ReviewTarget]:
+                           min_words: int = 3,
+                           duration_profile: Optional[CalibratedDurationModel] = None,
+                           duration_fit_ratio: float = 1.0) -> List[ReviewTarget]:
     """Select changed union remaining-critical, once and in target order."""
     originals, current = _indexed(original, "original"), _indexed(shortened, "shortened")
     if set(originals) != set(current):
@@ -113,14 +124,23 @@ def select_changed_targets(original: List[Dict[str, Any]], shortened: List[Dict[
         index = int(item["index"])
         old, now = join_text_lines(originals[index].get("text", "")).strip(), join_text_lines(item.get("text", "")).strip()
         analysis = item.get("analysis", {})
-        ratio = analysis.get("extended_mismatch_ratio")
-        ratio = ratio if isinstance(ratio, (int, float)) else analysis.get("mismatch_ratio")
-        critical = bool(analysis.get("is_checked") and isinstance(ratio, (int, float)) and ratio > target_ratio)
-        if old == now and not critical:
-            continue
         budget_source = item if any(isinstance(analysis.get(k), (int, float)) and analysis[k] > 0
                                     for k in ("effective_duration_sec", "available_duration_sec", "duration_sec")) else originals[index]
         budget = calculate_budget(budget_source, target_ratio, avg_chars_per_sec)
+        if duration_profile is None:
+            ratio = analysis.get("extended_mismatch_ratio")
+            ratio = ratio if isinstance(ratio, (int, float)) else analysis.get("mismatch_ratio")
+            critical = bool(analysis.get("is_checked") and isinstance(ratio, (int, float)) and ratio > target_ratio)
+        else:
+            if (isinstance(duration_fit_ratio, bool) or not isinstance(duration_fit_ratio, (int, float))
+                    or not math.isfinite(duration_fit_ratio) or duration_fit_ratio <= 0):
+                raise ValueError("duration_fit_ratio must be finite and positive")
+            critical = bool(
+                analysis.get("is_checked") and budget.effective_duration_sec > 0
+                and duration_profile.predict_seconds(now) > budget.effective_duration_sec * duration_fit_ratio
+            )
+        if old == now and not critical:
+            continue
         targets.append(ReviewTarget(position, index, old, now, budget.max_chars, budget.effective_duration_sec,
                                     round(max(0.0, 100 * (1 - len(now) / max(1, len(old)))), 1),
                                     1 if len(old.split()) <= 1 else min(2, target_min_words(old, min_words)),
@@ -137,7 +157,25 @@ def route_targets(targets: Sequence[ReviewTarget], mode: ThinkingMode,
             "high": [t for t in targets if t.requires_shortening or t.compression_percent >= high_risk_threshold]}
 
 
-def review_validation_error(target: ReviewTarget, candidate: str, max_chars: Optional[int] = None) -> Optional[str]:
+def duration_diagnostic(target: ReviewTarget, candidate: str, duration_profile: Optional[CalibratedDurationModel],
+                        duration_fit_ratio: float) -> Optional[DurationDiagnostic]:
+    if duration_profile is None:
+        return None
+    if (isinstance(duration_fit_ratio, bool) or not isinstance(duration_fit_ratio, (int, float))
+            or not math.isfinite(duration_fit_ratio)
+            or duration_fit_ratio <= 0):
+        raise ValueError("duration_fit_ratio must be finite and positive")
+    return {
+        "predicted_duration_sec": duration_profile.predict_seconds(candidate),
+        "duration_limit_sec": target.effective_duration_sec * duration_fit_ratio,
+        "effective_duration_sec": target.effective_duration_sec,
+        "fit_ratio": duration_fit_ratio,
+    }
+
+
+def review_validation_error(target: ReviewTarget, candidate: str, max_chars: Optional[int] = None,
+                            duration_profile: Optional[CalibratedDurationModel] = None,
+                            duration_fit_ratio: float = 1.0) -> Optional[str]:
     text, limit = candidate.strip(), target.max_chars if max_chars is None else max_chars
     if not text:
         return "missing"
@@ -159,6 +197,9 @@ def review_validation_error(target: ReviewTarget, candidate: str, max_chars: Opt
     )
     if original_is_negative and not candidate_is_negative:
         return "negations_missing"
+    diagnostic = duration_diagnostic(target, text, duration_profile, duration_fit_ratio)
+    if diagnostic is not None and diagnostic["predicted_duration_sec"] > diagnostic["duration_limit_sec"]:
+        return "duration_too_long"
     return None
 
 
@@ -326,6 +367,31 @@ def pro_usage_summary(total: Dict[str, int]) -> Dict[str, Any]:
     }
 
 
+def duration_profile_metadata(profile: Optional[CalibratedDurationModel], fit_ratio: float) -> Optional[Dict[str, Any]]:
+    if profile is None:
+        return None
+    return {
+        "schema_version": 1,
+        "profile_type": "calibrated_post_silence_duration",
+        "measurement": profile.measurement,
+        "voice": profile.voice,
+        "rate": profile.rate,
+        "coefficients": {
+            "intercept_sec": profile.intercept_sec,
+            "seconds_per_budget_char": profile.seconds_per_budget_char,
+            "seconds_per_punctuation": profile.seconds_per_punctuation,
+        },
+        "training": {"sample_count": profile.sample_count, "episode_count": profile.episode_count},
+        "validation": {
+            "method": profile.validation_method,
+            "mae_sec": profile.validation_mae_sec,
+            "rmse_sec": profile.validation_rmse_sec,
+            "r_squared": profile.validation_r_squared,
+        },
+        "fit_ratio": fit_ratio,
+    }
+
+
 def review_max_tokens(targets: Sequence[ReviewTarget], effort: Optional[str]) -> int:
     base = dynamic_max_tokens([target.max_chars for target in targets])
     return max(base, 8192) if effort == "high" else max(base, 16384) if effort == "max" else base
@@ -363,16 +429,24 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                            high_risk_threshold: float = 35.0, context_window: int = 3,
                            batch_size: int = DEFAULT_BATCH_SIZE, max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
                             min_words: int = 3, avg_chars_per_sec: float = 13.0, target_ratio: float = 1.5,
-                            base_url: str = "https://api.deepseek.com", client: Any = None,
-                            context_source: Optional[List[Dict[str, Any]]] = None,
-                            concurrency: int = 3, enable_planner: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+                             base_url: str = "https://api.deepseek.com", client: Any = None,
+                             context_source: Optional[List[Dict[str, Any]]] = None,
+                             concurrency: int = 3, enable_planner: bool = False,
+                             duration_profile: Optional[CalibratedDurationModel] = None,
+                             duration_fit_ratio: float = 1.0) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     """Run critic, conditional editor, blind verifier, and one bounded repair."""
     del thinking_mode, high_risk_threshold
+    if duration_profile is not None and (isinstance(duration_fit_ratio, bool)
+                                         or not isinstance(duration_fit_ratio, (int, float))
+                                         or not math.isfinite(duration_fit_ratio)
+                                         or duration_fit_ratio <= 0):
+        raise ValueError("duration_fit_ratio must be finite and positive")
     if context_source is not None:
         validate_context_source(original, context_source)
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
-    targets = select_changed_targets(original, shortened, avg_chars_per_sec, target_ratio, min_words)
+    targets = select_changed_targets(original, shortened, avg_chars_per_sec, target_ratio, min_words,
+                                     duration_profile, duration_fit_ratio)
     deterministic_requirements: Dict[int, tuple[SemanticRequirement, ...]] = {
         target.index: tuple(extract_semantic_requirements(target.original_text, target.shortened_text))
         for target in targets
@@ -390,6 +464,10 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
     stage_requests: Dict[str, int] = {name: 0 for name in stage_names}
     lineage = {t.index: {"flash": t.shortened_text, "editor": None, "compaction": None,
                           "repair": None, "rejected": [], "final": t.shortened_text} for t in targets}
+    if duration_profile is not None:
+        for target in targets:
+            lineage[target.index]["duration_diagnostic"] = duration_diagnostic(
+                target, target.shortened_text, duration_profile, duration_fit_ratio)
     assessments: Dict[str, Dict[int, tuple[str, List[str]]]] = {"critic": {}, "verifier": {}}
     verifier_history: Dict[int, List[Dict[str, Any]]] = {target.index: [] for target in targets}
     verifier_checks: Dict[int, Dict[str, str]] = {target.index: {} for target in targets}
@@ -559,18 +637,21 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             target for target in targets
             if (target.index not in blocked and (target.requires_shortening
                 or assessments["critic"][target.index][0] != "pass"
-                or review_validation_error(target, target.shortened_text) is not None
+                 or review_validation_error(target, target.shortened_text, duration_profile=duration_profile,
+                                            duration_fit_ratio=duration_fit_ratio) is not None
                 or risk_hints[target.index]))
         ]
         for target in editor_targets:
-            initial_error = review_validation_error(target, target.shortened_text)
+            initial_error = review_validation_error(target, target.shortened_text, duration_profile=duration_profile,
+                                                    duration_fit_ratio=duration_fit_ratio)
             if initial_error is not None:
                 stage_errors["editor"][target.index] = f"formal_error:{initial_error}"
         editor_targets = [t for t in editor_targets if t.index not in blocked]
 
         def normalized_editor_issues(target: ReviewTarget) -> List[str]:
             issues = list(assessments["critic"][target.index][1]) + risk_hints[target.index]
-            formal_error = review_validation_error(target, target.shortened_text)
+            formal_error = review_validation_error(target, target.shortened_text, duration_profile=duration_profile,
+                                                   duration_fit_ratio=duration_fit_ratio)
             if (target.requires_shortening or
                     (formal_error is not None and formal_error.startswith("too_long:"))):
                 issues.append("budget")
@@ -612,7 +693,9 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             for t in group:
                 decision, candidate = parsed.get(t.index, ("unresolved", ""))
                 decisions["editor"][t.index] = decision if parsed else None
-                error = review_validation_error(t, candidate) if decision == "candidate" else None
+                error = (review_validation_error(t, candidate, duration_profile=duration_profile,
+                                                 duration_fit_ratio=duration_fit_ratio)
+                         if decision == "candidate" else None)
                 if not parsed:
                     stage_errors["editor"][t.index] = (
                         "api_failure" if response is None else "parse_failure"
@@ -624,12 +707,18 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                     stage_errors["editor"][t.index] = "unresolved"
                 elif error is not None:
                     stage_errors["editor"][t.index] = f"formal_error:{error}"
-                    lineage[t.index]["rejected"].append({"stage": "editor", "candidate": candidate,
-                                                         "reason": error})
+                    rejected: Dict[str, Any] = {"stage": "editor", "candidate": candidate, "reason": error}
+                    if error == "duration_too_long":
+                        rejected["duration_diagnostic"] = duration_diagnostic(
+                            t, candidate, duration_profile, duration_fit_ratio)
+                    lineage[t.index]["rejected"].append(rejected)
                 else:
                     stage_errors["editor"].pop(t.index, None)
                     lineage[t.index]["editor"] = candidate
                     lineage[t.index]["final"] = candidate
+                    if duration_profile is not None:
+                        lineage[t.index]["duration_diagnostic"] = duration_diagnostic(
+                            t, candidate, duration_profile, duration_fit_ratio)
                     output[t.position]["text"] = [candidate] if isinstance(output[t.position].get("text"), list) else candidate
                     valid_recovery.add(t.index)
 
@@ -662,18 +751,26 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                 response = retry_response
             decision, candidate = parsed.get(target.index, ("unresolved", ""))
             decisions["compaction"][target.index] = decision if parsed else None
-            error = review_validation_error(target, candidate) if decision == "candidate" else None
+            error = (review_validation_error(target, candidate, duration_profile=duration_profile,
+                                             duration_fit_ratio=duration_fit_ratio)
+                     if decision == "candidate" else None)
             if not parsed:
                 stage_errors["compaction"][target.index] = "api_failure" if response is None else "parse_failure"
             elif decision == "unresolved":
                 stage_errors["compaction"][target.index] = "unresolved"
             elif error is not None:
                 stage_errors["compaction"][target.index] = f"formal_error:{error}"
-                lineage[target.index]["rejected"].append({"stage": "compaction", "candidate": candidate,
-                                                           "reason": error})
+                rejected: Dict[str, Any] = {"stage": "compaction", "candidate": candidate, "reason": error}
+                if error == "duration_too_long":
+                    rejected["duration_diagnostic"] = duration_diagnostic(
+                        target, candidate, duration_profile, duration_fit_ratio)
+                lineage[target.index]["rejected"].append(rejected)
             else:
                 lineage[target.index]["compaction"] = candidate
                 lineage[target.index]["final"] = candidate
+                if duration_profile is not None:
+                    lineage[target.index]["duration_diagnostic"] = duration_diagnostic(
+                        target, candidate, duration_profile, duration_fit_ratio)
                 output[target.position]["text"] = ([candidate] if isinstance(output[target.position].get("text"), list)
                                                     else candidate)
                 valid_recovery.add(target.index)
@@ -728,7 +825,8 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                 })
 
         publishable = [t for t in targets if t.index not in blocked and
-                       review_validation_error(t, str(lineage[t.index]["final"])) is None]
+                       review_validation_error(t, str(lineage[t.index]["final"]), duration_profile=duration_profile,
+                                               duration_fit_ratio=duration_fit_ratio) is None]
 
         def verifier_prompt(group: Sequence[ReviewTarget]) -> str:
             required = {t.index: build_required_checks(risk_hints[t.index], assessments["critic"][t.index][1])
@@ -780,7 +878,9 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                 response = retry_response
             decision, candidate = parsed.get(t.index, ("unresolved", ""))
             decisions["repair"][t.index] = decision if parsed else None
-            error = review_validation_error(t, candidate) if decision == "candidate" else None
+            error = (review_validation_error(t, candidate, duration_profile=duration_profile,
+                                             duration_fit_ratio=duration_fit_ratio)
+                     if decision == "candidate" else None)
             if not parsed:
                 stage_errors["repair"][t.index] = (
                     "api_failure" if response is None else "parse_failure"
@@ -789,8 +889,11 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                 stage_errors["repair"][t.index] = "unresolved"
             elif error is not None:
                 stage_errors["repair"][t.index] = f"formal_error:{error}"
-                lineage[t.index]["rejected"].append({"stage": "repair", "candidate": candidate,
-                                                        "reason": error})
+                rejected: Dict[str, Any] = {"stage": "repair", "candidate": candidate, "reason": error}
+                if error == "duration_too_long":
+                    rejected["duration_diagnostic"] = duration_diagnostic(
+                        t, candidate, duration_profile, duration_fit_ratio)
+                lineage[t.index]["rejected"].append(rejected)
             else:
                 repair_snapshots[t.index] = {
                     "final": lineage[t.index]["final"],
@@ -800,6 +903,9 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                     "valid_recovery": t.index in valid_recovery,
                 }
                 lineage[t.index]["repair"], lineage[t.index]["final"] = candidate, candidate
+                if duration_profile is not None:
+                    lineage[t.index]["duration_diagnostic"] = duration_diagnostic(
+                        t, candidate, duration_profile, duration_fit_ratio)
                 output[t.position]["text"] = [candidate] if isinstance(output[t.position].get("text"), list) else candidate
                 repaired.append(t)
         await asyncio.gather(*(verify([target], "reverify") for target in repaired))
@@ -807,7 +913,9 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             required = build_required_checks(risk_hints[target.index], assessments["critic"][target.index][1])
             verdict, reverify_issues = assessments["verifier"][target.index]
             checks = verifier_checks[target.index]
-            formal_error = review_validation_error(target, str(lineage[target.index]["final"]))
+            formal_error = review_validation_error(target, str(lineage[target.index]["final"]),
+                                                   duration_profile=duration_profile,
+                                                   duration_fit_ratio=duration_fit_ratio)
             reverify_passed = (
                 verdict == "pass"
                 and set(checks) == set(required)
@@ -829,10 +937,15 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             attempted = str(lineage[target.index]["repair"])
             history_error = verifier_history[target.index][-1]["error"]
             reason = str(history_error or (f"formal_error:{formal_error}" if formal_error else f"verdict:{verdict}"))
-            lineage[target.index]["rejected"].append({
-                "stage": "reverify", "candidate": attempted, "reason": reason,
-            })
+            rejected: Dict[str, Any] = {"stage": "reverify", "candidate": attempted, "reason": reason}
+            if formal_error == "duration_too_long":
+                rejected["duration_diagnostic"] = duration_diagnostic(
+                    target, attempted, duration_profile, duration_fit_ratio)
+            lineage[target.index]["rejected"].append(rejected)
             lineage[target.index]["final"] = snapshot["final"]
+            if duration_profile is not None:
+                lineage[target.index]["duration_diagnostic"] = duration_diagnostic(
+                    target, str(snapshot["final"]), duration_profile, duration_fit_ratio)
             output[target.position]["text"] = snapshot["output_text"]
             assessments["verifier"][target.index] = snapshot["assessment"]
             verifier_checks[target.index] = snapshot["checks"]
@@ -852,12 +965,17 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
         checks_pass = set(verifier_checks[target.index]) == set(required) and all(
             value == "pass" for value in verifier_checks[target.index].values()
         )
-        verified = (verdict == "pass" and checks_pass and review_validation_error(target, final) is None
+        final_duration_diagnostic = (duration_diagnostic(target, final, duration_profile, duration_fit_ratio)
+                                     if duration_profile is not None else None)
+        verified = (verdict == "pass" and checks_pass and review_validation_error(
+            target, final, duration_profile=duration_profile, duration_fit_ratio=duration_fit_ratio) is None
                     and (not hard_gate_needs_recovery or target.index in valid_recovery))
         if not verified:
             unresolved.append(target.index)
         output[target.position]["text"] = [final] if isinstance(output[target.position].get("text"), list) else final
         lineage[target.index]["final"] = final
+        if duration_profile is not None:
+            lineage[target.index]["duration_diagnostic"] = final_duration_diagnostic
         outcomes.append({"index": target.index, "outcome": "verified" if verified else "unresolved",
                          "critic_verdict": assessments["critic"][target.index][0],
                           "critic_issues": assessments["critic"][target.index][1],
@@ -876,7 +994,9 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                          "repair_decision": decisions["repair"].get(target.index),
                          "stage_errors": {stage: errors[target.index] for stage, errors in stage_errors.items()
                                           if target.index in errors},
-                         "lineage": lineage[target.index]})
+                          "lineage": lineage[target.index],
+                          **({"duration_diagnostic": final_duration_diagnostic}
+                             if final_duration_diagnostic is not None else {})})
     for totals in stage_usage.values():
         for key, value in totals.items():
             usage[key] = usage.get(key, 0) + value
@@ -891,13 +1011,18 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
               "retries": {"targeted_compactions": stage_requests["compaction"],
                           "bounded_repairs": stage_requests["repair"],
                           "fresh_reverifications": stage_requests["reverify"]},
-              "context_mode": "full" if context_source is not None else "sparse"}
+               "context_mode": "full" if context_source is not None else "sparse"}
+    if duration_profile is not None:
+        report["duration_profile"] = duration_profile_metadata(duration_profile, duration_fit_ratio)
     print(
         f"Pro review completed: {len(targets) - len(unresolved)}/{len(targets)} verified, "
         f"{len(unresolved)} unresolved",
         flush=True,
     )
-    return output, report, {**pro_usage_summary(usage), "stages": {k: pro_usage_summary(v) for k, v in stage_usage.items()}}
+    usage_report = {**pro_usage_summary(usage), "stages": {k: pro_usage_summary(v) for k, v in stage_usage.items()}}
+    if duration_profile is not None:
+        usage_report["duration_profile"] = duration_profile_metadata(duration_profile, duration_fit_ratio)
+    return output, report, usage_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -921,6 +1046,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-words", type=int, default=3)
     parser.add_argument("--avg-chars-per-sec", type=float, default=13.0)
     parser.add_argument("--target-ratio", type=float, default=1.5)
+    parser.add_argument("--duration-profile", type=Path)
+    parser.add_argument("--duration-fit-ratio", type=float, default=1.0)
     parser.add_argument("--output-dir", "-o", default="output/reviewed")
     parser.add_argument("--api-key")
     parser.add_argument("--base-url", default="https://api.deepseek.com")
@@ -929,6 +1056,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        duration_profile = (load_calibrated_duration_profile(args.duration_profile)
+                            if args.duration_profile is not None else None)
+        if duration_profile is not None and (isinstance(args.duration_fit_ratio, bool)
+                                             or not isinstance(args.duration_fit_ratio, (int, float))
+                                             or not math.isfinite(args.duration_fit_ratio)
+                                             or args.duration_fit_ratio <= 0):
+            raise ValueError("duration_fit_ratio must be finite and positive")
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     api_key = args.api_key or load_api_key("DEEPSEEK_API_KEY")
     if not api_key:
         print("ERROR: DeepSeek API key not found.", file=sys.stderr)
@@ -940,8 +1078,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         output, report, usage = asyncio.run(review_subtitles(load_json(original_path), load_json(shortened_path), api_key,
             args.model, args.thinking_mode, 35.0, args.context_window, args.batch_size, args.max_input_tokens,
             args.min_words, args.avg_chars_per_sec, args.target_ratio, args.base_url,
-            context_source=load_json(Path(args.context_source)) if args.context_source else None,
-             concurrency=args.concurrency, enable_planner=args.semantic_planner))
+             context_source=load_json(Path(args.context_source)) if args.context_source else None,
+              concurrency=args.concurrency, enable_planner=args.semantic_planner,
+              duration_profile=duration_profile, duration_fit_ratio=args.duration_fit_ratio))
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

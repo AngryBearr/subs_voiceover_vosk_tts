@@ -1,5 +1,8 @@
 # Subtitle shortening architecture
 
+> **Normative architecture:** see the [shortening experiments log](shortening_experiments.md)
+> for empirical decisions, evidence, reproduction notes, and pending work.
+
 ## Product goal
 
 Shorten subtitles when their spoken content does not fit the available timing,

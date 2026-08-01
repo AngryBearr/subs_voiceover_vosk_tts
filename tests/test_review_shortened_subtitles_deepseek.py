@@ -6,10 +6,12 @@ import inspect
 import json
 import sys
 from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import utils.review_shortened_subtitles_deepseek as reviewer
 from utils.review_shortened_subtitles_deepseek import (
     CRITIC_PROMPT,
     COMPACTION_PROMPT,
@@ -30,11 +32,36 @@ from utils.review_shortened_subtitles_deepseek import (
     select_changed_targets,
 )
 from utils.semantic_plan import PLANNER_PROMPT
+from utils.shortening_domain import CalibratedDurationModel
 
 
 def item(index: int, text: str, duration: float = 10.0) -> dict[str, Any]:
     return {"index": index, "text": [text], "analysis": {"available_duration_sec": duration,
             "effective_duration_sec": duration}}
+
+
+def duration_model(char_seconds: float = 1.0) -> CalibratedDurationModel:
+    return CalibratedDurationModel(
+        intercept_sec=0.0, seconds_per_budget_char=char_seconds, seconds_per_punctuation=0.0,
+        measurement="edge_audio_decoded_with_libsndfile_pcm16_wav_emulation_measured_after_production_silence_reduction",
+        voice="test-voice", rate="+0%", sample_count=30, episode_count=2,
+        validation_method="leave_one_episode_out", validation_mae_sec=0.1,
+        validation_rmse_sec=0.2, validation_r_squared=0.8,
+    )
+
+
+def write_duration_profile(path: Any) -> None:
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "profile_type": "calibrated_post_silence_duration",
+        "measurement": "edge_audio_decoded_with_libsndfile_pcm16_wav_emulation_measured_after_production_silence_reduction",
+        "voice": "test-voice", "rate": "+0%",
+        "coefficients": {"intercept_sec": 0.0, "seconds_per_budget_char": 1.0,
+                         "seconds_per_punctuation": 0.0},
+        "training": {"sample_count": 30, "episode_count": 2},
+        "validation": {"method": "leave_one_episode_out", "mae_sec": 0.1,
+                        "rmse_sec": 0.2, "r_squared": 0.8},
+    }), encoding="utf-8")
 
 
 class FakeCompletions:
@@ -131,6 +158,203 @@ def test_formal_validation_numbers_negation_and_short_natural_lines() -> None:
     assert review_validation_error(slash, "Резать/шлифовать") == "slash_added"
     original_slash = ReviewTarget(0, 6, "Ввод/вывод работает", "Ввод/вывод", 30, 2, 20, 2, False)
     assert review_validation_error(original_slash, "Ввод/вывод") is None
+
+
+def test_duration_gate_is_strict_and_calibrated() -> None:
+    model = duration_model()
+    target = ReviewTarget(0, 1, "Original", "short", 100, 5.0, 0, 1, False)
+    assert review_validation_error(target, "1234", duration_profile=model) is None
+    assert review_validation_error(target, "12345", duration_profile=model) is None
+    assert review_validation_error(target, "123456", duration_profile=model) == "duration_too_long"
+    assert review_validation_error(target, "123456", duration_profile=model, duration_fit_ratio=2.0) is None
+    zero = ReviewTarget(0, 2, "Original", "short", 100, 0.0, 0, 1, False)
+    assert review_validation_error(zero, "x", duration_profile=model) == "duration_too_long"
+
+
+def test_duration_profile_cli_flags_and_legacy_signature() -> None:
+    args = build_parser().parse_args(["original.json", "shortened.json"])
+    assert args.duration_profile is None and args.duration_fit_ratio == 1.0
+    args = build_parser().parse_args(["original.json", "shortened.json", "--duration-profile", "profile.json",
+                                      "--duration-fit-ratio", "1.25"])
+    assert str(args.duration_profile) == "profile.json" and args.duration_fit_ratio == 1.25
+    target = ReviewTarget(0, 1, "Original", "short", 100, 1, 0, 1, False)
+    assert review_validation_error(target, "short") is None
+
+
+@pytest.mark.parametrize("fit_ratio", [True, 0, -1, float("inf"), float("nan")])
+def test_duration_diagnostic_rejects_invalid_fit_ratio(fit_ratio: Any) -> None:
+    target = ReviewTarget(0, 1, "Original", "short", 100, 1.0, 0, 1, False)
+    with pytest.raises(ValueError, match="duration_fit_ratio"):
+        reviewer.duration_diagnostic(target, "short", duration_model(), fit_ratio)
+
+
+def test_duration_diagnostic_is_absent_without_profile() -> None:
+    target = ReviewTarget(0, 1, "Original", "short", 100, 1.0, 0, 1, False)
+    assert reviewer.duration_diagnostic(target, "short", None, 1.0) is None
+
+
+def test_workflow_initial_duration_invalid_is_recovery_only() -> None:
+    original, current = [item(1, "Original phrase", 10.0)], [item(1, "12345678901", 10.0)]
+    client = FakeClient([assessment(1, "pass", []), editor(1, "", "unresolved"), editor(1, "", "unresolved")])
+    _, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, duration_profile=duration_model()))
+    outcome = report["outcomes"][0]
+    assert report["unresolved_indices"] == [1]
+    assert outcome["outcome"] == "unresolved"
+    assert outcome["duration_diagnostic"]["predicted_duration_sec"] == 11.0
+    assert len(client.chat.completions.calls) == 3
+    assert report["stages"]["compaction"]["requests"] == 0
+
+
+def test_workflow_duration_invalid_editor_is_rejected_without_compaction() -> None:
+    original, current = [item(1, "Original phrase with object", 10.0)], [item(1, "short", 10.0)]
+    current[0]["analysis"].update({"is_checked": True, "mismatch_ratio": 2.0})
+    invalid = "12345678901"
+    client = FakeClient([assessment(1, "fail", ["object"]), editor(1, invalid), editor(1, "", "unresolved")])
+    _, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, duration_profile=duration_model()))
+    outcome = report["outcomes"][0]
+    assert outcome["stage_errors"]["editor"] == "formal_error:duration_too_long"
+    assert outcome["lineage"]["rejected"][0]["reason"] == "duration_too_long"
+    assert set(outcome["lineage"]["rejected"][0]["duration_diagnostic"]) == {
+        "predicted_duration_sec", "duration_limit_sec", "effective_duration_sec", "fit_ratio"}
+    assert report["stages"]["compaction"]["requests"] == 0
+
+
+def test_workflow_character_too_long_still_compacts_with_profile() -> None:
+    original, current = [item(1, "Original phrase with alternatives", 2.0)], [item(1, "short", 2.0)]
+    too_long = "This candidate is intentionally longer than the character budget for this subtitle"
+    compact = "Compact alternatives"
+    client = FakeClient([assessment(1, "fail", ["alternative"]), editor(1, too_long),
+                         editor(1, compact), verification(1, required=["alternative"])])
+    _, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client,
+        duration_profile=duration_model(0.01)))
+    assert report["stages"]["compaction"]["requests"] == 1
+    assert report["outcomes"][0]["lineage"]["compaction"] == compact
+
+
+def test_workflow_duration_valid_final_updates_diagnostic() -> None:
+    original, current = [item(1, "Original phrase", 10.0)], [item(1, "short", 10.0)]
+    accepted = "valid"
+    client = FakeClient([assessment(1, "fail", ["object"]), editor(1, accepted),
+                         verification(1, required=["object"])])
+    _, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, duration_profile=duration_model()))
+    outcome = report["outcomes"][0]
+    assert outcome["outcome"] == "verified"
+    assert outcome["duration_diagnostic"]["predicted_duration_sec"] == float(len(accepted))
+    assert outcome["lineage"]["duration_diagnostic"] == outcome["duration_diagnostic"]
+
+
+def test_workflow_duration_invalid_repair_is_rejected_before_reverify() -> None:
+    original, current = [item(1, "Original phrase with object", 10.0)], [item(1, "short", 10.0)]
+    current[0]["analysis"].update({"is_checked": True, "mismatch_ratio": 2.0})
+    invalid = "12345678901"
+    client = FakeClient([assessment(1, "fail", ["object"]), editor(1, "", "unresolved"),
+                         verification(1, "fail", ["object"]), editor(1, invalid)])
+    _, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, duration_profile=duration_model()))
+    outcome = report["outcomes"][0]
+    assert outcome["stage_errors"]["repair"] == "formal_error:duration_too_long"
+    assert report["stages"]["reverify"]["requests"] == 0
+    assert outcome["lineage"]["rejected"][-1]["reason"] == "duration_too_long"
+
+
+def test_workflow_reverify_failure_rolls_back_and_final_gate_rechecks_duration() -> None:
+    original, current = [item(1, "Original phrase with object", 10.0)], [item(1, "short", 10.0)]
+    current[0]["analysis"].update({"is_checked": True, "mismatch_ratio": 2.0})
+    editor_candidate, repair_candidate = "edited", "repaired"
+    client = FakeClient([assessment(1, "fail", ["object"]), editor(1, editor_candidate),
+                         verification(1, "fail", ["object"]), editor(1, repair_candidate),
+                         verification(1, "uncertain", ["uncertain"])])
+    _, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, duration_profile=duration_model()))
+    outcome = report["outcomes"][0]
+    assert outcome["outcome"] == "unresolved"
+    assert outcome["lineage"]["final"] == editor_candidate
+    assert outcome["duration_diagnostic"]["predicted_duration_sec"] == float(len(editor_candidate))
+    assert outcome["lineage"]["rejected"][-1]["stage"] == "reverify"
+
+
+def test_workflow_unchanged_critical_zero_duration_cannot_verify() -> None:
+    original = [item(1, "Same critical phrase", 0.1)]
+    current = [item(1, "Same critical phrase", 0.1)]
+    current[0]["analysis"].update({"is_checked": True, "mismatch_ratio": 2.0})
+    client = FakeClient([assessment(1, "pass", []), editor(1, "Same critical phrase")])
+    _, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, duration_profile=duration_model()))
+    assert report["selected_indices"] == [1]
+    assert report["unresolved_indices"] == [1]
+    assert report["stages"]["verifier"]["requests"] == 0
+
+
+def test_no_profile_workflow_has_no_duration_fields() -> None:
+    client = FakeClient([assessment(1, "pass", []), verification(1)])
+    _, report, usage = asyncio.run(review_subtitles(
+        [item(1, "Original phrase")], [item(1, "Changed phrase")], "key", client=client))
+    assert "duration_profile" not in report and "duration_profile" not in usage
+    assert "duration_diagnostic" not in report["outcomes"][0]
+    assert "duration_diagnostic" not in report["outcomes"][0]["lineage"]
+
+
+def test_cli_rejects_profile_before_api_key_lookup(tmp_path: Path, monkeypatch: Any) -> None:
+    profile = tmp_path / "bad.json"
+    profile.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(reviewer, "load_api_key", lambda _: pytest.fail("API key lookup must not run"))
+    assert reviewer.main(["original.json", "shortened.json", "--duration-profile", str(profile)]) == 2
+
+
+def test_cli_rejects_invalid_ratio_before_client_or_review(tmp_path: Path, monkeypatch: Any) -> None:
+    profile = tmp_path / "profile.json"
+    write_duration_profile(profile)
+    monkeypatch.setattr(reviewer, "load_api_key", lambda _: pytest.fail("API key lookup must not run"))
+    assert reviewer.main(["original.json", "shortened.json", "--duration-profile", str(profile),
+                          "--duration-fit-ratio", "0"]) == 2
+
+
+def test_cli_loads_profile_once_and_writes_nonsecret_metadata(tmp_path: Path, monkeypatch: Any) -> None:
+    profile = tmp_path / "profile.json"
+    write_duration_profile(profile)
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+    original_loader = reviewer.load_calibrated_duration_profile
+    loads = 0
+
+    def load_once(path: Path) -> CalibratedDurationModel:
+        nonlocal loads
+        loads += 1
+        return original_loader(path)
+
+    async def fake_review(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        captured.update(kwargs)
+        return [], {"duration_profile": {"coefficients": {"x": 1}, "fit_ratio": 1.25}}, {
+            "duration_profile": {"coefficients": {"x": 1}, "fit_ratio": 1.25}}
+
+    monkeypatch.setattr(reviewer, "load_calibrated_duration_profile", load_once)
+    monkeypatch.setattr(reviewer, "load_api_key", lambda _: "secret-key")
+    monkeypatch.setattr(reviewer, "load_json", lambda _: [])
+    monkeypatch.setattr(reviewer, "review_subtitles", fake_review)
+    assert reviewer.main(["original.json", "shortened.json", "--duration-profile", str(profile),
+                          "--duration-fit-ratio", "1.25", "--output-dir", str(output_dir)]) == 0
+    assert loads == 1 and captured["duration_profile"].voice == "test-voice"
+    report = json.loads((output_dir / "shortened_review.report.json").read_text(encoding="utf-8"))
+    usage = json.loads((output_dir / "shortened_review.usage.json").read_text(encoding="utf-8"))
+    for metadata in (report["duration_profile"], usage["duration_profile"]):
+        assert metadata["fit_ratio"] == 1.25 and "coefficients" in metadata
+        assert "secret-key" not in json.dumps(metadata) and str(profile) not in json.dumps(metadata)
+
+
+def test_cli_legacy_omits_duration_metadata(tmp_path: Path, monkeypatch: Any) -> None:
+    output_dir = tmp_path / "out"
+    async def fake_review(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        return [], {}, {}
+    monkeypatch.setattr(reviewer, "load_api_key", lambda _: "secret-key")
+    monkeypatch.setattr(reviewer, "load_json", lambda _: [])
+    monkeypatch.setattr(reviewer, "review_subtitles", fake_review)
+    assert reviewer.main(["original.json", "shortened.json", "--output-dir", str(output_dir)]) == 0
+    assert "duration_profile" not in json.loads(
+        (output_dir / "shortened_review.report.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize(

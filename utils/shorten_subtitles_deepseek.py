@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import random
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from utils.shorten_helpers import (
@@ -37,6 +39,7 @@ from utils.shorten_helpers import (
     validate_context_source,
 )
 from utils.analyze_text import join_text_lines
+from utils.shortening_domain import DurationSelectionPolicy, load_calibrated_duration_profile
 
 
 # ---------------------------------------------------------------------------
@@ -398,34 +401,42 @@ def make_deepseek_shorten_func(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: List[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the direct-DeepSeek CLI parser, including experimental flags."""
     parser = argparse.ArgumentParser(
         description="Iteratively shorten subtitles using DeepSeek API."
     )
     add_common_args(parser)
     parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=DEFAULT_CONCURRENCY,
+        "--concurrency", type=int, default=DEFAULT_CONCURRENCY,
         help=f"Max parallel API calls (default: {DEFAULT_CONCURRENCY})",
     )
-    parser.add_argument(
-        "--api-key",
-        help="DeepSeek API key (overrides .env and env var)",
-    )
-    parser.add_argument(
-        "--base-url",
-        default="https://api.deepseek.com",
-        help="DeepSeek API base URL",
-    )
+    parser.add_argument("--api-key", help="DeepSeek API key (overrides .env and env var)")
+    parser.add_argument("--base-url", default="https://api.deepseek.com", help="DeepSeek API base URL")
     parser.add_argument(
         "--thinking-effort", choices=["high", "max"], default=None,
         help="Explicitly enable DeepSeek thinking (default: disabled)",
     )
+    parser.add_argument("--duration-profile", type=Path, help="Opt-in calibrated post-silence duration profile")
+    parser.add_argument("--duration-fit-ratio", type=float, default=1.0,
+                        help="Required duration fit ratio (default: 1.0)")
+    return parser
 
-    args = parser.parse_args(argv)
 
-    from pathlib import Path
+def main(argv: List[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    selection_policy: DurationSelectionPolicy | None = None
+    try:
+        if args.duration_fit_ratio <= 0 or not math.isfinite(args.duration_fit_ratio):
+            raise ValueError("duration-fit-ratio must be finite and positive")
+        if args.duration_profile is not None:
+            selection_policy = DurationSelectionPolicy(
+                load_calibrated_duration_profile(args.duration_profile), args.duration_fit_ratio
+            )
+    except ValueError as exc:
+        print(f"ERROR: invalid duration selection configuration: {exc}", file=sys.stderr)
+        return 2
 
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)
@@ -466,8 +477,26 @@ def main(argv: List[str] | None = None) -> int:
         stuck_threshold=args.stuck_threshold,
         early_stop_patience=args.early_stop_patience,
         context_items=context_items,
+        selection_policy=selection_policy,
     )
     summary = usage_summary(usage_total)
+    summary["selection_mode"] = (
+        "calibrated_post_silence_duration" if selection_policy is not None else "legacy_mismatch_ratio"
+    )
+    summary["fit_ratio"] = args.duration_fit_ratio
+    if selection_policy is not None:
+        model = selection_policy.model
+        summary["duration_profile"] = {
+            "measurement": model.measurement, "voice": model.voice, "rate": model.rate,
+            "coefficients": {
+                "intercept_sec": model.intercept_sec,
+                "seconds_per_budget_char": model.seconds_per_budget_char,
+                "seconds_per_punctuation": model.seconds_per_punctuation,
+            },
+            "training": {"sample_count": model.sample_count, "episode_count": model.episode_count},
+            "validation": {"method": model.validation_method, "mae_sec": model.validation_mae_sec,
+                           "rmse_sec": model.validation_rmse_sec, "r_squared": model.validation_r_squared},
+        }
     summary["context_mode"] = "full" if context_items is not None else "sparse"
     summary["context_source"] = str(Path(args.context_source)) if args.context_source else None
     usage_path = output_dir / f"{stem}_final.usage.json"

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from utils.analyze_text import analyze_subtitles, join_text_lines
-from utils.shortening_domain import CharacterRateBudgetEstimator, TimingWindow
+from utils.shortening_domain import CharacterRateBudgetEstimator, DurationSelectionPolicy, TimingWindow
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -465,6 +465,7 @@ def select_subtitles_for_shortening(
     items: List[Dict[str, Any]],
     threshold: float,
     exclude_indices: Optional[Set[int]] = None,
+    selection_policy: Optional[DurationSelectionPolicy] = None,
 ) -> List[int]:
     """Select subtitle indices that need shortening.
 
@@ -478,6 +479,14 @@ def select_subtitles_for_shortening(
             continue
         analysis = item.get("analysis", {})
         if not analysis.get("is_checked", False):
+            continue
+
+        if selection_policy is not None:
+            window = TimingWindow.from_item(item)
+            if (window.effective_duration_sec > 0
+                    and selection_policy.model.predict_seconds(item.get("text", ""))
+                    > window.effective_duration_sec * selection_policy.fit_ratio):
+                selected.append(i)
             continue
 
         mismatch = analysis.get("mismatch_ratio")
@@ -656,6 +665,7 @@ def run_iterative_shortening(
     stuck_threshold: int = DEFAULT_STUCK_THRESHOLD,
     early_stop_patience: Optional[int] = None,
     context_items: Optional[List[Dict[str, Any]]] = None,
+    selection_policy: Optional[DurationSelectionPolicy] = None,
 ) -> List[Dict[str, Any]]:
     """Run the iterative shortening loop.
 
@@ -694,7 +704,7 @@ def run_iterative_shortening(
         items = hydrate_context_timing(items, context_items, avg_chars_per_sec, threshold)
     result = refresh_analysis(items, avg_chars_per_sec, threshold, preserve_saved_timing)
     items = result["items"]
-    critical_count = len(result["critical_items"])
+    critical_count = len(select_subtitles_for_shortening(items, threshold, selection_policy=selection_policy))
     print(f"Critical subtitles: {critical_count}")
 
     analyzed_path = output_dir / f"{stem}_analyzed.json"
@@ -722,12 +732,12 @@ def run_iterative_shortening(
 
         stuck_indices = {idx for idx, cnt in stuck_count.items() if cnt >= stuck_threshold}
         target_indices = select_subtitles_for_shortening(
-            current_items, threshold, stuck_indices
+            current_items, threshold, stuck_indices, selection_policy
         )
 
         if not target_indices:
             if stuck_indices:
-                remaining = select_subtitles_for_shortening(current_items, threshold)
+                remaining = select_subtitles_for_shortening(current_items, threshold, selection_policy=selection_policy)
                 if not remaining:
                     print("No subtitles need shortening. Done!")
                     break
@@ -785,7 +795,9 @@ def run_iterative_shortening(
             current_items, avg_chars_per_sec, threshold, preserve_saved_timing
         )
         current_items = result["items"]
-        critical_after = len(result["critical_items"])
+        critical_after = len(select_subtitles_for_shortening(
+            current_items, threshold, selection_policy=selection_policy
+        ))
         print(f"Critical after re-analysis: {critical_after}")
 
         iter_path = output_dir / f"{stem}_iter{iteration:02d}.json"
@@ -811,7 +823,9 @@ def run_iterative_shortening(
     final_result = refresh_analysis(
         current_items, avg_chars_per_sec, threshold, preserve_saved_timing
     )
-    final_critical = len(final_result["critical_items"])
+    final_critical = len(select_subtitles_for_shortening(
+        final_result["items"], threshold, selection_policy=selection_policy
+    ))
     print(f"\nSummary:")
     print(f"  Total subtitles: {len(current_items)}")
     print(f"  Critical at start: {critical_count}")
