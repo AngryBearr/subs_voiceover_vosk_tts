@@ -122,6 +122,34 @@ local auth tokens in this repository or in experiment reports.
 
 ## Decision table
 
+### 2026-08-01 OpenCode OAuth independent barrier benchmark
+
+**Accepted experimental opt-in, not default.** OpenCode 1.18.9 with the Luna
+model was exercised through the OpenCode CLI and OAuth on the full-context E01
+and E04 runs. E01 covered indices 16, 81, 121, and 77: 4 cases, with 4/4
+expected failures restored and one successful request. E04 covered indices 517,
+875, 222, and 641: 4 cases, with 2 expected passes kept and 2 expected failures
+restored; 4/4 outcomes were correct with one successful request. In aggregate,
+the runs were 8/8 overall and 6/6 on the clear subset, with 0 false positives,
+0 false negatives, 2 total requests, and 0 retries or transport/schema
+failures. The temporary artifacts are under
+`/tmp/opencode/openai_subscription_smoke/barrier_benchmark8` and are
+non-durable. This validates the standalone barrier behavior, not release
+evidence, and it is not a 10/10 result.
+
+OpenCode OAuth is a third-party OAuth path supported by OpenCode, not OpenAI-
+endorsed. The official Codex verifier remains a separate Pending item. Failed
+preflight attempts were environment-only: the wrong interpreter lacked `aiohttp`
+and did not reach the provider, so they are not model failures.
+
+### 2026-08-01 E04 prior-report barrier run
+
+With the prior review report, only verified indices 517 and 875 were sent; both
+passed. Unresolved indices 222 and 641 were not sent and were restored. This was
+one successful request with 0 failures and approximately 10.19 seconds elapsed.
+The result is temporary/non-durable experiment evidence and remains an opt-in
+OpenCode OAuth run.
+
 | # | Decision | Status | Evidence |
 |---|---|---|---|
 | 1 | Committed Phase 1-3 baseline | Accepted | Commit `54a4e62`; implemented immutable timing/planning boundaries, semantic stages, and compatibility-preserving behavior. |
@@ -136,7 +164,9 @@ local auth tokens in this repository or in experiment reports.
 | 10 | Combined profile wiring | Accepted experimental, not default | Smoke cost was $0.01189873 with 0 reasoning tokens, 0 API failures, and 2 parse failures; one target was verified in that stochastic run. Conservative unresolved behavior was retained; the index-42 status bug was fixed offline. Final actual Edge measurement remains pending because of service/cache state. |
 | 11 | Multi-cue semantic units | Pending, highest priority | Current anchor checks do not yet provide the needed multi-cue proposition coverage; design and independent evaluation are still required. |
 | 12 | Actual-TTS final measurement plus one bounded compaction/reverify | Pending | Final production-equivalent TTS measurement and the single bounded recovery path have not yet been completed as release evidence. |
-| 13 | Independent model-family verifier via Codex/ChatGPT Pro | Pending | Official Codex/ChatGPT Pro path has not yet supplied an independent verifier evaluation. |
+| 13 | Official Codex independent verifier | Pending | Official Codex/ChatGPT Pro path has not yet supplied an independent verifier evaluation. |
+| 14 | OpenCode OAuth independent semantic barrier | Accepted experimental opt-in, not default | OpenCode 1.18.9/Luna CLI runs on E01 and E04 passed the recorded full-context controls with fail-closed restoration; artifacts are temporary and non-durable. This is third-party OpenCode OAuth evidence, not OpenAI endorsement or release evidence. |
+| 15 | E04 prior-report OpenCode barrier | Accepted experimental opt-in, not default | Only prior-verified 517/875 were sent and both passed; unresolved 222/641 were not sent and restored; one request, 0 failures, approximately 10.19s. |
 
 ## Do not repeat without new evidence
 
@@ -154,8 +184,9 @@ same-show data**, **7/10 for semantic protection**, and **5/10 for
 completion/coverage**. Overall readiness is approximately **6-7/10**, not close
 enough to claim 10/10. The estimate is limited by small A/B samples, same-show
 sampling, limited independent episodes/genres/voices, proxy duration work, and
-pending actual-TTS and independent-model verification. It is a readiness signal,
-not a release metric.
+pending actual-TTS measurement. Small OpenCode independent evidence exists, but
+broader independent-model validation and official Codex evaluation remain
+pending. It is a readiness signal, not a release metric.
 
 ## Reproduction commands
 

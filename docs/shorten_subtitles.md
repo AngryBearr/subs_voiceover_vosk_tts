@@ -640,3 +640,46 @@ uv run -m utils.shorten_subtitles_deepseek skill_test/subs_analyzed.json \
 
 Batch sizes 5–10 are the recommended starting point. Larger batches are not always
 cheaper because they increase context and retry scope.
+
+## Independent semantic verification barrier
+
+The optional verifier is run explicitly with the project environment:
+
+```bash
+uv run --python subs_env/bin/python -m utils.verify_subtitles_opencode ORIGINAL CANDIDATE \
+  --model openai/gpt-5.6-luna \
+  --output-dir output/semantic_verified
+```
+
+Optional inputs can be added to the same command:
+
+```bash
+uv run --python subs_env/bin/python -m utils.verify_subtitles_opencode ORIGINAL CANDIDATE \
+  --review-report REVIEW_REPORT.json \
+  --context-source FULL_EPISODE_ANALYZED.json \
+  --model openai/gpt-5.6-luna \
+  --output-dir output/semantic_verified
+```
+
+The `subs_env` environment must have `aiohttp` installed from the repository
+requirements. The system Python or default uv Python may fail before the verifier
+reaches OpenCode when that dependency is missing. Luna is the routine model here;
+use the exact model name discovered with `opencode models openai --refresh` after
+OAuth setup via `opencode auth login --provider openai`.
+
+The output directory contains three files named from the candidate stem:
+
+- `{candidate_stem}_independent_verified.json` - fail-closed candidate output;
+- `{candidate_stem}_independent_verified.report.json` - verification decisions and failures;
+- `{candidate_stem}_independent_verified.usage.json` - request and subscription-accounting metadata.
+
+The barrier is fail-closed and read-only. Unchanged candidates are copied untouched.
+Changed candidates are retained only after an exact strict pass response; fail,
+uncertain, transport errors, malformed schema, and missing prior verification restore
+the original `text` while preserving the candidate item's shape and metadata. With
+`--review-report`, only changed entries explicitly marked `verified` are sent to
+Luna; no prior verdict is exposed to the prompt and unresolved entries cannot be
+upgraded. This prior-verified-only behavior is a selection guard, not evidence that
+an unresolved item passed. The verifier is standalone and is not a default pipeline
+stage. OpenCode OAuth usage is subscription accounting only: it does not provide
+token or dollar accounting, and must not be reported as per-token API cost.

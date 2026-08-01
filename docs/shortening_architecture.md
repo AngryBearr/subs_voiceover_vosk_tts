@@ -98,3 +98,11 @@ generation and reranking remain future work.
 When a shortening candidate cannot be safely resolved, prefer unresolved text
 over semantic damage. This unresolved-over-semantic-damage principle is a
 product invariant, not merely a provider fallback.
+
+## Optional independent final barrier
+
+After candidate generation, callers may run `utils.verify_subtitles_opencode` as an independent semantic barrier. It accepts original and candidate arrays, never rewrites candidates, and restores exact original text for every non-pass, uncertain, transport, or schema outcome. It uses local OpenCode HTTP plus OAuth subscription accounting only; direct APIs and public servers are out of scope. A DeepSeek report is only a selection hint: changed candidates are eligible only when its outcome is exactly `verified`, and the report is never sent as model evidence. This stage remains opt-in and is not wired into the combined pipeline.
+
+The barrier is now empirically validated on the recorded OpenCode Luna runs, but
+that evidence does not combine it with the production pipeline and does not change
+its standalone opt-in status or make it a default stage.
