@@ -22,3 +22,26 @@ The manifest retains the E01 index 128 revision history: it changed from clear
 to debatable after disagreement between cue-level and unit-aware screening.
 Run `uv run --python subs_env/bin/python -m pytest -q
 tests/test_semantic_benchmark24_fixture.py` to validate the fixture.
+
+## Offline evaluator
+
+The tracked evaluator scores supplied report and usage JSON only; it makes no
+network or model calls and does not inspect run directories. Each episode is
+passed explicitly and assignments are `EPISODE=PATH`:
+
+```bash
+uv run --python subs_env/bin/python -m utils.evaluate_semantic_benchmark \
+  --manifest skill_test/semantic_benchmark24/manifest.json \
+  --episode-report E01=path/to/E01.report.json \
+  --episode-report E03=path/to/E03.report.json \
+  --episode-report E04=path/to/E04.report.json \
+  --episode-usage E01=path/to/E01.usage.json \
+  --episode-usage E03=path/to/E03.usage.json \
+  --episode-usage E04=path/to/E04.usage.json \
+  --output output/semantic_benchmark24.evaluation.json
+```
+
+Exit status is 0 for a qualified benchmark, 1 for a valid but unqualified
+benchmark, and 2 for invalid configuration or artifacts. A valid evaluation
+always writes one newline-delimited JSON object. `clear` cases are the release
+gate; diagnostic cases are reported separately and never block qualification.

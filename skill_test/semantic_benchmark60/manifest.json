@@ -1,0 +1,721 @@
+{
+  "benchmark": "semantic-benchmark60",
+  "cases": [
+    {
+      "episode": "E01",
+      "index": 2,
+      "expected": "fail",
+      "clear": true,
+      "original": "эти шестнадцать американцев начинают приключение, которое может произойти в их жизни только один раз.",
+      "candidate": "Эти американцы начинают приключение, которое может случиться лишь раз в жизни.",
+      "category": "quantity omission",
+      "rationale": "Loses the source quantity of sixteen Americans.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 16,
+      "expected": "fail",
+      "clear": true,
+      "original": "В течение следующих 39 дней они будут жить на необитаемом острове, им придётся бороться за себя, безо всяких земных благ!",
+      "candidate": "Они будут жить 39 дней на острове, им придётся бороться без благ.",
+      "category": "major content omission",
+      "rationale": "Omits the next 39 days, the uninhabited island, and the struggle without earthly comforts.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 39,
+      "expected": "fail",
+      "clear": true,
+      "original": "Шон Кеннифф  30 лет, врач-невролог из Лонг-Айленда",
+      "candidate": "Шон Кеннифф, 30 лет, с Лонг-Айленда.",
+      "category": "role omission",
+      "rationale": "Loses that Sean is a neurologist.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 63,
+      "expected": "fail",
+      "clear": true,
+      "original": "Чтобы победить, нужно пережить превратности острова, превратности голосования, и, наконец, превратности друг друга.",
+      "candidate": "Чтобы победить, нужно пережить превратности острова и голосования.",
+      "category": "relationship omission",
+      "rationale": "Loses the need to endure one another.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 77,
+      "expected": "fail",
+      "clear": true,
+      "original": "Я им сказал - \"Давайте поднимем эти ящики на борт, нам будет намного легче управлять плотом, потому что это - мёртвый груз\".",
+      "candidate": "Предложил поднять ящики на борт - мёртвый груз.",
+      "category": "speaker/causality omission",
+      "rationale": "Omits the speaker attribution, the request to lift the boxes, and the reason that the boxes are dead weight.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 81,
+      "expected": "fail",
+      "clear": false,
+      "original": "Руди, Шон, Стейси, Сью - мы можем сделать перерыв на 15 минут и просто поговорить, прежде чем мы начнём что-либо делать?",
+      "candidate": "Можно нам перерыв на 15 минут и просто поговорить, прежде чем начнём что-либо делать?",
+      "category": "addressee omission",
+      "rationale": "Omits the named people being addressed; the shortened request is semantically debatable in local context.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 106,
+      "expected": "pass",
+      "clear": true,
+      "original": "Я совсем не фанатею от воды и не люблю долго в ней находиться.",
+      "candidate": "Я не люблю воду и долго в ней находиться.",
+      "category": "filler/redundancy",
+      "rationale": "Removes the emphatic filler while preserving the dislike of water and reluctance to stay in it.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 114,
+      "expected": "pass",
+      "clear": true,
+      "original": "а тут ты проводишь 24 часа в сутки на открытом воздухе и бешено расходуешь энергию почти всё время!",
+      "candidate": "Тут ты круглые сутки на открытом воздухе и почти всё время расходуешь много энергии!",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the all-day outdoor setting and near-continuous high energy expenditure in a natural paraphrase.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 121,
+      "expected": "fail",
+      "clear": false,
+      "original": "Нам нужно прояснить кое-какие моменты.",
+      "candidate": "Нам надо прояснить это.",
+      "category": "specificity omission",
+      "rationale": "Replaces unspecified points with a vague pronoun; the degree of lost content is debatable.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 128,
+      "expected": "pass",
+      "clear": false,
+      "original": "А вот эту длинную бамбуковую палку мы можем одним краем положить сюда, а другим - туда,",
+      "candidate": "Длинную бамбуковую палку можно положить одним краем сюда, а другим — туда,",
+      "category": "discourse/style",
+      "rationale": "Preserves the core placement but changes the explicit first-person agent \"мы\" to impersonal \"можно\" and drops deictic \"эту\", making materiality debatable in context.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 46,
+      "expected": "fail",
+      "clear": true,
+      "original": "Отправляясь на Совет Племени, я полагала, что голосование будет единогласным. кроме голоса Питера, который собирался быть против меня.",
+      "candidate": "Перед Советом Племени я думала, что голосование будет единогласным.",
+      "category": "exception omission",
+      "rationale": "Loses Peter as the exception and his planned vote against the speaker.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 96,
+      "expected": "fail",
+      "clear": true,
+      "original": "Он должен привести с собой кого-то ещё и принять решение, которое повлияет на всех.",
+      "candidate": "Он должен привести кого-то ещё и принять решение.",
+      "category": "scope omission",
+      "rationale": "Loses that the decision affects everyone.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 117,
+      "expected": "pass",
+      "clear": true,
+      "original": "Что если это подсказка?",
+      "candidate": "А если это подсказка?",
+      "category": "equivalent question",
+      "rationale": "Preserves the conditional question about whether this is a clue.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 1323,
+      "expected": "pass",
+      "clear": true,
+      "original": "если мы проиграем ещё один конкурс, нам всем придёт конец",
+      "candidate": "Если проиграем ещё один конкурс, нам всем конец.",
+      "category": "concise equivalent",
+      "rationale": "Preserves the conditional loss of another contest and the consequence for everyone.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 1392,
+      "expected": "pass",
+      "clear": true,
+      "original": "Ли, как капитан команды, попросил меня заняться этим и... ну, понимаешь...",
+      "candidate": "Капитан Ли попросил меня этим заняться.",
+      "category": "filler removal/equivalent attribution",
+      "rationale": "Removes filler while preserving Captain Lee as the person who asked the speaker to handle it.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 114,
+      "expected": "fail",
+      "clear": true,
+      "original": "Я хотела чистосердечно признаться Сью, Крейгу и Дженне, но у нас так и не было",
+      "candidate": "Я хотела чистосердечно признаться Сью, но у нас так и не было",
+      "category": "addressee omission",
+      "rationale": "Loses Craig and Jenna while preserving the original incomplete cue boundary.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 142,
+      "expected": "pass",
+      "clear": true,
+      "original": "Итак, это может пойти двумя путями.",
+      "candidate": "Это может пойти двумя путями.",
+      "category": "discourse filler removal",
+      "rationale": "Removes the introductory filler while preserving the two possible outcomes.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 172,
+      "expected": "fail",
+      "clear": true,
+      "original": "потому что, если ты решишь его использовать, это означает, что тебя не могут выгнать",
+      "candidate": "Если использовать идола, тебя могут выгнать.",
+      "category": "negation reversal",
+      "rationale": "Reverses the source meaning: using the idol means the person cannot be voted out, not that they may be expelled.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 222,
+      "expected": "fail",
+      "clear": true,
+      "original": "знаешь, мы бы сказали нашему альянсу, Эл и Ли,",
+      "candidate": "Мы бы сказали альянсу, я получу.",
+      "category": "content distortion",
+      "rationale": "Changes the alliance statement and introduces an unsupported first-person outcome.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 306,
+      "expected": "pass",
+      "clear": true,
+      "original": "Да, сегодня мой первый день, когда я реально, типа, умираю с голоду.",
+      "candidate": "Сегодня впервые я реально умираю с голоду.",
+      "category": "filler removal/equivalent temporal statement",
+      "rationale": "Removes hesitation filler while preserving that today is the first day the speaker is genuinely starving.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 517,
+      "expected": "pass",
+      "clear": true,
+      "original": "Бросай! Отличная работа.",
+      "candidate": "Бросай! Отлично.",
+      "category": "filler removal",
+      "rationale": "Removes a redundant noun from the praise without changing the imperative or positive evaluation.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 641,
+      "expected": "fail",
+      "clear": true,
+      "original": "если можно было бы как-нибудь обменять что-нибудь",
+      "candidate": "Обменять на новый кремень?",
+      "category": "content distortion",
+      "rationale": "Changes a hypothetical exchange into a question about exchanging for a new flint.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 875,
+      "expected": "pass",
+      "clear": true,
+      "original": "и, э-э, собрать свои вещи.",
+      "candidate": "и собрать свои вещи.",
+      "category": "filler removal",
+      "rationale": "Removes hesitation filler while preserving the action of gathering belongings.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 329,
+      "expected": "fail",
+      "clear": true,
+      "original": "Врачи сказали моим родителям, если я и выживу, то это будет шанс один на миллион",
+      "candidate": "Врачи сказали моим родителям, что я выживу.",
+      "category": "probability/condition",
+      "rationale": "Loses the one-in-a-million uncertainty/conditional survival claim.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 20,
+      "expected": "pass",
+      "clear": true,
+      "original": "и при этом каждый из них будет полностью отвечать за свои действия!",
+      "candidate": "и при этом каждый из них будет целиком отвечать за свои действия!",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves that each person is fully responsible for their own actions.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 23,
+      "expected": "fail",
+      "clear": true,
+      "original": "Этот человек покинет этот остров с миллионом долларов наличными в качестве его награды!",
+      "candidate": "Этот человек покинет остров с денежной наградой.",
+      "category": "major content omission",
+      "rationale": "Loses the source's million-dollar cash prize amount.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 42,
+      "expected": "fail",
+      "clear": true,
+      "original": "Соня Кристофер  63 года, музыкант из Сан-Франциско, поборола рак",
+      "candidate": "Соня Кристофер, 63 года, музыкант из Сан-Франциско.",
+      "category": "biographical omission",
+      "rationale": "Loses that Sonja survived cancer.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 58,
+      "expected": "pass",
+      "clear": true,
+      "original": "Это - больше, чем просто проверка навыков выживания.",
+      "candidate": "Это не просто проверка навыков выживания.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the statement that this is more than a survival-skills test.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 80,
+      "expected": "fail",
+      "clear": true,
+      "original": "Пусть ему 72 года и он - бывший \"морской котик\", но это не означает, что здесь - его мир.",
+      "candidate": "Пусть ему 72 года и он - бывший \"морской котик\", но это означает, что здесь - его мир.",
+      "category": "negation reversal",
+      "rationale": "Reverses the source's contrast: this is not necessarily his world despite his background.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 116,
+      "expected": "pass",
+      "clear": true,
+      "original": "А ведь это - только 1-ый день!",
+      "candidate": "Но это лишь первый день!",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the contrast and the fact that this is only the first day.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 129,
+      "expected": "pass",
+      "clear": true,
+      "original": "и это будет \"первым положенным камнем\" в наше укрытие.",
+      "candidate": "и это станет первым камнем в нашем укрытии.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the object becoming the first stone in their shelter.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 139,
+      "expected": "fail",
+      "clear": true,
+      "original": "То есть вы хотите сказать, что огонь нам сегодня совсем не нужен?",
+      "candidate": "То есть вы хотите сказать, что огонь нам сегодня нужен?",
+      "category": "negation reversal",
+      "rationale": "Reverses the source's negated need for fire today.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 242,
+      "expected": "fail",
+      "clear": true,
+      "original": "если они не будут следовать вместе определённому направлению и не преследовать одну определённую цель,",
+      "candidate": "если они не будут следовать вместе,",
+      "category": "specificity omission",
+      "rationale": "Loses the source's specific direction and common goal.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 484,
+      "expected": "pass",
+      "clear": true,
+      "original": "что есть хорошо, потому что это повысит боевой дух команды.",
+      "candidate": "что хорошо, поскольку это поднимет боевой дух команды.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the positive consequence of raising the team's morale.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 531,
+      "expected": "pass",
+      "clear": true,
+      "original": "Сегодняшнее испытание будет за награду в виде 50 водонепроницаемых спичек и за иммунитет.",
+      "candidate": "Сегодняшнее испытание — за 50 водонепроницаемых спичек и иммунитет.",
+      "category": "punctuation/style",
+      "rationale": "Preserves today's challenge, its waterproof-match prize, and immunity stake.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E01",
+      "index": 533,
+      "expected": "fail",
+      "clear": true,
+      "original": "Проиграйте - и вы должны будете отправиться на \"Совет Племени\", где вам придётся изгнать с острова одного из своих членов.",
+      "candidate": "Проиграйте — и вам придётся отправиться на \"Совет Племени\".",
+      "category": "consequence omission",
+      "rationale": "Loses the mandatory expulsion consequence of losing.",
+      "source_context_path": "skill_test/S01_E01_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 15,
+      "expected": "fail",
+      "clear": true,
+      "original": "в конце концов племя Саанапу проиграло испытание за иммунитет.",
+      "candidate": "В конце концов племя Саанапу проиграло испытание.",
+      "category": "stakes omission",
+      "rationale": "Loses that losing the challenge means losing immunity.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 21,
+      "expected": "fail",
+      "clear": true,
+      "original": "выгнав наибольшую угрозу, Бьянку.",
+      "candidate": "выгнав Бьянку.",
+      "category": "evaluation omission",
+      "rationale": "Loses the evaluation that Bianca was the greatest threat.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 122,
+      "expected": "fail",
+      "clear": true,
+      "original": "Эти двое - единственные, кто, не в нашем альянсе прямо сейчас. Это было так глупо, что",
+      "candidate": "Эти двое сейчас единственные не из нашего альянса.",
+      "category": "plan/consequence omission",
+      "rationale": "Loses the evaluation \"Это было так глупо\" and its link to not sending the observer.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 144,
+      "expected": "pass",
+      "clear": true,
+      "original": "что ты в безопасности на Совете Племени.",
+      "candidate": "что на Совете Племени ты в безопасности.",
+      "category": "word order",
+      "rationale": "Changes word order while preserving that the addressee is safe at Tribal Council.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 175,
+      "expected": "pass",
+      "clear": true,
+      "original": "Мы с Фиби находимся в одном альянсе, и для нас, получить вот так просто подсказку к скрытому иммунитету это настоящее благословение.",
+      "candidate": "Мы с Фиби в одном альянсе, и получить вот так просто подсказку к скрытому иммунитету — настоящее благословение.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the alliance with Phoebe and the blessing of getting a hidden-immunity clue.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 220,
+      "expected": "pass",
+      "clear": true,
+      "original": "Мы решили, что скажем группе, о том, что у нас был выбор между двумя мешочками.",
+      "candidate": "Мы решили рассказать группе, что выбирали между двумя мешочками.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the decision to tell the group about choosing between two bags.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 291,
+      "expected": "fail",
+      "clear": true,
+      "original": "Скажем всем, что тут была подсказка к скрытому иммунитету, но скажем всем неправильную подсказку.",
+      "candidate": "Скажем всем, что здесь была подсказка к скрытому иммунитету.",
+      "category": "plan distortion",
+      "rationale": "Loses the plan to give the group a wrong clue.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 296,
+      "expected": "fail",
+      "clear": true,
+      "original": "Но потом я напомнил себе что двадцать три участника проиграют, и только один человек выиграет, и если ты хочешь выиграть, то надо играть жёстко.",
+      "candidate": "Если хочешь выиграть, надо играть жёстко.",
+      "category": "motivation omission",
+      "rationale": "Loses the motivation that 23 people lose and only one wins.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 638,
+      "expected": "pass",
+      "clear": true,
+      "original": "Племя, которое лучше всех будет работать как команда, выиграет это испытание.",
+      "candidate": "Испытание выиграет племя, которое лучше всех сработает как команда.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves that the best-functioning team wins the challenge.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 994,
+      "expected": "fail",
+      "clear": true,
+      "original": "Потому что если мы не выиграем иммунитет,",
+      "candidate": "Если мы не выиграем иммунитет, я уйду домой.",
+      "category": "conditional contradiction",
+      "rationale": "Contradicts the original conditional continuation that ensures the speaker does not go home.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 1332,
+      "expected": "pass",
+      "clear": true,
+      "original": "И я продолжу голосовать за неё, для меня это очевидный выбор.",
+      "candidate": "Я продолжу голосовать за Кэт — для меня это очевидный выбор.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves continuing to vote for Kat as the obvious choice.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E03",
+      "index": 1466,
+      "expected": "pass",
+      "clear": true,
+      "original": "все пойдёт по плану.",
+      "candidate": "Всё будет по плану.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the assurance that everything will go according to plan.",
+      "source_context_file": "S01E03_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 30,
+      "expected": "fail",
+      "clear": true,
+      "original": "Осталося двадцать один участник. Кто покинет игру сегодня вечером?",
+      "candidate": "Остался один участник. Кто покинет игру сегодня вечером?",
+      "category": "quantity distortion",
+      "rationale": "Changes the source quantity from 21 participants to one.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 57,
+      "expected": "pass",
+      "clear": true,
+      "original": "Мне удалось убедить Рохана проголосовать за Эвана.",
+      "candidate": "Я убедила Рохана проголосовать за Эвана.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves persuading Rohan to vote for Evan.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 103,
+      "expected": "fail",
+      "clear": true,
+      "original": "которые знают точное местонахождение нашего скрытого идола иммунитета",
+      "candidate": "которые знают об идоле иммунитета",
+      "category": "specificity omission",
+      "rationale": "Loses the idol's exact location, hidden status, and ownership context.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 122,
+      "expected": "pass",
+      "clear": true,
+      "original": "потому что я хочу рассказать вам правду об идоле,",
+      "candidate": "потому что хочу рассказать вам правду об идоле,",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the reason of wanting to tell them the truth about the idol.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 145,
+      "expected": "fail",
+      "clear": true,
+      "original": "Я сказала Нику, что никогда не напишу его имя,",
+      "candidate": "Я сказала Нику, что напишу его имя,",
+      "category": "negation reversal",
+      "rationale": "Reverses the source's negated statement about writing Nick's name.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 150,
+      "expected": "pass",
+      "clear": true,
+      "original": "Я просто… я предан,",
+      "candidate": "Я предан,",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the speaker's declaration of loyalty.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 192,
+      "expected": "fail",
+      "clear": true,
+      "original": "А потом, если вы копаете в этом районе,",
+      "candidate": "А потом вы копаете в этом районе,",
+      "category": "conditional omission",
+      "rationale": "Removes the source condition governing when they dig in this area.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 213,
+      "expected": "pass",
+      "clear": true,
+      "original": "Можно ли нам взять пару дней, чтобы, как бы, принять решение?",
+      "candidate": "Можно ли нам взять пару дней, чтобы принять решение?",
+      "category": "equivalent request",
+      "rationale": "Preserves the request for a couple of days to decide.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 706,
+      "expected": "fail",
+      "clear": true,
+      "original": "Могу я с тобой поговорить?",
+      "candidate": "Я поговорю с тобой.",
+      "category": "speech-act distortion",
+      "rationale": "Changes a request for permission into an assertion.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 725,
+      "expected": "pass",
+      "clear": true,
+      "original": "В \"Выжившем\" невозможно добраться до конца игры в одиночку.",
+      "candidate": "В «Выжившем» нельзя дойти до конца игры в одиночку.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves that one cannot reach the end of Survivor alone.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 916,
+      "expected": "pass",
+      "clear": true,
+      "original": "Вы уже побывали на трёх из четырёх советов племени.",
+      "candidate": "Вы уже были на трёх из четырёх советов племени.",
+      "category": "equivalent paraphrase",
+      "rationale": "Preserves the count of three attended Tribal Councils out of four.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    },
+    {
+      "episode": "E04",
+      "index": 973,
+      "expected": "fail",
+      "clear": true,
+      "original": "и это были ты, Ли, Эль и Фиби.",
+      "candidate": "и это были вы.",
+      "category": "named-member omission",
+      "rationale": "Loses the four named members identified by the source.",
+      "source_context_file": "S01E04_ru_analyzed.json"
+    }
+  ],
+  "revision_history": [
+    {
+      "date": "2026-08-02",
+      "evidence": "E01 index 128 changed from clear to debatable based on disagreement between cue-level DeepSeek/manual initial review and unit-aware DeepSeek/GLM5.2/Gemini3/MiniMax/MiMo Pro.",
+      "episode": "E01",
+      "index": 128
+    }
+  ],
+  "expansion_history": [
+    {
+      "date": "2026-08-02",
+      "added_cases": 36,
+      "reviewed": "manually reviewed clear cases",
+      "reviewed_count": 36,
+      "expected_distribution": {
+        "pass": 18,
+        "fail": 18
+      },
+      "reviewer": "reviewer audit",
+      "neighbor_checks": [
+        "E01/242",
+        "E03/122",
+        "E03/994"
+      ]
+    }
+  ],
+  "source_context_provenance": {
+    "E03": {
+      "file_name": "S01E03_ru_analyzed.json",
+      "drive_file_id": "1brbJN4K9Sl2fg9Qvjk-pFrs0VGl-3rJo",
+      "sha256": "1a8bee086a0afebb288095b618cf2d152ff96721bc26c77241baf606c9d984fa",
+      "byte_size": 156031,
+      "parsed_cue_count": 1523
+    },
+    "E04": {
+      "file_name": "S01E04_ru_analyzed.json",
+      "drive_file_id": "1a0tQHjUVLg9GPJ74ysV0f_8fIqPToou",
+      "sha256": "16e2689c67a5ca6c44cb7c2598b15600ba8abff52bc91ba6dacb1899632eb6e5",
+      "byte_size": 104447,
+      "parsed_cue_count": 1056
+    }
+  },
+  "array_files": {
+    "E01": {
+      "original": "e01_original.json",
+      "candidate": "e01_candidate.json"
+    },
+    "E03": {
+      "original": "e03_original.json",
+      "candidate": "e03_candidate.json"
+    },
+    "E04": {
+      "original": "e04_original.json",
+      "candidate": "e04_candidate.json"
+    }
+  }
+}

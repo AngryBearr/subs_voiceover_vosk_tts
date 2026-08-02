@@ -168,6 +168,27 @@ OpenCode OAuth run.
 | 14 | OpenCode OAuth independent semantic barrier | Accepted experimental opt-in, not default | OpenCode 1.18.9/Luna CLI runs on E01 and E04 passed the recorded full-context controls with fail-closed restoration; artifacts are temporary and non-durable. This is third-party OpenCode OAuth evidence, not OpenAI endorsement or release evidence. |
 | 15 | E04 prior-report OpenCode barrier | Accepted experimental opt-in, not default | Only prior-verified 517/875 were sent and both passed; unresolved 222/641 were not sent and restored; one request, 0 failures, approximately 10.19s. |
 
+## 2026-08-02 benchmark60 control calibration
+
+The reproducible tracked fixture is `skill_test/semantic_benchmark60/`, with
+benchmark24 retained as its historical subset. The Sol control run dated
+2026-08-02 qualified all 57 clear cases and all 3 diagnostic cases (57/57 and
+3/3), with zero schema or transport failures in 17 requests. Usage was 172395
+input, 2926 output, 2792 reasoning, 459264 cache-read, and 637377 total tokens;
+provider-reported cost was 0 on the subscription route. Raw results are at
+`/tmp/opencode/model_screening/benchmark60_sol_control_run1_2026-08-02/`.
+
+The Luna control run scored 53/57 clear cases and was technically clean. The
+exact false rejects were E01/114 and E01/531; uncertain outcomes were E03/220
+and E04/57. Usage was 278413 input, 3079 output, 4284 reasoning, 353280
+cache-read, and 639056 total tokens in 17 requests; provider-reported cost was
+0 on the subscription route. Raw results are at
+`/tmp/opencode/model_screening/benchmark60_luna_control_run1_2026-08-02/`.
+Luna is no longer the qualified benchmark60 default.
+
+Benchmark60 is now structurally validated and Sol control-model calibrated;
+benchmark24 is historical evidence only.
+
 ## 2026-08-02 benchmark24 model screening
 
 The reproducible fixture is `skill_test/semantic_benchmark24/`; raw result files
@@ -176,12 +197,18 @@ remain dated, local artifacts under `/tmp/opencode/model_screening/`. It contain
 cases. Unit grouping needs full episode context. Results below are screening
 evidence, not a release claim; provider costs are informational.
 
-* **Luna strict text (`openai/gpt-5.6-luna`)**: current tracked fixture
+The current tracked fixture is now `skill_test/semantic_benchmark60/`, which
+retains benchmark24 as its historical subset and adds 36 manually reviewed clear
+cases (18 pass / 18 fail). Benchmark60 calibration is recorded above; this
+section remains historical benchmark24 screening evidence.
+
+* **Luna strict text (`openai/gpt-5.6-luna`)**: historical benchmark24
   `skill_test/semantic_benchmark24/` (21 clear / 3 diagnostic) control, clear
   21/21 and overall 23/24,
   with 0 schema/transport failures and 8 requests. Usage was 190028 input,
   1308 output, 2186 reasoning, 105984 cache-read, 299506 total tokens; provider
-  cost 0 on the subscription route. Qualified default.
+  cost 0 on the subscription route. It is not the qualified benchmark60
+  default.
 * **Terra20**: clear 20/21; rejected because of E01/114.
 * **GLM5.2/Ollama**: E01 clear 7/7 after 128 diagnostic, but E03/E04 transport
   failures prevented qualification. StructuredOutput is an explicit compatible
@@ -192,17 +219,39 @@ evidence, not a release claim; provider costs are informational.
 * **Gemini3 Flash**: revised clear 20/21, with schema/unresolved outcomes and
   high request/cost overhead; not qualified.
 * **MiMo base, Gemini2.5, Qwen, Gemma, GPT-OSS, Mistral, and multiple Orca
-  routes**: rejected or blocked by combinations of false rejects, schema
-  failures, unresolved responses, and provider transport/tool incompatibility.
-  A blocked route is not evidence that the model is semantically weak. No
-  cheap/open route produced a qualifying result in this screening; that is not a
-  semantic-quality conclusion for routes blocked by transport or tooling.
+  routes**: rejected or blocked by combinations of semantic false rejects,
+  schema/unresolved outcomes, and provider transport/tool incompatibility.
+  Semantic failures are separate from route failures: a blocked route is not
+  evidence that its model is semantically weak. The pre-confirmation direct
+  screen total was `$0.27371521485`; later confirmation costs are separate.
 
 The verifier's StructuredOutput is an OpenCode synthetic schema-validated tool,
 not provider-native `response_format`. Text mode uses the strict local parser and
-fails closed. The Luna decision therefore defaults to strict text while keeping
-StructuredOutput available as an explicit route option. Provider costs above are
-informational, not billing-authoritative.
+fails closed. The benchmark60 Sol decision therefore defaults to strict text
+while keeping StructuredOutput available as an explicit route option. Provider
+costs above are informational for the OpenCode route, not billing-authoritative.
+
+### Direct OpenRouter live validation
+
+The OpenRouter adapter's native smoke was technically validated after installing
+the already-pinned `aiohttp` dependency. The following are standalone direct
+OpenRouter semantic-unit runs on the 24-case benchmark (21 clear cases and 3
+diagnostic cases), not combined-pipeline results:
+
+* **Gemini2.5 Flash-Lite**: E01 clear 3/7 and overall 5/10 in one request,
+  cost `$0.000621225`; rejected for four clear false passes, with diagnostic
+  behavior also recorded. There were no technical failures.
+* **Qwen3.5 Flash**: the first run was 21/21, but two independent default,
+  temperature-0 runs were each 20/21 because of false rejects E01/114. It is
+  not stable or qualified.
+* **MiMo2.5 Pro production run**: 21/21; one schema batch was recovered
+  atomically through singleton units, 12 requests, cost `$0.1005397668`.
+* **MiMo2.5 Pro confirmation**: 21/21, zero technical failures, 8 requests,
+  cost `$0.0776182572`; this is the qualified direct default.
+
+The listed costs are billing-authoritative OpenRouter credit amounts. Raw local
+result directories remain outside the repository and contain no key or account
+data.
 
 ## Do not repeat without new evidence
 
@@ -321,3 +370,45 @@ the small A/B costs as observed run totals, but do not claim stable pricing or
 extrapolate them to production without a current provider price source. Keep
 direct API costs separate from subscription calls and from local CPU/TTS/cache
 costs.
+# OpenRouter verifier experiment
+
+The direct OpenRouter verifier sends semantic-unit prompts with the native strict
+JSON schema and fails closed on schema incompatibility, refusal, transport
+errors, or malformed usage. Configure the key with
+`OPENROUTER_API_KEY` or `--api-key`; optional attribution can use
+`OPENROUTER_HTTP_REFERER` and `OPENROUTER_APP_TITLE`.
+# Ollama Cloud experiment status
+
+The direct `/api/chat` transport works, but Ollama Cloud has no native
+structured output for this route. The client sends text only and validates it
+with the local strict parser; `schema_json` below is an experiment label, not
+a provider-native schema contract. The adapter remains available for explicit
+experiments, but `--model` is required and no stable qualified/default model
+exists.
+
+The live findings below are screening evidence, not a release claim. They are
+subscription usage, not authoritative per-call billing:
+
+* **GLM5.2**: the batch-10 `schema_json` run was not enough to qualify it. The
+  production-like batch-4/schema-1 run left 8 technical outcomes unresolved
+  after 13 requests and 22,105 tokens, so it is unusable for a strict
+  verifier. Results:
+  `/tmp/opencode/model_screening/direct_ollama_glm52_smoke_2026-08-02/` and
+  `/tmp/opencode/model_screening/direct_ollama_glm52_schema_recovery_2026-08-02/`.
+* **Nemotron Super**: the first run cleared 21/21 in 8 requests and 29,092
+  tokens, but independent confirmation failed with clear semantic errors
+  E01/106 and E01/114 plus transport/schema failures. It is unstable and not
+  qualified. Results:
+  `/tmp/opencode/model_screening/direct_ollama_text_json_screening_2026-08-02/nemotron-3-super/`
+  and `/tmp/opencode/model_screening/direct_ollama_nemotron3super_confirmation_2026-08-02/`.
+* **Qwen3.5:397B**: full run 20/21, with clear false reject E01/114, zero
+  technical failures, 8 requests, and 53,804 tokens. Reject. Results:
+  `/tmp/opencode/model_screening/direct_ollama_qwen35_397b_full_2026-08-02/`.
+* **GPT-OSS 120B**: 6/7 with clear false reject E01/106. **DeepSeek V4 Pro**:
+  6/7 with clear false pass E01/77. Both are rejected. **Gemma** and
+  **Mistral** were schema-blocked. Results for this screen are under
+  `/tmp/opencode/model_screening/direct_ollama_text_json_screening_2026-08-02/`.
+
+There is no stable qualified/default Ollama Cloud model. A first-run success
+must not be confused with qualification. Subscription status also does not
+provide an authoritative per-call cost.

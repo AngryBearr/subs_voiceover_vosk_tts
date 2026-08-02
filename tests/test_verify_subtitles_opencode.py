@@ -372,6 +372,26 @@ def test_verifier_string_fake_omits_provider_usage_fields_and_secrets():
     assert secret not in json.dumps(usage)
 
 
+@pytest.mark.parametrize("kwargs", [{"backend": ""}, {"accounting": " "}, {"cost_is_billing_authoritative": "yes"}])
+def test_verifier_backend_accounting_validation(kwargs):
+    async def request(prompt, model):
+        return response()
+    with pytest.raises(ValueError, match="invalid_backend_accounting"):
+        asyncio.run(verify_items([{"index": 1, "text": "old"}], [{"index": 1, "text": "new"}], request_callable=request, **kwargs))
+
+
+def test_verifier_default_shape_and_openrouter_override():
+    async def request(prompt, model):
+        return OpenCodePromptResult(response(), OpenCodePromptUsage(1, 1, None, 2, None, None, None, "provider", "model", "stop"))
+    _, default_report, default_usage = asyncio.run(verify_items([{"index": 1, "text": "old"}], [{"index": 1, "text": "new"}], request_callable=request))
+    assert default_report["backend"] == "opencode" and default_report["accounting"] == "subscription"
+    assert default_usage["backend"] == "opencode" and default_usage["accounting"] == "subscription"
+    assert default_usage["provider_cost_is_billing_authoritative"] is False
+    _, report, usage = asyncio.run(verify_items([{"index": 1, "text": "old"}], [{"index": 1, "text": "new"}], request_callable=request, backend="openrouter", accounting="metered_api", cost_is_billing_authoritative=True))
+    assert report["backend"] == "openrouter" and report["accounting"] == "metered_api"
+    assert usage["provider_cost_is_billing_authoritative"] is True
+
+
 def unit_result(unit: SemanticUnit, verdict: str = "pass", issues: list[str] | None = None, severity: str = "none") -> dict[str, object]:
     return {"cue_indices": list(unit.cue_indices), "verdict": verdict,
             "issues": issues or [], "severity": severity, "explanation": "checked"}
@@ -569,6 +589,8 @@ def test_unit_missing_timing_stays_singleton_and_legacy_shape_is_unchanged():
 
 def test_unit_prompt_runtime_defaults_live_validation_and_usage(monkeypatch):
     parser_args = verifier.build_parser().parse_args(["original", "candidate"])
+    assert parser_args.model == "openai/gpt-5.6-sol"
+    assert verifier.build_parser().parse_args(["original", "candidate", "--model", "openai/gpt-5.6-luna"]).model == "openai/gpt-5.6-luna"
     assert parser_args.semantic_units is False and parser_args.semantic_unit_max_cues == 3 and parser_args.semantic_unit_max_gap_sec == 0.3
     assert parser_args.structured_output is False
     assert verifier.build_parser().parse_args(["original", "candidate", "--structured-output"]).structured_output is True
@@ -591,6 +613,20 @@ def test_unit_prompt_runtime_defaults_live_validation_and_usage(monkeypatch):
     with pytest.raises(ValueError):
         verifier.verify_items_live([], [], semantic_units=True, semantic_unit_max_cues=6)
     assert started is False
+
+
+def test_verify_items_uses_sol_default_and_accepts_explicit_luna():
+    models = []
+
+    async def request(prompt, model):
+        models.append(model)
+        return response()
+
+    original = [{"index": 1, "text": "old"}]
+    candidate = [{"index": 1, "text": "new"}]
+    asyncio.run(verifier.verify_items(original, candidate, request_callable=request))
+    asyncio.run(verifier.verify_items(original, candidate, model="openai/gpt-5.6-luna", request_callable=request))
+    assert models == ["openai/gpt-5.6-sol", "openai/gpt-5.6-luna"]
 
     results = [OpenCodePromptResult('{"results":[]}', OpenCodePromptUsage(10, 20, 3, 30, 4, 5, 0.125, "p", "m", "stop")),
                OpenCodePromptResult('{"results":[]}', OpenCodePromptUsage(2, 4, 1, 6, 7, 8, 0.25, "p", "m", "length"))]

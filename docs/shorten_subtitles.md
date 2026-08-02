@@ -1,5 +1,27 @@
 # Shorten Subtitles — Subtitle Shortening Tools
 
+## Standalone Ollama Cloud semantic verifier
+
+`utils.verify_subtitles_ollama_cloud` is a standalone verifier, not part of the
+combined shortening pipeline. It sends text prompts to Ollama Cloud `/api/chat`
+and validates the returned JSON locally with the existing strict unit parser.
+The direct `/api/chat` transport works. Cloud does not provide native
+structured output on this route: the client sends text and the local strict
+parser is the only schema authority. The `--model` argument is required
+because no Ollama Cloud model is currently stable and qualified as a default.
+Use `OLLAMA_API_KEY` or an explicit key.
+
+```bash
+uv run --python subs_env/bin/python -m utils.verify_subtitles_ollama_cloud \
+  original.json candidate.json --model glm-5.2
+```
+
+Telemetry is subscription accounting. Ollama Cloud token counts are optional,
+and provider cost is unavailable and never treated as billing-authoritative.
+There is no authoritative per-call cost from the subscription route. Do not
+confuse a successful first run with model qualification; see the dated live
+findings and exact result paths in [shortening experiments](shortening_experiments.md).
+
 ## Edge TTS budget calibration
 
 For empirical results, decision status, provenance, and reproduction notes, see
@@ -647,7 +669,7 @@ The optional verifier is run explicitly with the project environment:
 
 ```bash
 uv run --python subs_env/bin/python -m utils.verify_subtitles_opencode ORIGINAL CANDIDATE \
-  --model openai/gpt-5.6-luna \
+  --model openai/gpt-5.6-sol \
   --output-dir output/semantic_verified
 ```
 
@@ -657,13 +679,13 @@ Optional inputs can be added to the same command:
 uv run --python subs_env/bin/python -m utils.verify_subtitles_opencode ORIGINAL CANDIDATE \
   --review-report REVIEW_REPORT.json \
   --context-source FULL_EPISODE_ANALYZED.json \
-  --model openai/gpt-5.6-luna \
+  --model openai/gpt-5.6-sol \
   --output-dir output/semantic_verified
 ```
 
 The `subs_env` environment must have `aiohttp` installed from the repository
 requirements. The system Python or default uv Python may fail before the verifier
-reaches OpenCode when that dependency is missing. Luna is the routine model here;
+reaches OpenCode when that dependency is missing. Sol is the routine model here;
 use the exact model name discovered with `opencode models openai --refresh` after
 OAuth setup via `opencode auth login --provider openai`.
 
@@ -709,11 +731,11 @@ The verifier is also an explicit opt-in stage of the combined pipeline:
 ```bash
 uv run --python subs_env/bin/python -m utils.shorten_review_pipeline input.json \
   --api-key sk-xxx --semantic-barrier \
-  --semantic-barrier-model openai/gpt-5.6-luna \
+  --semantic-barrier-model openai/gpt-5.6-sol \
   --output-dir output/combined
 ```
 
-The combined barrier uses Luna strict text by default. Add
+The combined barrier uses Sol strict text by default. Add
 `--semantic-barrier-structured-output` only for a compatible route; the
 StructuredOutput path is synthetic tool validation rather than native provider
 schema enforcement.
@@ -740,3 +762,26 @@ plus Pro API cost and never includes OpenCode provider cost.
 The scope is intentionally narrow: Pro editing/review remains cue-level; only
 independent final barrier acceptance is unit-level. There is no intra-unit error
 attribution beyond shared issue codes.
+# Direct OpenRouter semantic verification
+
+The standalone `utils.verify_subtitles_openrouter` command uses OpenRouter's native
+`response_format.json_schema` interface and the semantic-unit verifier. This is
+different from OpenCode's synthetic tool/structured-output transport. It is
+fail-closed: transport, refusal, strict-schema, or malformed-response failures
+restore the original text.
+
+Set `OPENROUTER_API_KEY` (or pass `--api-key`) and run, for example:
+
+```text
+uv run --python subs_env/bin/python -m utils.verify_subtitles_openrouter original.json candidate.json
+```
+
+The verifier sends `temperature=0` by default for repeatable decisions; override it
+with `--temperature` using a finite value from 0 through 2. The selected endpoint
+must support the parameter because the request also sets
+`provider.require_parameters=true`.
+
+Usage is reported as `metered_api`; provider-reported cost is treated as billing
+authoritative OpenRouter credit usage. The default model is the qualified exact
+ID `xiaomi/mimo-v2.5-pro`; schema retries remain 1. This command is standalone
+and is not integrated into the review pipeline.

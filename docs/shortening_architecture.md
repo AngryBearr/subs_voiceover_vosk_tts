@@ -108,9 +108,10 @@ final barrier acceptance is unit-level. There is no intra-unit error attribution
 beyond shared issue codes.
 
 Unit-level final-barrier implementation is validated by the tracked
-`skill_test/semantic_benchmark24` control. Pro editing/review remains cue-level;
-only final-barrier acceptance is unit-level. The qualified default is Luna strict
-text (`openai/gpt-5.6-luna`); StructuredOutput remains an explicit option for
+`skill_test/semantic_benchmark60` control (with benchmark24 retained as the
+historical subset). Pro editing/review remains cue-level;
+only final-barrier acceptance is unit-level. The qualified default is Sol strict
+text (`openai/gpt-5.6-sol`); StructuredOutput remains an explicit option for
 compatible routes. The barrier remains an explicit combined-pipeline opt-in.
 Startup/configuration failures are fatal; ordinary per-item failures are fail-closed
 and continue with unresolved accounting.
@@ -125,3 +126,26 @@ StructuredOutput tooling through the message `format` field. This is not a
 provider-native `response_format`: tool-call reliability remains measured and
 provider support can still fail. OpenCode retries are disabled with
 `retryCount: 0`; verifier caller retries remain authoritative.
+# Verification backends
+
+Subtitle verification has two distinct direct transports. OpenCode uses its
+local server and synthetic tool/structured-output behavior. OpenRouter uses the
+native Chat Completions `json_schema` response format, with strict schema
+validation and fail-closed handling. It sends temperature 0 by default for
+repeatable verification; endpoints must support this parameter because
+`provider.require_parameters` is true. The OpenRouter command always verifies
+semantic units and records metered provider usage; it does not alter or enter
+the combined shortening pipeline. Its qualified exact default model is
+`xiaomi/mimo-v2.5-pro`, with one schema retry by default. The adapter's native
+smoke was technically validated after installing the already-pinned `aiohttp`
+dependency; this is transport validation, not a live model-quality claim.
+# Ollama Cloud boundary
+
+The direct Ollama Cloud semantic verifier is an isolated backend. Its direct
+`/api/chat` transport works, but Cloud has no native structured-output contract
+on this route: no `format`, tools, or schema is sent. The existing strict unit
+parser is the client-side schema authority and fails closed on malformed
+content. The `--model` argument is required; there is no stable
+qualified/default Ollama Cloud model. This standalone verifier does not alter
+the combined pipeline or OpenRouter behavior. Subscription use has no
+authoritative per-call cost.

@@ -51,7 +51,7 @@ class PipelineConfig:
     semantic_barrier_units_enabled: bool = True
     semantic_barrier_unit_max_cues: int = 3
     semantic_barrier_unit_max_gap_sec: float = 0.3
-    semantic_barrier_model: str = "openai/gpt-5.6-luna"
+    semantic_barrier_model: str = "openai/gpt-5.6-sol"
     semantic_barrier_server_url: Optional[str] = None
     semantic_barrier_hostname: str = "127.0.0.1"
     semantic_barrier_port: Optional[int] = None
@@ -448,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--semantic-barrier-units", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--semantic-barrier-unit-max-cues", type=int, default=3)
     parser.add_argument("--semantic-barrier-unit-max-gap-sec", type=float, default=0.3)
-    parser.add_argument("--semantic-barrier-model", default="openai/gpt-5.6-luna")
+    parser.add_argument("--semantic-barrier-model", default="openai/gpt-5.6-sol")
     parser.add_argument("--semantic-barrier-server-url")
     parser.add_argument("--semantic-barrier-hostname", default="127.0.0.1")
     parser.add_argument("--semantic-barrier-port", type=int)

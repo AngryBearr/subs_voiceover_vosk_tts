@@ -1,0 +1,508 @@
+[
+  {
+    "text": [
+      "Эти американцы начинают приключение, которое может случиться лишь раз в жизни."
+    ],
+    "index": 2,
+    "start": 7000,
+    "end": 11200,
+    "duration": 4200,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.2,
+      "estimated_sec": 7.769230769230769,
+      "mismatch_ratio": 1.8498168498168497,
+      "diff_sec": 3.569230769230769,
+      "extended_duration_sec": 11.2,
+      "extended_mismatch_ratio": 0.6936813186813188,
+      "used_gap_sec": 7.0,
+      "words_count": 14,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Они будут жить 39 дней на острове, им придётся бороться без благ."
+    ],
+    "index": 16,
+    "start": 118320,
+    "end": 123300,
+    "duration": 4980,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.98,
+      "estimated_sec": 9.307692307692308,
+      "mismatch_ratio": 1.8690145196169292,
+      "diff_sec": 4.327692307692308,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 20,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Шон Кеннифф, 30 лет, с Лонг-Айленда."
+    ],
+    "index": 39,
+    "start": 182900,
+    "end": 185700,
+    "duration": 2800,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.8,
+      "estimated_sec": 3.8461538461538463,
+      "mismatch_ratio": 1.3736263736263739,
+      "diff_sec": 1.0461538461538464,
+      "extended_duration_sec": 3.5999999999999996,
+      "extended_mismatch_ratio": 1.0683760683760686,
+      "used_gap_sec": 0.8,
+      "words_count": 7,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Чтобы победить, нужно пережить превратности острова и голосования."
+    ],
+    "index": 63,
+    "start": 303480,
+    "end": 310280,
+    "duration": 6800,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 6.8,
+      "estimated_sec": 8.846153846153847,
+      "mismatch_ratio": 1.3009049773755657,
+      "diff_sec": 2.046153846153847,
+      "extended_duration_sec": 7.32,
+      "extended_mismatch_ratio": 1.2084909625893232,
+      "used_gap_sec": 0.52,
+      "words_count": 13,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Предложил поднять ящики на борт - мёртвый груз."
+    ],
+    "index": 77,
+    "start": 346300,
+    "end": 351330,
+    "duration": 5030,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 5.03,
+      "estimated_sec": 9.538461538461538,
+      "mismatch_ratio": 1.8963144211653156,
+      "diff_sec": 4.508461538461538,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 22,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Можно нам перерыв на 15 минут и просто поговорить, прежде чем начнём что-либо делать?"
+    ],
+    "index": 81,
+    "start": 362500,
+    "end": 367340,
+    "duration": 4840,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.84,
+      "estimated_sec": 9.23076923076923,
+      "mismatch_ratio": 1.9071837253655435,
+      "diff_sec": 4.39076923076923,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 21,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Я не люблю воду и долго в ней находиться."
+    ],
+    "index": 106,
+    "start": 432300,
+    "end": 436000,
+    "duration": 3700,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 3.7,
+      "estimated_sec": 4.769230769230769,
+      "mismatch_ratio": 1.2889812889812888,
+      "diff_sec": 1.069230769230769,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 13,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Тут ты круглые сутки на открытом воздухе и почти всё время расходуешь много энергии!"
+    ],
+    "index": 114,
+    "start": 454400,
+    "end": 461600,
+    "duration": 7200,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 7.2,
+      "estimated_sec": 7.615384615384615,
+      "mismatch_ratio": 1.0576923076923077,
+      "diff_sec": 0.4153846153846148,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 18,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Нам надо прояснить это."
+    ],
+    "index": 121,
+    "start": 478090,
+    "end": 479280,
+    "duration": 1190,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 1.19,
+      "estimated_sec": 2.923076923076923,
+      "mismatch_ratio": 2.4563671622495153,
+      "diff_sec": 1.733076923076923,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 5,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Длинную бамбуковую палку можно положить одним краем сюда, а другим — туда,"
+    ],
+    "index": 128,
+    "start": 486050,
+    "end": 489700,
+    "duration": 3650,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 3.65,
+      "estimated_sec": 6.6923076923076925,
+      "mismatch_ratio": 1.833508956796628,
+      "diff_sec": 3.0423076923076926,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 16,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "и при этом каждый из них будет целиком отвечать за свои действия!"
+    ],
+    "index": 20,
+    "start": 132100,
+    "end": 133700,
+    "duration": 1600,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 1.6,
+      "estimated_sec": 5.153846153846154,
+      "mismatch_ratio": 3.2211538461538463,
+      "diff_sec": 3.553846153846154,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 12,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Этот человек покинет остров с денежной наградой."
+    ],
+    "index": 23,
+    "start": 140100,
+    "end": 144200,
+    "duration": 4100,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.1,
+      "estimated_sec": 6.6923076923076925,
+      "mismatch_ratio": 1.632270168855535,
+      "diff_sec": 2.592307692307693,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 13,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Соня Кристофер, 63 года, музыкант из Сан-Франциско."
+    ],
+    "index": 42,
+    "start": 193800,
+    "end": 198200,
+    "duration": 4400,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.4,
+      "estimated_sec": 4.923076923076923,
+      "mismatch_ratio": 1.118881118881119,
+      "diff_sec": 0.523076923076923,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 9,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Это не просто проверка навыков выживания."
+    ],
+    "index": 58,
+    "start": 283500,
+    "end": 286400,
+    "duration": 2900,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.9,
+      "estimated_sec": 4.0,
+      "mismatch_ratio": 1.3793103448275863,
+      "diff_sec": 1.1,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 8,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Пусть ему 72 года и он - бывший \"морской котик\", но это означает, что здесь - его мир."
+    ],
+    "index": 80,
+    "start": 356900,
+    "end": 362000,
+    "duration": 5100,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 5.1,
+      "estimated_sec": 6.846153846153846,
+      "mismatch_ratio": 1.3423831070889896,
+      "diff_sec": 1.7461538461538462,
+      "extended_duration_sec": 5.3,
+      "extended_mismatch_ratio": 1.2917271407837445,
+      "used_gap_sec": 0.2,
+      "words_count": 19,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Но это лишь первый день!"
+    ],
+    "index": 116,
+    "start": 466400,
+    "end": 467800,
+    "duration": 1400,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 1.4,
+      "estimated_sec": 2.3076923076923075,
+      "mismatch_ratio": 1.6483516483516483,
+      "diff_sec": 0.9076923076923076,
+      "extended_duration_sec": 6.5,
+      "extended_mismatch_ratio": 0.35502958579881655,
+      "used_gap_sec": 5.1000000000000005,
+      "words_count": 7,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "и это станет первым камнем в нашем укрытии."
+    ],
+    "index": 129,
+    "start": 489700,
+    "end": 492200,
+    "duration": 2500,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.5,
+      "estimated_sec": 4.153846153846154,
+      "mismatch_ratio": 1.6615384615384616,
+      "diff_sec": 1.6538461538461542,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 9,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "То есть вы хотите сказать, что огонь нам сегодня нужен?"
+    ],
+    "index": 139,
+    "start": 502170,
+    "end": 504200,
+    "duration": 2030,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.03,
+      "estimated_sec": 5.0,
+      "mismatch_ratio": 2.4630541871921183,
+      "diff_sec": 2.97,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 12,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "если они не будут следовать вместе,"
+    ],
+    "index": 242,
+    "start": 710800,
+    "end": 715570,
+    "duration": 4770,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.77,
+      "estimated_sec": 7.846153846153846,
+      "mismatch_ratio": 1.6448959845186262,
+      "diff_sec": 3.0761538461538462,
+      "extended_duration_sec": 4.97,
+      "extended_mismatch_ratio": 1.5787029871536913,
+      "used_gap_sec": 0.2,
+      "words_count": 14,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "что хорошо, поскольку это поднимет боевой дух команды."
+    ],
+    "index": 484,
+    "start": 1416850,
+    "end": 1418980,
+    "duration": 2130,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.13,
+      "estimated_sec": 4.538461538461538,
+      "mismatch_ratio": 2.1307331166486096,
+      "diff_sec": 2.4084615384615384,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 10,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Сегодняшнее испытание — за 50 водонепроницаемых спичек и иммунитет."
+    ],
+    "index": 531,
+    "start": 1523000,
+    "end": 1529400,
+    "duration": 6400,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 6.4,
+      "estimated_sec": 6.846153846153846,
+      "mismatch_ratio": 1.0697115384615383,
+      "diff_sec": 0.44615384615384546,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 13,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Проиграйте — и вам придётся отправиться на \"Совет Племени\"."
+    ],
+    "index": 533,
+    "start": 1532100,
+    "end": 1537020,
+    "duration": 4920,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.92,
+      "estimated_sec": 9.384615384615385,
+      "mismatch_ratio": 1.9074421513445905,
+      "diff_sec": 4.464615384615385,
+      "extended_duration_sec": 18.0,
+      "extended_mismatch_ratio": 0.5213675213675214,
+      "used_gap_sec": 13.08,
+      "words_count": 20,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  }
+]

@@ -1,0 +1,345 @@
+[
+  {
+    "text": [
+      "Я хотела чистосердечно признаться Сью,",
+      "Крейгу и Дженне, но у нас так и не было"
+    ],
+    "index": 114,
+    "start": 434053,
+    "end": 437708,
+    "duration": 3655,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 3.655,
+      "estimated_sec": 7.8,
+      "mismatch_ratio": 2.13406292749658,
+      "diff_sec": 4.145,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 15,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Итак, это может",
+      "пойти двумя путями."
+    ],
+    "index": 142,
+    "start": 515659,
+    "end": 516970,
+    "duration": 1311,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 1.311,
+      "estimated_sec": 3.5,
+      "mismatch_ratio": 2.6697177726926014,
+      "diff_sec": 2.189,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 6,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "потому что, если ты решишь его использовать,",
+      "это означает, что тебя не могут выгнать"
+    ],
+    "index": 172,
+    "start": 608746,
+    "end": 612404,
+    "duration": 3658,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 3.658,
+      "estimated_sec": 8.4,
+      "mismatch_ratio": 2.296336796063423,
+      "diff_sec": 4.742000000000001,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 14,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "знаешь, мы бы сказали",
+      "нашему альянсу, Эл и Ли,"
+    ],
+    "index": 222,
+    "start": 787994,
+    "end": 790513,
+    "duration": 2519,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.519,
+      "estimated_sec": 4.6,
+      "mismatch_ratio": 1.8261214767764984,
+      "diff_sec": 2.0809999999999995,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 9,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Да, сегодня мой первый день, когда",
+      "я реально, типа, умираю с голоду."
+    ],
+    "index": 306,
+    "start": 1065926,
+    "end": 1070897,
+    "duration": 4971,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.971,
+      "estimated_sec": 6.8,
+      "mismatch_ratio": 1.367934017300342,
+      "diff_sec": 1.8289999999999997,
+      "extended_duration_sec": 14.577,
+      "extended_mismatch_ratio": 0.46648830349180215,
+      "used_gap_sec": 9.606,
+      "words_count": 12,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Бросай! Отличная работа."
+    ],
+    "index": 517,
+    "start": 1722808,
+    "end": 1724741,
+    "duration": 1933,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 1.933,
+      "estimated_sec": 2.4,
+      "mismatch_ratio": 1.2415933781686497,
+      "diff_sec": 0.46699999999999986,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 3,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "если можно было бы",
+      "как-нибудь обменять что-нибудь"
+    ],
+    "index": 641,
+    "start": 2052743,
+    "end": 2054914,
+    "duration": 2171,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.171,
+      "estimated_sec": 4.9,
+      "mismatch_ratio": 2.2570244127130357,
+      "diff_sec": 2.7290000000000005,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 7,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "и, э-э, собрать свои вещи."
+    ],
+    "index": 875,
+    "start": 2761122,
+    "end": 2763400,
+    "duration": 2278,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.278,
+      "estimated_sec": 2.6,
+      "mismatch_ratio": 1.1413520632133451,
+      "diff_sec": 0.32200000000000006,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 5,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Врачи сказали моим родителям, если я и",
+      "выживу, то это будет шанс один на миллион"
+    ],
+    "index": 329,
+    "start": 1142279,
+    "end": 1146041,
+    "duration": 3762,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 3.762,
+      "estimated_sec": 8.0,
+      "mismatch_ratio": 2.126528442317916,
+      "diff_sec": 4.2379999999999995,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 15,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Осталося двадцать один участник.",
+      "Кто покинет игру сегодня вечером?"
+    ],
+    "index": 30,
+    "start": 73659,
+    "end": 77111,
+    "duration": 3452,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Мне удалось убедить Рохана",
+      "проголосовать за Эвана."
+    ],
+    "index": 57,
+    "start": 149287,
+    "end": 152589,
+    "duration": 3302,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "которые знают точное местонахождение",
+      "нашего скрытого идола иммунитета"
+    ],
+    "index": 103,
+    "start": 405612,
+    "end": 410131,
+    "duration": 4519,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "потому что я хочу рассказать",
+      "вам правду об идоле,"
+    ],
+    "index": 122,
+    "start": 459219,
+    "end": 461704,
+    "duration": 2485,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Я сказала Нику, что",
+      "никогда не напишу его имя,"
+    ],
+    "index": 145,
+    "start": 519121,
+    "end": 521852,
+    "duration": 2731,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Я просто… я предан,"
+    ],
+    "index": 150,
+    "start": 537537,
+    "end": 539262,
+    "duration": 1725,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "А потом, если вы",
+      "копаете в этом районе,"
+    ],
+    "index": 192,
+    "start": 670732,
+    "end": 672672,
+    "duration": 1940,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Можно ли нам взять пару дней,",
+      "чтобы, как бы, принять решение?"
+    ],
+    "index": 213,
+    "start": 769769,
+    "end": 772185,
+    "duration": 2416,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Могу я с тобой поговорить?"
+    ],
+    "index": 706,
+    "start": 2256531,
+    "end": 2257519,
+    "duration": 988,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "В \"Выжившем\" невозможно",
+      "добраться до конца игры в одиночку."
+    ],
+    "index": 725,
+    "start": 2308340,
+    "end": 2312137,
+    "duration": 3797,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Вы уже побывали на трёх",
+      "из четырёх советов племени."
+    ],
+    "index": 916,
+    "start": 2932321,
+    "end": 2937589,
+    "duration": 5268,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "и это были ты, Ли, Эль и Фиби."
+    ],
+    "index": 973,
+    "start": 3092251,
+    "end": 3096255,
+    "duration": 4004,
+    "gender": "male"
+  }
+]

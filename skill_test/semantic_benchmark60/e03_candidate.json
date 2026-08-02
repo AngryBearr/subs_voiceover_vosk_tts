@@ -1,0 +1,237 @@
+[
+  {
+    "text": [
+      "Перед Советом Племени я думала, что голосование будет единогласным."
+    ],
+    "index": 46,
+    "start": 131783,
+    "end": 138342,
+    "duration": 6559,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 6.559,
+      "estimated_sec": 13.4,
+      "mismatch_ratio": 2.042994358896173,
+      "diff_sec": 6.841,
+      "extended_duration_sec": 7.727,
+      "extended_mismatch_ratio": 1.7341788533712954,
+      "used_gap_sec": 1.168,
+      "words_count": 18,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Он должен привести кого-то ещё и принять решение."
+    ],
+    "index": 96,
+    "start": 422763,
+    "end": 426122,
+    "duration": 3359,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 3.359,
+      "estimated_sec": 8.3,
+      "mismatch_ratio": 2.4709735040190535,
+      "diff_sec": 4.941000000000001,
+      "extended_duration_sec": 4.227,
+      "extended_mismatch_ratio": 1.9635675419919565,
+      "used_gap_sec": 0.8679999999999999,
+      "words_count": 14,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "А если это подсказка?"
+    ],
+    "index": 117,
+    "start": 481250,
+    "end": 482675,
+    "duration": 1425,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 1.425,
+      "estimated_sec": 2.3,
+      "mismatch_ratio": 1.6140350877192982,
+      "diff_sec": 0.8749999999999998,
+      "extended_duration_sec": 4.131,
+      "extended_mismatch_ratio": 0.5567659162430404,
+      "used_gap_sec": 2.706,
+      "words_count": 4,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": false
+    }
+  },
+  {
+    "text": [
+      "Если проиграем ещё один конкурс, нам всем конец."
+    ],
+    "index": 1323,
+    "start": 3708955,
+    "end": 3711354,
+    "duration": 2399,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 2.399,
+      "estimated_sec": 5.7,
+      "mismatch_ratio": 2.3759899958315964,
+      "diff_sec": 3.301,
+      "extended_duration_sec": null,
+      "extended_mismatch_ratio": null,
+      "used_gap_sec": null,
+      "words_count": 10,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "Капитан Ли попросил меня этим заняться."
+    ],
+    "index": 1392,
+    "start": 3975126,
+    "end": 3979286,
+    "duration": 4160,
+    "gender": "male",
+    "analysis": {
+      "duration_sec": 4.16,
+      "estimated_sec": 7.4,
+      "mismatch_ratio": 1.778846153846154,
+      "diff_sec": 3.24,
+      "extended_duration_sec": 4.442,
+      "extended_mismatch_ratio": 1.6659162539396668,
+      "used_gap_sec": 0.282,
+      "words_count": 11,
+      "is_short_segment": false,
+      "is_checked": true,
+      "is_critical": true
+    }
+  },
+  {
+    "text": [
+      "В конце концов племя Саанапу проиграло испытание."
+    ],
+    "index": 15,
+    "start": 41320,
+    "end": 44017,
+    "duration": 2697,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "выгнав Бьянку."
+    ],
+    "index": 21,
+    "start": 51570,
+    "end": 54430,
+    "duration": 2860,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Эти двое сейчас единственные не из нашего альянса."
+    ],
+    "index": 122,
+    "start": 493515,
+    "end": 497890,
+    "duration": 4375,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "что на Совете Племени ты в безопасности."
+    ],
+    "index": 144,
+    "start": 561130,
+    "end": 563081,
+    "duration": 1951,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Мы с Фиби в одном альянсе, и получить вот так просто подсказку к скрытому иммунитету — настоящее благословение."
+    ],
+    "index": 175,
+    "start": 654410,
+    "end": 661889,
+    "duration": 7479,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Мы решили рассказать группе, что выбирали между двумя мешочками."
+    ],
+    "index": 220,
+    "start": 753490,
+    "end": 757572,
+    "duration": 4082,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Скажем всем, что здесь была подсказка к скрытому иммунитету."
+    ],
+    "index": 291,
+    "start": 989613,
+    "end": 994355,
+    "duration": 4742,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Если хочешь выиграть, надо играть жёстко."
+    ],
+    "index": 296,
+    "start": 1007279,
+    "end": 1014506,
+    "duration": 7227,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Испытание выиграет племя, которое лучше всех сработает как команда."
+    ],
+    "index": 638,
+    "start": 1892855,
+    "end": 1896595,
+    "duration": 3740,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Если мы не выиграем иммунитет, я уйду домой."
+    ],
+    "index": 994,
+    "start": 2761306,
+    "end": 2763536,
+    "duration": 2230,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Я продолжу голосовать за Кэт — для меня это очевидный выбор."
+    ],
+    "index": 1332,
+    "start": 3725393,
+    "end": 3728192,
+    "duration": 2799,
+    "gender": "male"
+  },
+  {
+    "text": [
+      "Всё будет по плану."
+    ],
+    "index": 1466,
+    "start": 4211203,
+    "end": 4213533,
+    "duration": 2330,
+    "gender": "male"
+  }
+]

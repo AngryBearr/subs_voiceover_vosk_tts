@@ -507,7 +507,7 @@ def test_semantic_barrier_parser_defaults_and_explicit_flags() -> None:
     assert defaults.semantic_barrier is False
     assert defaults.semantic_barrier_units is True
     assert (defaults.semantic_barrier_unit_max_cues, defaults.semantic_barrier_unit_max_gap_sec) == (3, 0.3)
-    assert defaults.semantic_barrier_model == "openai/gpt-5.6-luna"
+    assert defaults.semantic_barrier_model == "openai/gpt-5.6-sol"
     assert (defaults.semantic_barrier_batch_size, defaults.semantic_barrier_concurrency,
             defaults.semantic_barrier_context_window) == (4, 1, 3)
     assert (defaults.semantic_barrier_transport_retries, defaults.semantic_barrier_schema_retries) == (1, 1)
@@ -533,6 +533,8 @@ def test_semantic_barrier_parser_defaults_and_explicit_flags() -> None:
     assert explicit.semantic_barrier_structured_output is False
     assert explicit.semantic_barrier_units is False
     assert (explicit.semantic_barrier_unit_max_cues, explicit.semantic_barrier_unit_max_gap_sec) == (5, 0.75)
+    luna = build_parser().parse_args(["input.json", "--semantic-barrier-model", "openai/gpt-5.6-luna"])
+    assert luna.semantic_barrier_model == "openai/gpt-5.6-luna"
 
 
 def test_cli_invalid_barrier_config_precedes_api_key_and_pipeline(
@@ -648,7 +650,7 @@ def test_enabled_barrier_pass_order_context_timing_artifacts_and_costs(tmp_path:
     assert calls == ["flash", "pro", "barrier"]
     assert observed["original"] == [source]
     assert observed["context"] == [source]
-    assert observed["config"].semantic_barrier_model == "openai/gpt-5.6-luna"
+    assert observed["config"].semantic_barrier_model == "openai/gpt-5.6-sol"
     assert json.loads(final_path.read_text(encoding="utf-8"))[0]["text"] == ["Verified candidate"]
     barrier_dir = output / "semantic_barrier"
     for suffix in ("_reviewed_prebarrier.json", "_reviewed_independent_verified.json",

@@ -241,11 +241,14 @@ def _validate_server_config(server_url: Optional[str], hostname: str, port: Opti
 
 
 async def verify_items(
-    original: List[Dict[str, Any]], candidate: List[Dict[str, Any]], *, model: str = "openai/gpt-5.6-luna", context_items: Optional[List[Dict[str, Any]]] = None,
+    original: List[Dict[str, Any]], candidate: List[Dict[str, Any]], *, model: str = "openai/gpt-5.6-sol", context_items: Optional[List[Dict[str, Any]]] = None,
     context_window: int = 3, batch_size: int = 4, concurrency: int = 3, transport_retries: int = 1, schema_retries: int = 1,
     review_report: Optional[Dict[str, Any]] = None, request_callable: Optional[RequestFunc] = None,
     semantic_units: bool = False, semantic_unit_max_cues: int = 3, semantic_unit_max_gap_sec: float = 0.3,
+    backend: str = "opencode", accounting: str = "subscription", cost_is_billing_authoritative: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    if not isinstance(backend, str) or not backend.strip() or not isinstance(accounting, str) or not accounting.strip() or not isinstance(cost_is_billing_authoritative, bool):
+        raise ValueError("invalid_backend_accounting")
     _validate_runtime_args(model, context_window, batch_size, concurrency, transport_retries, schema_retries, semantic_unit_max_cues, semantic_unit_max_gap_sec)
     originals, candidates = _validate_items(original, candidate)
     if context_items is not None:
@@ -428,13 +431,13 @@ async def verify_items(
                               "verdict": unit_verdict, "issues": unit_issues, "severity": unit_severity, "explanation": unit_explanation,
                               "error": unit_error, "reason": unit_reason, "fallback": unit_fallback})
         report_units = unit_rows
-    report = {"schema_version": 1, "backend": "opencode", "accounting": "subscription", "model": model, "total_count": len(originals), "changed_count": len(changed), "selected_count": len(selected), "selected_indices": selected, "verified_indices": verified, "unresolved_indices": unresolved, "fallback_indices": unresolved, "status": "completed" if not unresolved else "completed_with_unresolved", "context_mode": "full" if context_items is not None else "sparse", "targets": [details[i] for i in changed], "requests": requests, "transport_retries": transport_retries_used, "schema_split_retry": schema_split_retry, "failures": transport_failures + schema_failures}
+    report = {"schema_version": 1, "backend": backend, "accounting": accounting, "model": model, "total_count": len(originals), "changed_count": len(changed), "selected_count": len(selected), "selected_indices": selected, "verified_indices": verified, "unresolved_indices": unresolved, "fallback_indices": unresolved, "status": "completed" if not unresolved else "completed_with_unresolved", "context_mode": "full" if context_items is not None else "sparse", "targets": [details[i] for i in changed], "requests": requests, "transport_retries": transport_retries_used, "schema_split_retry": schema_split_retry, "failures": transport_failures + schema_failures}
     if semantic_units:
         report["semantic_units_enabled"] = True
         report["units"] = report_units
-    usage = {"backend": "opencode", "accounting": "subscription", "model": model, "requests": requests, "transport_retries": transport_retries_used, "schema_split_retry": schema_split_retry, "successful_responses": successful, "transport_failures": transport_failures, "schema_failures": schema_failures, "token_usage_available": token_usage_response_count > 0}
+    usage = {"backend": backend, "accounting": accounting, "model": model, "requests": requests, "transport_retries": transport_retries_used, "schema_split_retry": schema_split_retry, "successful_responses": successful, "transport_failures": transport_failures, "schema_failures": schema_failures, "token_usage_available": token_usage_response_count > 0}
     if token_usage_response_count:
-        usage.update(usage_totals, provider_reported_cost_usd=reported_cost, provider_cost_is_billing_authoritative=False, usage_response_count=usage_response_count, provider_ids=sorted(provider_ids), model_ids=sorted(model_ids), finishes=sorted(finishes))
+        usage.update(usage_totals, provider_reported_cost_usd=reported_cost, provider_cost_is_billing_authoritative=cost_is_billing_authoritative, usage_response_count=usage_response_count, provider_ids=sorted(provider_ids), model_ids=sorted(model_ids), finishes=sorted(finishes))
     return output, report, usage
 
 
@@ -476,7 +479,7 @@ async def _request_live(prompt: str, model: str, base_url: str, auth_header: Opt
 
 def verify_items_live(
     original: List[Dict[str, Any]], candidate: List[Dict[str, Any]], *,
-    model: str = "openai/gpt-5.6-luna", context_items: Optional[List[Dict[str, Any]]] = None,
+    model: str = "openai/gpt-5.6-sol", context_items: Optional[List[Dict[str, Any]]] = None,
     context_window: int = 3, batch_size: int = 4, concurrency: int = 3,
     transport_retries: int = 1, schema_retries: int = 1,
     review_report: Optional[Dict[str, Any]] = None, server_url: Optional[str] = None,
@@ -516,7 +519,7 @@ def verify_items_live(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fail-closed independent subtitle verifier.")
     parser.add_argument("original"); parser.add_argument("candidate")
-    parser.add_argument("--review-report"); parser.add_argument("--context-source"); parser.add_argument("--model", default="openai/gpt-5.6-luna"); parser.add_argument("--server-url"); parser.add_argument("--hostname", default="127.0.0.1"); parser.add_argument("--port", type=int); parser.add_argument("--batch-size", type=int, default=4); parser.add_argument("--concurrency", type=int, default=3); parser.add_argument("--context-window", type=int, default=3); parser.add_argument("--transport-retries", type=int, default=1, help="Number of extra transport attempts."); parser.add_argument("--schema-retries", type=int, choices=[0, 1], default=1, help="Split one malformed multi-item batch into singleton requests once (0 or 1). "); parser.add_argument("--semantic-units", action="store_true"); parser.add_argument("--semantic-unit-max-cues", type=int, default=3); parser.add_argument("--semantic-unit-max-gap-sec", type=float, default=0.3); parser.add_argument("--structured-output", action=argparse.BooleanOptionalAction, default=False); parser.add_argument("--output-dir", default="output/semantic_verified")
+    parser.add_argument("--review-report"); parser.add_argument("--context-source"); parser.add_argument("--model", default="openai/gpt-5.6-sol"); parser.add_argument("--server-url"); parser.add_argument("--hostname", default="127.0.0.1"); parser.add_argument("--port", type=int); parser.add_argument("--batch-size", type=int, default=4); parser.add_argument("--concurrency", type=int, default=3); parser.add_argument("--context-window", type=int, default=3); parser.add_argument("--transport-retries", type=int, default=1, help="Number of extra transport attempts."); parser.add_argument("--schema-retries", type=int, choices=[0, 1], default=1, help="Split one malformed multi-item batch into singleton requests once (0 or 1). "); parser.add_argument("--semantic-units", action="store_true"); parser.add_argument("--semantic-unit-max-cues", type=int, default=3); parser.add_argument("--semantic-unit-max-gap-sec", type=float, default=0.3); parser.add_argument("--structured-output", action=argparse.BooleanOptionalAction, default=False); parser.add_argument("--output-dir", default="output/semantic_verified")
     return parser
 
 
