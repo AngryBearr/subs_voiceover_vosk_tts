@@ -3,14 +3,49 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
+import math
 import os
 import signal
 import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+
+@dataclass(frozen=True)
+class OpenCodePromptUsage:
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    cost: Optional[float] = None
+    provider_id: Optional[str] = None
+    model_id: Optional[str] = None
+    finish: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        for name in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"OpenCode usage {name} must be a nonnegative integer")
+        if self.cost is not None and (isinstance(self.cost, bool) or not isinstance(self.cost, (int, float)) or not math.isfinite(float(self.cost)) or self.cost < 0):
+            raise ValueError("OpenCode usage cost must be a nonnegative finite number")
+        for name in ("provider_id", "model_id", "finish"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"OpenCode usage {name} must be a string")
+
+
+@dataclass(frozen=True)
+class OpenCodePromptResult:
+    text: str
+    usage: Optional[OpenCodePromptUsage]
 
 
 def _find_free_port() -> int:
@@ -142,6 +177,12 @@ def _extract_prompt_text(data: Dict[str, Any]) -> str:
         message = message.strip()[:500] or "unspecified provider error"
         raise RuntimeError(f"OpenCode provider error: {error_type}: {message}")
 
+    if "structured" in info:
+        structured = info["structured"]
+        if not isinstance(structured, (dict, list)):
+            raise RuntimeError("OpenCode response malformed: structured must be an object or list")
+        return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
+
     text_parts = [
         part["text"]
         for part in parts
@@ -158,6 +199,68 @@ def _extract_prompt_text(data: Dict[str, Any]) -> str:
     raise RuntimeError(
         f"OpenCode response contained no text: finish={safe_finish!r}, part_types={part_types!r}"
     )
+
+
+def _optional_nonnegative_int(value: Any, name: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"OpenCode response malformed: usage {name} must be a nonnegative integer")
+    return value
+
+
+def _optional_nonnegative_float(value: Any, name: str) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value < 0:
+        raise RuntimeError(f"OpenCode response malformed: usage {name} must be a nonnegative finite number")
+    return float(value)
+
+
+def _optional_string(value: Any, name: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RuntimeError(f"OpenCode response malformed: usage {name} must be a string")
+    return value
+
+
+def _extract_prompt_result(data: Dict[str, Any]) -> OpenCodePromptResult:
+    text = _extract_prompt_text(data)
+    info = data["info"]
+    tokens = info.get("tokens")
+    usage_keys = {"tokens", "cost"}
+    if not any(key in info for key in usage_keys):
+        return OpenCodePromptResult(text=text, usage=None)
+    if "tokens" in info and not isinstance(tokens, dict):
+        raise RuntimeError("OpenCode response malformed: usage tokens must be an object")
+    tokens = tokens or {}
+    cache = tokens.get("cache")
+    if "cache" in tokens and not isinstance(cache, dict):
+        raise RuntimeError("OpenCode response malformed: usage cache must be an object")
+    for key in ("input", "output", "reasoning", "total"):
+        if key in tokens and tokens[key] is None:
+            raise RuntimeError(f"OpenCode response malformed: usage {key} must not be null")
+    if isinstance(cache, dict):
+        for key in ("read", "write"):
+            if key in cache and cache[key] is None:
+                raise RuntimeError(f"OpenCode response malformed: usage cache.{key} must not be null")
+    for key in ("cost", "providerID", "modelID", "finish"):
+        if key in info and info[key] is None:
+            raise RuntimeError(f"OpenCode response malformed: usage {key} must not be null")
+    usage = OpenCodePromptUsage(
+        input_tokens=_optional_nonnegative_int(tokens.get("input"), "input_tokens"),
+        output_tokens=_optional_nonnegative_int(tokens.get("output"), "output_tokens"),
+        reasoning_tokens=_optional_nonnegative_int(tokens.get("reasoning"), "reasoning_tokens"),
+        total_tokens=_optional_nonnegative_int(tokens.get("total"), "total_tokens"),
+        cache_read_tokens=_optional_nonnegative_int(cache.get("read") if cache is not None else None, "cache_read_tokens"),
+        cache_write_tokens=_optional_nonnegative_int(cache.get("write") if cache is not None else None, "cache_write_tokens"),
+        cost=_optional_nonnegative_float(info.get("cost"), "cost"),
+        provider_id=_optional_string(info.get("providerID"), "provider_id"),
+        model_id=_optional_string(info.get("modelID"), "model_id"),
+        finish=_optional_string(info.get("finish"), "finish"),
+    )
+    return OpenCodePromptResult(text=text, usage=usage)
 
 
 async def _http_post(base_url: str, path: str, body: Dict[str, Any], timeout: float = 120.0, auth_header: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -192,14 +295,21 @@ async def create_session(base_url: str, title: str = "shorten", auth_header: Opt
     return (await _http_post(base_url, "/session", {"title": title}, auth_header=auth_header))["id"]
 
 
-async def send_prompt(base_url: str, session_id: str, system_prompt: str, user_prompt: str, model: str, reasoning_effort: Optional[str] = None, auth_header: Optional[Dict[str, str]] = None) -> Optional[str]:
+async def send_prompt_result(base_url: str, session_id: str, system_prompt: str, user_prompt: str, model: str, reasoning_effort: Optional[str] = None, auth_header: Optional[Dict[str, str]] = None, *, output_schema: Optional[Dict[str, Any]] = None) -> Optional[OpenCodePromptResult]:
     body: Dict[str, Any] = {"parts": [{"type": "text", "text": user_prompt}], "model": _parse_model_string(model), "system": system_prompt}
+    if output_schema is not None:
+        body["format"] = {"type": "json_schema", "schema": copy.deepcopy(output_schema), "retryCount": 0}
     try:
         data = await _http_post(base_url, f"/session/{session_id}/message", body, timeout=180.0, auth_header=auth_header)
-        return _extract_prompt_text(data)
+        return _extract_prompt_result(data)
     except Exception as exc:
         print(f"  HTTP error: {exc}", file=sys.stderr)
         return None
+
+
+async def send_prompt(base_url: str, session_id: str, system_prompt: str, user_prompt: str, model: str, reasoning_effort: Optional[str] = None, auth_header: Optional[Dict[str, str]] = None) -> Optional[str]:
+    result = await send_prompt_result(base_url, session_id, system_prompt, user_prompt, model, reasoning_effort, auth_header)
+    return result.text if result is not None else None
 
 
 async def delete_session(base_url: str, session_id: str, auth_header: Optional[Dict[str, str]] = None) -> None:

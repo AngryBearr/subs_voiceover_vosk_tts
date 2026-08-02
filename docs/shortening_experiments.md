@@ -99,7 +99,7 @@ The invariants are:
 |---|---|---|
 | DeepSeek Flash (`deepseek-v4-flash`) | Generation and direct Flash target-selection experiment | Direct API path supports explicit non-thinking and JSON requests; usage/cost metadata is available on that path. |
 | DeepSeek Pro (`deepseek-v4-pro`) | Planner, critic, editor, verifier, repair, and standalone duration gate | Non-thinking quality stages, strict local parsing, bounded retries, and fail-closed routing. |
-| Existing OpenCode HTTP path | Alternative provider/server orchestration | Its server path has weaker guarantees for JSON controls, thinking controls, and usage accounting; it is not equivalent to the direct DeepSeek API. |
+| Existing OpenCode HTTP path | Alternative provider/server orchestration | Its server path has weaker guarantees for JSON controls and thinking controls. AssistantMessage token/cache/reasoning/cost metadata is captured when reported, but `info.cost` has unspecified billing semantics and is not an invoice, subscription charge, or guaranteed actual billed cost. |
 | Official ChatGPT Pro Codex path | Recommended subscription-backed test harness for future independent model-family verification | Test through the official local Codex CLI, not by copying browser state. |
 | OpenCode ChatGPT OAuth | Third-party subscription-backed experiment path | Supported by OpenCode, but not explicitly endorsed by OpenAI; it is not equivalent to the official Codex path. |
 
@@ -162,11 +162,47 @@ OpenCode OAuth run.
 | 8 | Direct Flash duration selection | Accepted opt-in, not default | Real paid cost was $0.00076104: four actionable additional targets, two safely unchanged, and two actual fits. One of the fits had semantic loss until Pro repair; therefore this remains opt-in, with proxy measurement and nondeterminism caveats. |
 | 9 | Standalone Pro duration gate | Accepted opt-in | Deterministic decisions were 517/875; no-gate was 1/4 versus gate 2/4 on semantic + actual-fit outcomes. Costs were $0.01514621 without the gate and $0.00797013 with it, but request and nondeterminism differences prevent attributing the difference to the gate. |
 | 10 | Combined profile wiring | Accepted experimental, not default | Smoke cost was $0.01189873 with 0 reasoning tokens, 0 API failures, and 2 parse failures; one target was verified in that stochastic run. Conservative unresolved behavior was retained; the index-42 status bug was fixed offline. Final actual Edge measurement remains pending because of service/cache state. |
-| 11 | Multi-cue semantic units | Pending, highest priority | Current anchor checks do not yet provide the needed multi-cue proposition coverage; design and independent evaluation are still required. |
+| 11 | Multi-cue semantic units | Accepted for final barrier | The tracked benchmark24 control validates unit-level final-barrier behavior; Pro remains cue-level. Grouping is conservative (maximum three cues, timing gap at most 0.3 seconds, textual continuation, unknown timing single-cue), with atomic fallback. |
 | 12 | Actual-TTS final measurement plus one bounded compaction/reverify | Pending | Final production-equivalent TTS measurement and the single bounded recovery path have not yet been completed as release evidence. |
 | 13 | Official Codex independent verifier | Pending | Official Codex/ChatGPT Pro path has not yet supplied an independent verifier evaluation. |
 | 14 | OpenCode OAuth independent semantic barrier | Accepted experimental opt-in, not default | OpenCode 1.18.9/Luna CLI runs on E01 and E04 passed the recorded full-context controls with fail-closed restoration; artifacts are temporary and non-durable. This is third-party OpenCode OAuth evidence, not OpenAI endorsement or release evidence. |
 | 15 | E04 prior-report OpenCode barrier | Accepted experimental opt-in, not default | Only prior-verified 517/875 were sent and both passed; unresolved 222/641 were not sent and restored; one request, 0 failures, approximately 10.19s. |
+
+## 2026-08-02 benchmark24 model screening
+
+The reproducible fixture is `skill_test/semantic_benchmark24/`; raw result files
+remain dated, local artifacts under `/tmp/opencode/model_screening/`. It contains
+24 manually adjudicated cases: 21 clear gate cases and 3 diagnostic debatable
+cases. Unit grouping needs full episode context. Results below are screening
+evidence, not a release claim; provider costs are informational.
+
+* **Luna strict text (`openai/gpt-5.6-luna`)**: current tracked fixture
+  `skill_test/semantic_benchmark24/` (21 clear / 3 diagnostic) control, clear
+  21/21 and overall 23/24,
+  with 0 schema/transport failures and 8 requests. Usage was 190028 input,
+  1308 output, 2186 reasoning, 105984 cache-read, 299506 total tokens; provider
+  cost 0 on the subscription route. Qualified default.
+* **Terra20**: clear 20/21; rejected because of E01/114.
+* **GLM5.2/Ollama**: E01 clear 7/7 after 128 diagnostic, but E03/E04 transport
+  failures prevented qualification. StructuredOutput is an explicit compatible
+  option, not the default.
+* **DeepSeek V4 Pro/Ollama**: clear 20/21; overstrict E04/306.
+* **Nemotron Super free**: revised clear 19/21 because of E04/641 and transport
+  875.
+* **Gemini3 Flash**: revised clear 20/21, with schema/unresolved outcomes and
+  high request/cost overhead; not qualified.
+* **MiMo base, Gemini2.5, Qwen, Gemma, GPT-OSS, Mistral, and multiple Orca
+  routes**: rejected or blocked by combinations of false rejects, schema
+  failures, unresolved responses, and provider transport/tool incompatibility.
+  A blocked route is not evidence that the model is semantically weak. No
+  cheap/open route produced a qualifying result in this screening; that is not a
+  semantic-quality conclusion for routes blocked by transport or tooling.
+
+The verifier's StructuredOutput is an OpenCode synthetic schema-validated tool,
+not provider-native `response_format`. Text mode uses the strict local parser and
+fails closed. The Luna decision therefore defaults to strict text while keeping
+StructuredOutput available as an explicit route option. Provider costs above are
+informational, not billing-authoritative.
 
 ## Do not repeat without new evidence
 
@@ -248,19 +284,39 @@ evidence.
 
 1. Commit the current experimental opt-in foundation after review; it is ready
    to commit as experimental work and must not become a default by implication.
-2. Implement and evaluate multi-cue semantic units in a separate next commit;
-   this is the highest-priority semantic gap.
-3. Add the actual-TTS final gate and one bounded compaction/reverify path, with
+2. Keep the unit foundation accepted for the opt-in final barrier based on the
+   Luna 21/21 control. A full E03 live rerun remains blocked by provider
+   transport and is additional operational validation, not an acceptance blocker.
+3. Calibrate the integrated unit behavior, then screen models; model screening
+   comes after calibration.
+4. Add the actual-TTS final gate and one bounded compaction/reverify path, with
    production-equivalent measurement and explicit unresolved accounting.
-4. Broaden model-family, episode, genre, and voice evaluation, including the
+5. Broaden model-family, episode, genre, and voice evaluation, including the
    independent Codex/ChatGPT Pro verifier path.
 
 ## Cost and accounting
 
+### Independent barrier benchmark notes
+
+The validated benchmark recorded these informational OpenCode results:
+
+| Run | Result | Requests/tokens | Provider cost |
+|---|---|---|---|
+| Historical cue-level benchmark24 before E01/128 confidence revision - DeepSeek V4 Pro (`deepseek-v4-pro`) | historical clear 22/22, overall 23/24; pass 10/10, fail 13/14; only debatable E01/121 disagreement | 5 requests; input 9407, output 1221, reasoning 13125, cache-read 280960, total 304713; zero schema/transport | `$0.006120548` |
+| MiniMax M3 | clear 20/22, overall 21/24; false rejects E01/114 and 128; rejected as worse and costlier | zero schema/transport reported | `$0.05551218` |
+| E03 full-context comparison | legacy restored 502/1054; calibrated restored 502 and kept 1054 | 2 requests; input 1527, output 282, reasoning 1115, cache 112384, total 115308; zero schema/transport | `$0.0009196152` |
+
+All OpenCode costs above are informational provider-reported metadata, not
+billing-authoritative amounts. They must not be added to the combined pipeline's
+`estimated_cost_usd`, which remains Flash API plus Pro API cost.
+
 Direct DeepSeek API calls have token-based costs and emit usage/cost estimates;
 record the model, cache state, token counts, pricing label, and timestamp with
 each paid run. Subscription-backed calls through local Codex or OpenCode are
-accounted as subscription usage rather than stable per-token API pricing. Record
+accounted as subscription usage rather than stable per-token API pricing. OpenCode
+`info.cost`, when present, is provider-reported metadata with unspecified billing
+semantics; never treat it as a guaranteed invoice, subscription charge, or actual
+billed cost. Record
 the small A/B costs as observed run totals, but do not claim stable pricing or
 extrapolate them to production without a current provider price source. Keep
 direct API costs separate from subscription calls and from local CPU/TTS/cache

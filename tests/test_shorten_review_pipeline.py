@@ -13,6 +13,7 @@ import utils.shorten_review_pipeline as pipeline_module
 from utils.review_shortened_subtitles_deepseek import select_changed_targets
 from utils.shortening_domain import CalibratedDurationModel, DurationSelectionPolicy
 from utils.shorten_review_pipeline import (
+    Items,
     PipelineConfig,
     PipelineStageError,
     _critical_count,
@@ -488,3 +489,347 @@ def test_unchecked_profile_over_duration_item_remains_not_required() -> None:
     assert shortening["required_initially"] is False
     assert shortening["status"] == "not_required"
     assert shortening["reason"] == "within_budget"
+
+
+def _barrier_report(index: int, fallback: str | None = None) -> dict[str, Any]:
+    target: dict[str, Any] = {"index": index, "fallback": fallback}
+    return {
+        "selected_indices": [index],
+        "verified_indices": [] if fallback else [index],
+        "unresolved_indices": [index] if fallback else [],
+        "targets": [target],
+        "status": "completed_with_unresolved" if fallback else "completed",
+    }
+
+
+def test_semantic_barrier_parser_defaults_and_explicit_flags() -> None:
+    defaults = build_parser().parse_args(["input.json"])
+    assert defaults.semantic_barrier is False
+    assert defaults.semantic_barrier_units is True
+    assert (defaults.semantic_barrier_unit_max_cues, defaults.semantic_barrier_unit_max_gap_sec) == (3, 0.3)
+    assert defaults.semantic_barrier_model == "openai/gpt-5.6-luna"
+    assert (defaults.semantic_barrier_batch_size, defaults.semantic_barrier_concurrency,
+            defaults.semantic_barrier_context_window) == (4, 1, 3)
+    assert (defaults.semantic_barrier_transport_retries, defaults.semantic_barrier_schema_retries) == (1, 1)
+    assert defaults.semantic_barrier_structured_output is False
+    explicit = build_parser().parse_args([
+        "input.json", "--semantic-barrier", "--semantic-barrier-model", "provider/model",
+        "--semantic-barrier-server-url", "http://localhost:4096",
+        "--semantic-barrier-hostname", "localhost", "--semantic-barrier-port", "4096",
+        "--semantic-barrier-batch-size", "7", "--semantic-barrier-concurrency", "2",
+        "--semantic-barrier-context-window", "4", "--semantic-barrier-transport-retries", "3",
+        "--semantic-barrier-schema-retries", "0",
+        "--no-semantic-barrier-structured-output",
+        "--no-semantic-barrier-units", "--semantic-barrier-unit-max-cues", "5",
+        "--semantic-barrier-unit-max-gap-sec", "0.75",
+    ])
+    assert explicit.semantic_barrier is True
+    assert explicit.semantic_barrier_model == "provider/model"
+    assert explicit.semantic_barrier_server_url == "http://localhost:4096"
+    assert explicit.semantic_barrier_hostname == "localhost" and explicit.semantic_barrier_port == 4096
+    assert (explicit.semantic_barrier_batch_size, explicit.semantic_barrier_concurrency,
+            explicit.semantic_barrier_context_window) == (7, 2, 4)
+    assert (explicit.semantic_barrier_transport_retries, explicit.semantic_barrier_schema_retries) == (3, 0)
+    assert explicit.semantic_barrier_structured_output is False
+    assert explicit.semantic_barrier_units is False
+    assert (explicit.semantic_barrier_unit_max_cues, explicit.semantic_barrier_unit_max_gap_sec) == (5, 0.75)
+
+
+def test_cli_invalid_barrier_config_precedes_api_key_and_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pipeline_module, "load_api_key", lambda _: pytest.fail("API key lookup"))
+    monkeypatch.setattr(pipeline_module, "run_pipeline", lambda *_: pytest.fail("pipeline execution"))
+    assert pipeline_module.main(["input.json", "--semantic-barrier",
+                                 "--semantic-barrier-batch-size", "0"]) == 2
+
+
+@pytest.mark.parametrize("flag", ["--semantic-barrier-unit-max-cues", "--semantic-barrier-unit-max-gap-sec"])
+def test_cli_invalid_unit_config_precedes_api_key(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    monkeypatch.setattr(pipeline_module, "load_api_key", lambda _: pytest.fail("API key lookup"))
+    value = "0" if flag.endswith("cues") else "nan"
+    assert pipeline_module.main(["input.json", "--semantic-barrier", flag, value]) == 2
+
+
+def test_disabled_barrier_ignores_invalid_unit_config_before_flash(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([_item("text")]), encoding="utf-8")
+    config = PipelineConfig(input_path, tmp_path / "out", "key",
+                            semantic_barrier_unit_max_cues=0,
+                            semantic_barrier_unit_max_gap_sec=float("nan"))
+    def flash(items: Items, _: PipelineConfig, __: Path, ___: str) -> tuple[Items, dict[str, Any]]:
+        return items, {"estimated_cost_usd": 0}
+
+    def pro(items: Items, _: Items, __: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        return items, {"selected_indices": [], "outcomes": []}, {"estimated_cost_usd": 0}
+
+    run_pipeline(config, flash, pro)
+
+
+def test_programmatic_invalid_barrier_config_precedes_flash(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([_item("text")]), encoding="utf-8")
+    called = False
+
+    def flash(*args: Any) -> Any:
+        nonlocal called
+        called = True
+        raise AssertionError("stage called")
+
+    config = PipelineConfig(input_path, tmp_path / "out", "key",
+                            semantic_barrier_enabled=True, semantic_barrier_port=0)
+    with pytest.raises(ValueError, match="port must be between"):
+        run_pipeline(config, flash, flash)
+    assert called is False
+
+
+def test_disabled_barrier_preserves_shape_and_does_not_call_stage(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([_item("Original long phrase")]), encoding="utf-8")
+    calls: list[str] = []
+
+    def flash(items: Items, config: PipelineConfig, output: Path, stem: str) -> tuple[Items, dict[str, Any]]:
+        calls.append("flash")
+        changed = copy.deepcopy(items)
+        changed[0]["text"] = ["short"]
+        return changed, {"estimated_cost_usd": 0.1}
+
+    def pro(original: Items, shortened: Items, config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        calls.append("pro")
+        return shortened, {"selected_indices": [1], "outcomes": [{"index": 1, "outcome": "verified"}]}, {"estimated_cost_usd": 0.2}
+
+    def barrier(*args: Any) -> Any:
+        pytest.fail("disabled barrier called")
+
+    output = tmp_path / "out"
+    run_pipeline(PipelineConfig(input_path, output, "key"), flash, pro, barrier)
+    final = json.loads((output / "input_reviewed.json").read_text(encoding="utf-8"))
+    report = json.loads((output / "input.pipeline.report.json").read_text(encoding="utf-8"))
+    assert calls == ["flash", "pro"]
+    assert "semantic_barrier" not in report and "semantic_barrier" not in report["paths"]
+    assert not (output / "semantic_barrier").exists()
+    assert list(final[0]["shortening"]) == ["required_initially", "flash_changed", "pro_selected",
+                                             "max_chars", "final_chars", "status", "reason"]
+
+
+def test_enabled_barrier_pass_order_context_timing_artifacts_and_costs(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    context_path = tmp_path / "context.json"
+    source = _item("Original long phrase")
+    input_path.write_text(json.dumps([source]), encoding="utf-8")
+    context_path.write_text(json.dumps([source]), encoding="utf-8")
+    calls: list[str] = []
+    observed: dict[str, Any] = {}
+
+    def flash(items: Items, config: PipelineConfig, output: Path, stem: str) -> tuple[Items, dict[str, Any]]:
+        calls.append("flash")
+        changed = copy.deepcopy(items)
+        changed[0]["text"] = ["Flash candidate"]
+        return changed, {"estimated_cost_usd": 0.1}
+
+    def pro(original: Items, shortened: Items, config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        calls.append("pro")
+        return shortened, {"selected_indices": [1], "outcomes": [{"index": 1, "outcome": "verified"}]}, {"estimated_cost_usd": 0.2}
+
+    def barrier(original: Items, candidate: Items, context: Items | None,
+                config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        calls.append("barrier")
+        observed.update(original=copy.deepcopy(original), candidate=copy.deepcopy(candidate),
+                        context=copy.deepcopy(context), config=config)
+        assert candidate[0]["analysis"]["effective_duration_sec"] == 1.0
+        kept = copy.deepcopy(candidate)
+        kept[0]["text"] = ["Verified candidate"]
+        return kept, _barrier_report(1), {"provider_reported_cost_usd": 9.0, "requests": 1}
+
+    config = PipelineConfig(input_path, tmp_path / "out", "key", context_source=context_path,
+                            semantic_barrier_enabled=True)
+    final_path = run_pipeline(config, flash, pro, barrier)
+    output = config.output_dir
+    assert calls == ["flash", "pro", "barrier"]
+    assert observed["original"] == [source]
+    assert observed["context"] == [source]
+    assert observed["config"].semantic_barrier_model == "openai/gpt-5.6-luna"
+    assert json.loads(final_path.read_text(encoding="utf-8"))[0]["text"] == ["Verified candidate"]
+    barrier_dir = output / "semantic_barrier"
+    for suffix in ("_reviewed_prebarrier.json", "_reviewed_independent_verified.json",
+                   "_reviewed_independent_verified.report.json", "_reviewed_independent_verified.usage.json"):
+        assert (barrier_dir / f"input{suffix}").exists()
+    usage = json.loads((output / "input.pipeline.usage.json").read_text(encoding="utf-8"))
+    assert usage["estimated_cost_usd"] == 0.3 and usage["semantic_barrier"]["provider_reported_cost_usd"] == 9.0
+    report = json.loads((output / "input.pipeline.report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "completed" and report["semantic_barrier_unresolved_indices"] == []
+    assert report["shortening_unresolved_indices"] == []
+
+
+@pytest.mark.parametrize("fallback", ["verdict_fail", "verdict_uncertain"])
+def test_enabled_barrier_rejection_has_first_priority_and_union(tmp_path: Path, fallback: str) -> None:
+    input_path = tmp_path / "input.json"
+    source = _item("Supercalifragilisticexpialidocious")
+    input_path.write_text(json.dumps([source]), encoding="utf-8")
+
+    def flash(items: Items, config: PipelineConfig, output: Path, stem: str) -> tuple[Items, dict[str, Any]]:
+        changed = copy.deepcopy(items)
+        changed[0]["text"] = ["Changed"]
+        return changed, {"estimated_cost_usd": 0}
+
+    def pro(original: Items, shortened: Items, config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        return shortened, {"selected_indices": [1], "outcomes": [{"index": 1, "outcome": "verified"}]}, {"estimated_cost_usd": 0}
+
+    def barrier(original: Items, candidate: Items, context: Items | None,
+                config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        return copy.deepcopy(original), _barrier_report(1, fallback), {}
+
+    output = tmp_path / "out"
+    run_pipeline(PipelineConfig(input_path, output, "key", semantic_barrier_enabled=True), flash, pro, barrier)
+    final = json.loads((output / "input_reviewed.json").read_text(encoding="utf-8"))[0]
+    report = json.loads((output / "input.pipeline.report.json").read_text(encoding="utf-8"))
+    assert final["text"] == source["text"]
+    assert final["shortening"]["reason"] == "semantic_barrier_rejected"
+    assert final["shortening"]["status"] == "unresolved"
+    assert final["shortening"]["semantic_barrier_selected"] is True
+    assert final["shortening"]["semantic_barrier_verified"] is False
+    assert report["unresolved_indices"] == [1] and report["unresolved_count"] == 1
+    assert report["semantic_barrier_unresolved_indices"] == [1]
+    assert report["status"] == "completed_with_unresolved"
+
+
+def test_enabled_barrier_schema_fallback_marks_nonrequired_changed_item_unresolved(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    source = {"index": 1, "text": ["Short"], "start": 0, "end": 5000,
+              "analysis": {"is_checked": True, "available_duration_sec": 5.0,
+                            "effective_duration_sec": 5.0}}
+    input_path.write_text(json.dumps([source]), encoding="utf-8")
+
+    def flash(items: Items, config: PipelineConfig, output: Path, stem: str) -> tuple[Items, dict[str, Any]]:
+        changed = copy.deepcopy(items)
+        changed[0]["text"] = ["Changed"]
+        return changed, {"estimated_cost_usd": 0}
+
+    def pro(original: Items, shortened: Items, config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        return shortened, {"selected_indices": [1], "outcomes": [{"index": 1, "outcome": "verified"}]}, {"estimated_cost_usd": 0}
+
+    def barrier(original: Items, candidate: Items, context: Items | None,
+                config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        return copy.deepcopy(original), _barrier_report(1, "schema_failure"), {}
+
+    output = tmp_path / "out"
+    run_pipeline(PipelineConfig(input_path, output, "key", semantic_barrier_enabled=True), flash, pro, barrier)
+    final = json.loads((output / "input_reviewed.json").read_text(encoding="utf-8"))[0]
+    report = json.loads((output / "input.pipeline.report.json").read_text(encoding="utf-8"))
+    assert final["shortening"]["reason"] == "semantic_barrier_fallback"
+    assert final["shortening"]["status"] == "unresolved"
+    assert report["unresolved_indices"] == [1]
+
+
+def test_enabled_barrier_no_change_writes_zero_request_artifacts(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([_item("same")]), encoding="utf-8")
+    calls = 0
+
+    def flash(items: Items, config: PipelineConfig, output: Path, stem: str) -> tuple[Items, dict[str, Any]]:
+        return items, {"estimated_cost_usd": 0}
+
+    def pro(original: Items, shortened: Items, config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        return shortened, {"selected_indices": [], "outcomes": []}, {"estimated_cost_usd": 0}
+
+    def barrier(original: Items, candidate: Items, context: Items | None,
+                config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        return candidate, {"selected_indices": [], "verified_indices": [], "unresolved_indices": [], "targets": [], "requests": 0}, {"requests": 0}
+
+    output = tmp_path / "out"
+    run_pipeline(PipelineConfig(input_path, output, "key", semantic_barrier_enabled=True), flash, pro, barrier)
+    assert calls == 1
+    barrier_dir = output / "semantic_barrier"
+    assert len(list(barrier_dir.glob("*"))) == 4
+    usage = json.loads((barrier_dir / "input_reviewed_independent_verified.usage.json").read_text(encoding="utf-8"))
+    report = json.loads((barrier_dir / "input_reviewed_independent_verified.report.json").read_text(encoding="utf-8"))
+    assert usage["requests"] == 0 and report["requests"] == 0
+
+
+def test_fatal_barrier_keeps_pro_and_prebarrier_without_final(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([_item("original")]), encoding="utf-8")
+
+    def flash(items: Items, config: PipelineConfig, output: Path, stem: str) -> tuple[Items, dict[str, Any]]:
+        return items, {"estimated_cost_usd": 0}
+
+    pro_report = {"selected_indices": [], "outcomes": []}
+    pro_usage = {"estimated_cost_usd": 0.2}
+
+    def pro(original: Items, shortened: Items, config: PipelineConfig) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        return shortened, pro_report, pro_usage
+
+    def barrier(*args: Any) -> Any:
+        raise RuntimeError("offline barrier failure")
+
+    output = tmp_path / "out"
+    with pytest.raises(PipelineStageError, match="prebarrier path"):
+        run_pipeline(PipelineConfig(input_path, output, "key", semantic_barrier_enabled=True), flash, pro, barrier)
+    assert (output / "semantic_barrier/input_reviewed_prebarrier.json").exists()
+    assert (output / "pro/input.report.json").exists() and (output / "pro/input.usage.json").exists()
+    assert not (output / "input_reviewed.json").exists()
+    report = json.loads((output / "input.pipeline.report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "semantic_barrier_failed"
+    assert report["error"].startswith("RuntimeError:") and report["pro"] == pro_report
+    assert report["paths"]["semantic_barrier_prebarrier"].endswith("input_reviewed_prebarrier.json")
+    assert "semantic_barrier" not in report["paths"]
+    assert "semantic_barrier_report" not in report["paths"]
+    assert "semantic_barrier_usage" not in report["paths"]
+
+
+def test_default_semantic_barrier_stage_forwards_exact_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        captured["args"] = args
+        captured.update(kwargs)
+        return args[1], {}, {}
+
+    monkeypatch.setattr(pipeline_module, "verify_items_live", fake_verify)
+    config = PipelineConfig(Path("i"), Path("o"), "k", semantic_barrier_model="exact/model",
+                            semantic_barrier_server_url="http://server", semantic_barrier_hostname="localhost",
+                            semantic_barrier_port=4000, semantic_barrier_batch_size=4,
+                            semantic_barrier_concurrency=1, semantic_barrier_context_window=3,
+                            semantic_barrier_transport_retries=1, semantic_barrier_schema_retries=1)
+    original, candidate, context = [_item("old")], [_item("new")], [_item("context")]
+    pipeline_module._default_semantic_barrier_stage(original, candidate, context, config)
+    assert captured["args"] == (original, candidate)
+    assert captured["model"] == "exact/model" and captured["context_items"] == context
+    assert captured["review_report"] is None
+    assert captured["server_url"] == "http://server" and captured["hostname"] == "localhost"
+    assert captured["port"] == 4000
+    assert (captured["batch_size"], captured["concurrency"], captured["context_window"],
+            captured["transport_retries"], captured["schema_retries"]) == (4, 1, 3, 1, 1)
+    assert captured["semantic_units"] is True
+    assert (captured["semantic_unit_max_cues"], captured["semantic_unit_max_gap_sec"]) == (3, 0.3)
+    assert captured["structured_output"] is False
+
+
+def test_default_semantic_barrier_stage_forwards_unit_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        captured.update(kwargs)
+        return args[1], {}, {}
+
+    monkeypatch.setattr(pipeline_module, "verify_items_live", fake_verify)
+    config = PipelineConfig(Path("i"), Path("o"), "k", semantic_barrier_units_enabled=False,
+                            semantic_barrier_unit_max_cues=5, semantic_barrier_unit_max_gap_sec=1.25)
+    pipeline_module._default_semantic_barrier_stage([_item("old")], [_item("new")], None, config)
+    assert captured["semantic_units"] is False
+    assert (captured["semantic_unit_max_cues"], captured["semantic_unit_max_gap_sec"]) == (5, 1.25)
+
+
+def test_default_semantic_barrier_stage_forwards_structured_output_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Items, dict[str, Any], dict[str, Any]]:
+        captured.update(kwargs)
+        return args[1], {}, {}
+
+    monkeypatch.setattr(pipeline_module, "verify_items_live", fake_verify)
+    config = PipelineConfig(Path("i"), Path("o"), "k", semantic_barrier_structured_output=False)
+    pipeline_module._default_semantic_barrier_stage([_item("old")], [_item("new")], None, config)
+    assert captured["structured_output"] is False

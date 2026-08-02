@@ -671,7 +671,10 @@ The output directory contains three files named from the candidate stem:
 
 - `{candidate_stem}_independent_verified.json` - fail-closed candidate output;
 - `{candidate_stem}_independent_verified.report.json` - verification decisions and failures;
-- `{candidate_stem}_independent_verified.usage.json` - request and subscription-accounting metadata.
+- `{candidate_stem}_independent_verified.usage.json` - request and subscription-accounting metadata. When the
+  OpenCode response includes AssistantMessage usage, this also records summed provider-reported token and cost
+  metadata. `info.cost` is provider-reported and its billing meaning is unspecified by the OpenCode schema; it is
+  not guaranteed to be an invoice amount or subscription charge.
 
 The barrier is fail-closed and read-only. Unchanged candidates are copied untouched.
 Changed candidates are retained only after an exact strict pass response; fail,
@@ -681,5 +684,59 @@ the original `text` while preserving the candidate item's shape and metadata. Wi
 Luna; no prior verdict is exposed to the prompt and unresolved entries cannot be
 upgraded. This prior-verified-only behavior is a selection guard, not evidence that
 an unresolved item passed. The verifier is standalone and is not a default pipeline
-stage. OpenCode OAuth usage is subscription accounting only: it does not provide
-token or dollar accounting, and must not be reported as per-token API cost.
+stage. OpenCode OAuth usage is subscription accounting. Some OpenCode AssistantMessage responses expose
+provider-reported token and cost metadata, which is captured without inferring prices from a catalog. `info.cost`
+is not guaranteed to be the actual billed cost, invoice amount, or subscription charge.
+Malformed provider usage metadata is treated as a transport failure, so restoration
+remains fail-closed even when the response text might otherwise contain a valid
+verdict.
+
+Semantic-unit verification uses the OpenCode 1.18.9 `format` request with a
+schema-validated synthetic StructuredOutput tool (`type: "json_schema"`). This
+is not a provider-native `response_format`; tool-call reliability remains a
+measured concern, provider support can still fail, and `retryCount: 0` leaves
+retry authority with the verifier caller.
+
+Structured output is opt-in. `--structured-output` and
+`--semantic-barrier-structured-output` select the OpenCode synthetic,
+schema-validated tool for compatible routes such as Ollama GLM5.2. This is not
+provider-native `response_format`. Text mode is the default for Luna and remains
+strictly parsed and fail-closed; `--no-structured-output` is explicit for the
+standalone verifier.
+
+The verifier is also an explicit opt-in stage of the combined pipeline:
+
+```bash
+uv run --python subs_env/bin/python -m utils.shorten_review_pipeline input.json \
+  --api-key sk-xxx --semantic-barrier \
+  --semantic-barrier-model openai/gpt-5.6-luna \
+  --output-dir output/combined
+```
+
+The combined barrier uses Luna strict text by default. Add
+`--semantic-barrier-structured-output` only for a compatible route; the
+StructuredOutput path is synthetic tool validation rather than native provider
+schema enforcement.
+
+Once `--semantic-barrier` is enabled, multi-cue semantic units are enabled by
+default. Disable that mode for single-cue verification with
+`--no-semantic-barrier-units`, or tune conservative grouping with
+`--semantic-barrier-unit-max-cues 3` and
+`--semantic-barrier-unit-max-gap-sec 0.3`. A unit contains at most three cues,
+uses timing gaps of at most 0.3 seconds, and requires textual continuation;
+unknown timing stays single-cue. Unchanged neighbors are evidence only, and an
+atomic fallback restores only the changed members of a unit. The combined
+pipeline sends semantic-barrier requests in batches of four by default; use
+`--semantic-barrier-batch-size` to override that value.
+
+The order is Flash -> stable timing -> Pro -> stable timing -> unit-level barrier -> refreshed analysis.
+The barrier never receives the Pro report. It writes `semantic_barrier/` pre-barrier,
+independent output, report, and usage artifacts, and restores original text for fail,
+uncertain, schema, or transport outcomes. Startup/configuration failures are fatal and
+retain the Pro result at the pre-barrier path. The barrier is disabled by default, and
+its provider-reported cost is informational only; `estimated_cost_usd` remains Flash API
+plus Pro API cost and never includes OpenCode provider cost.
+
+The scope is intentionally narrow: Pro editing/review remains cue-level; only
+independent final barrier acceptance is unit-level. There is no intra-unit error
+attribution beyond shared issue codes.

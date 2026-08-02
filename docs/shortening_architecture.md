@@ -101,8 +101,27 @@ product invariant, not merely a provider fallback.
 
 ## Optional independent final barrier
 
-After candidate generation, callers may run `utils.verify_subtitles_opencode` as an independent semantic barrier. It accepts original and candidate arrays, never rewrites candidates, and restores exact original text for every non-pass, uncertain, transport, or schema outcome. It uses local OpenCode HTTP plus OAuth subscription accounting only; direct APIs and public servers are out of scope. A DeepSeek report is only a selection hint: changed candidates are eligible only when its outcome is exactly `verified`, and the report is never sent as model evidence. This stage remains opt-in and is not wired into the combined pipeline.
+After candidate generation, the combined pipeline may run `utils.verify_subtitles_opencode` as an explicit independent semantic barrier. The order is Flash -> stable timing -> Pro -> stable timing -> unit-level barrier -> refresh analysis -> shortening status. When enabled, unit-level verification is the default: units are grouped conservatively at no more than three cues, with timing gaps no greater than 0.3 seconds and textual continuation; unknown timing remains single-cue. Requests use a four-unit batch by default. Unchanged neighbors are evidence only, and atomic fallback restores only changed unit members. `--no-semantic-barrier-units` opts back into cue-level verification. It accepts original and candidate arrays, and restores exact original text for every non-pass, uncertain, transport, or schema outcome. The Pro report is not passed as evidence. It uses local OpenCode HTTP plus OAuth subscription accounting only; direct APIs and public servers are out of scope. The stage remains disabled by default.
 
-The barrier is now empirically validated on the recorded OpenCode Luna runs, but
-that evidence does not combine it with the production pipeline and does not change
-its standalone opt-in status or make it a default stage.
+The honest scope is that Pro editing/review remains cue-level; only independent
+final barrier acceptance is unit-level. There is no intra-unit error attribution
+beyond shared issue codes.
+
+Unit-level final-barrier implementation is validated by the tracked
+`skill_test/semantic_benchmark24` control. Pro editing/review remains cue-level;
+only final-barrier acceptance is unit-level. The qualified default is Luna strict
+text (`openai/gpt-5.6-luna`); StructuredOutput remains an explicit option for
+compatible routes. The barrier remains an explicit combined-pipeline opt-in.
+Startup/configuration failures are fatal; ordinary per-item failures are fail-closed
+and continue with unresolved accounting.
+OpenCode provider cost is informational and not billing-authoritative.
+
+Malformed provider usage metadata is treated as a transport failure. The verifier
+therefore restores text fail-closed even when the response text might otherwise
+contain a valid verdict.
+
+Semantic-unit requests use OpenCode 1.18.9 schema-validated synthetic
+StructuredOutput tooling through the message `format` field. This is not a
+provider-native `response_format`: tool-call reliability remains measured and
+provider support can still fail. OpenCode retries are disabled with
+`retryCount: 0`; verifier caller retries remain authoritative.

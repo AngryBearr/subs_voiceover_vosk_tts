@@ -20,6 +20,7 @@ from utils.shorten_helpers import (calculate_budget, hydrate_context_timing, loa
 from utils.shorten_subtitles_deepseek import make_deepseek_shorten_func, usage_summary
 from utils.review_shortened_subtitles_deepseek import duration_profile_metadata
 from utils.shortening_domain import CalibratedDurationModel, DurationSelectionPolicy, load_calibrated_duration_profile
+from utils.verify_subtitles_opencode import verify_items_live
 
 Items = List[Dict[str, Any]]
 
@@ -46,10 +47,25 @@ class PipelineConfig:
     base_url: str = "https://api.deepseek.com"
     duration_profile: Optional[CalibratedDurationModel] = None
     duration_fit_ratio: float = 1.0
+    semantic_barrier_enabled: bool = False
+    semantic_barrier_units_enabled: bool = True
+    semantic_barrier_unit_max_cues: int = 3
+    semantic_barrier_unit_max_gap_sec: float = 0.3
+    semantic_barrier_model: str = "openai/gpt-5.6-luna"
+    semantic_barrier_server_url: Optional[str] = None
+    semantic_barrier_hostname: str = "127.0.0.1"
+    semantic_barrier_port: Optional[int] = None
+    semantic_barrier_batch_size: int = 4
+    semantic_barrier_concurrency: int = 1
+    semantic_barrier_context_window: int = 3
+    semantic_barrier_transport_retries: int = 1
+    semantic_barrier_schema_retries: int = 1
+    semantic_barrier_structured_output: bool = False
 
 
 FlashStage = Callable[[Items, PipelineConfig, Path, str], tuple[Items, Dict[str, Any]]]
 ProStage = Callable[[Items, Items, PipelineConfig], tuple[Items, Dict[str, Any], Dict[str, Any]]]
+SemanticBarrierStage = Callable[[Items, Items, Optional[Items], PipelineConfig], tuple[Items, Dict[str, Any], Dict[str, Any]]]
 
 
 class PipelineStageError(RuntimeError):
@@ -117,11 +133,15 @@ def _is_critical(item: Dict[str, Any], threshold: float,
 
 
 def _mark_shortening(original: Items, flash: Items, final: Items,
-                      pro_report: Dict[str, Any], config: PipelineConfig) -> tuple[List[int], Items]:
+                       pro_report: Dict[str, Any], config: PipelineConfig,
+                       barrier_report: Optional[Dict[str, Any]] = None) -> tuple[List[int], Items]:
     original_by_index = {item.get("index"): item for item in original}
     flash_by_index = {item.get("index"): item for item in flash}
     selected = set(pro_report.get("selected_indices", []))
     outcomes = {value.get("index"): value for value in pro_report.get("outcomes", [])}
+    barrier_selected = set(barrier_report.get("selected_indices", [])) if barrier_report else set()
+    barrier_verified = set(barrier_report.get("verified_indices", [])) if barrier_report else set()
+    barrier_targets = {value.get("index"): value for value in barrier_report.get("targets", [])} if barrier_report else {}
     unresolved: List[int] = []
     for item in final:
         index = item.get("index")
@@ -144,7 +164,11 @@ def _mark_shortening(original: Items, flash: Items, final: Items,
         over_duration = (required and config.duration_profile is not None and budget.effective_duration_sec > 0
                          and config.duration_profile.predict_seconds(final_text)
                          > budget.effective_duration_sec * config.duration_fit_ratio)
-        if len(final_text.split()) <= 1 and over_budget:
+        barrier_fallback = barrier_targets.get(index, {}).get("fallback")
+        if barrier_fallback:
+            status, reason = "unresolved", ("semantic_barrier_rejected" if barrier_fallback in {"verdict_fail", "verdict_uncertain"}
+                                             else "semantic_barrier_fallback")
+        elif len(final_text.split()) <= 1 and over_budget:
             status, reason = "unresolved", "minimum_text_exceeds_budget"
         elif failed_review:
             error = str(outcome.get("error", ""))
@@ -162,11 +186,15 @@ def _mark_shortening(original: Items, flash: Items, final: Items,
             status, reason = "not_required", "within_budget"
         if status == "unresolved":
             unresolved.append(int(index))
-        item["shortening"] = {"required_initially": required,
+        shortening = {"required_initially": required,
                               "flash_changed": flash_text != original_text,
                               "pro_selected": index in selected,
                               "max_chars": budget.max_chars, "final_chars": len(final_text),
                               "status": status, "reason": reason}
+        if barrier_report is not None:
+            shortening["semantic_barrier_selected"] = index in barrier_selected
+            shortening["semantic_barrier_verified"] = index in barrier_verified
+        item["shortening"] = shortening
     return unresolved, final
 
 
@@ -207,10 +235,56 @@ def _default_pro_stage(original: Items, shortened: Items,
     ))
 
 
+def _default_semantic_barrier_stage(original: Items, candidate: Items,
+                                    context_items: Optional[Items],
+                                    config: PipelineConfig) -> tuple[Items, Dict[str, Any], Dict[str, Any]]:
+    return verify_items_live(
+        original, candidate, model=config.semantic_barrier_model, context_items=context_items,
+        context_window=config.semantic_barrier_context_window,
+        batch_size=config.semantic_barrier_batch_size, concurrency=config.semantic_barrier_concurrency,
+        transport_retries=config.semantic_barrier_transport_retries,
+        schema_retries=config.semantic_barrier_schema_retries,
+        semantic_units=config.semantic_barrier_units_enabled,
+        semantic_unit_max_cues=config.semantic_barrier_unit_max_cues,
+        semantic_unit_max_gap_sec=config.semantic_barrier_unit_max_gap_sec,
+        review_report=None, server_url=config.semantic_barrier_server_url,
+        hostname=config.semantic_barrier_hostname, port=config.semantic_barrier_port,
+        structured_output=config.semantic_barrier_structured_output,
+    )
+
+
+def _validate_semantic_barrier_config(config: PipelineConfig) -> None:
+    if not config.semantic_barrier_enabled:
+        return
+    if not config.semantic_barrier_model or config.semantic_barrier_context_window < 0:
+        raise ValueError("invalid semantic barrier configuration")
+    if (isinstance(config.semantic_barrier_unit_max_cues, bool)
+            or not isinstance(config.semantic_barrier_unit_max_cues, int)
+            or not 1 <= config.semantic_barrier_unit_max_cues <= 5):
+        raise ValueError("semantic_barrier_unit_max_cues must be an integer between 1 and 5")
+    if (isinstance(config.semantic_barrier_unit_max_gap_sec, bool)
+            or not isinstance(config.semantic_barrier_unit_max_gap_sec, (int, float))
+            or not math.isfinite(float(config.semantic_barrier_unit_max_gap_sec))
+            or config.semantic_barrier_unit_max_gap_sec < 0):
+        raise ValueError("semantic_barrier_unit_max_gap_sec must be finite and non-negative")
+    if not 1 <= config.semantic_barrier_batch_size <= 100 or not 1 <= config.semantic_barrier_concurrency <= 100:
+        raise ValueError("invalid semantic barrier configuration")
+    if not 0 <= config.semantic_barrier_transport_retries <= 5 or config.semantic_barrier_schema_retries not in {0, 1}:
+        raise ValueError("invalid semantic barrier configuration")
+    if config.semantic_barrier_server_url is not None and not config.semantic_barrier_server_url.strip():
+        raise ValueError("server_url_required")
+    if config.semantic_barrier_server_url is None and config.semantic_barrier_hostname not in {"127.0.0.1", "localhost"}:
+        raise ValueError("auto-start hostname must be localhost or 127.0.0.1")
+    if config.semantic_barrier_port is not None and not 1 <= config.semantic_barrier_port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+
+
 def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flash_stage,
-                 pro_stage: ProStage = _default_pro_stage) -> Path:
+                 pro_stage: ProStage = _default_pro_stage,
+                 semantic_barrier_stage: SemanticBarrierStage = _default_semantic_barrier_stage) -> Path:
     """Run both stages, persist artifacts, and return the reviewed final path."""
     _selection_policy(config)
+    _validate_semantic_barrier_config(config)
     original = load_json(config.input_path)
     context_items = load_json(config.context_source) if config.context_source else None
     if context_items is not None:
@@ -228,6 +302,11 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
     pipeline_usage_path = config.output_dir / f"{stem}.pipeline.usage.json"
     pipeline_report_path = config.output_dir / f"{stem}.pipeline.report.json"
     final_path = config.output_dir / f"{stem}_reviewed.json"
+    barrier_dir = config.output_dir / "semantic_barrier"
+    prebarrier_path = barrier_dir / f"{stem}_reviewed_prebarrier.json"
+    barrier_path = barrier_dir / f"{stem}_reviewed_independent_verified.json"
+    barrier_report_path = barrier_dir / f"{stem}_reviewed_independent_verified.report.json"
+    barrier_usage_path = barrier_dir / f"{stem}_reviewed_independent_verified.usage.json"
 
     critical_start = _critical_count(original, config)
     print("Flash stage: starting", flush=True)
@@ -249,7 +328,7 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
                   "remaining_critical": flash_critical},
         "paths": {"flash_final": str(flash_final_path), "flash_usage": str(flash_usage_path),
                   "final": str(final_path), "pro_report": str(pro_report_path),
-                  "pro_usage": str(pro_usage_path)},
+                   "pro_usage": str(pro_usage_path)},
     }
     if config.duration_profile is not None:
         base_report["duration_profile"] = duration_profile_metadata(
@@ -269,33 +348,65 @@ def run_pipeline(config: PipelineConfig, flash_stage: FlashStage = _default_flas
 
     if context_items is not None:
         reviewed = _carry_stable_timing(original, reviewed)
+    _write_json(pro_usage_path, pro_usage)
+    _write_json(pro_report_path, pro_report)
+    base_report["pro"] = pro_report
+    barrier_report: Optional[Dict[str, Any]] = None
+    barrier_usage: Optional[Dict[str, Any]] = None
+    if config.semantic_barrier_enabled:
+        save_json(prebarrier_path, reviewed)
+        base_report["paths"]["semantic_barrier_prebarrier"] = str(prebarrier_path)
+        try:
+            reviewed, barrier_report, barrier_usage = semantic_barrier_stage(
+                copy.deepcopy(original), copy.deepcopy(reviewed),
+                copy.deepcopy(context_items) if context_items is not None else None, config
+            )
+            save_json(barrier_path, reviewed)
+            base_report["paths"]["semantic_barrier"] = str(barrier_path)
+            _write_json(barrier_report_path, barrier_report)
+            base_report["paths"]["semantic_barrier_report"] = str(barrier_report_path)
+            _write_json(barrier_usage_path, barrier_usage)
+            base_report["paths"]["semantic_barrier_usage"] = str(barrier_usage_path)
+        except Exception as exc:
+            base_report.update({"status": "semantic_barrier_failed",
+                                "error": f"{type(exc).__name__}: {exc}"})
+            _write_json(pipeline_report_path, base_report)
+            raise PipelineStageError(
+                f"Semantic barrier failed; Pro result is kept at prebarrier path {prebarrier_path}"
+            ) from exc
     refreshed = refresh_analysis(
         reviewed, config.avg_chars_per_sec, config.threshold,
         preserve_saved_timing=config.context_source is not None,
     )
     unresolved_indices, final_items = _mark_shortening(
-        original, flash_output, refreshed["items"], pro_report, config
+        original, flash_output, refreshed["items"], pro_report, config, barrier_report
     )
     save_json(final_path, final_items)
-    _write_json(pro_usage_path, pro_usage)
-    _write_json(pro_report_path, pro_report)
     combined_usage = {
         "estimated_cost_usd": round(float(flash_usage.get("estimated_cost_usd", 0)) +
                                     float(pro_usage.get("estimated_cost_usd", 0)), 8),
         "flash": flash_usage, "pro": pro_usage,
     }
+    if barrier_report is not None and barrier_usage is not None:
+        combined_usage["semantic_barrier"] = barrier_usage
     if config.duration_profile is not None:
         combined_usage["duration_profile"] = duration_profile_metadata(
             config.duration_profile, config.duration_fit_ratio
         )
     _write_json(pipeline_usage_path, combined_usage)
+    union_unresolved = sorted(set(unresolved_indices) | set(barrier_report.get("unresolved_indices", [])) if barrier_report else set(unresolved_indices))
     base_report.update({
-        "status": "completed_with_unresolved" if unresolved_indices else "completed", "pro": pro_report,
+        "status": "completed_with_unresolved" if union_unresolved else "completed", "pro": pro_report,
         "final_critical": _critical_count(refreshed["items"], config),
-        "unresolved_count": len(unresolved_indices), "unresolved_indices": unresolved_indices,
+        "unresolved_count": len(union_unresolved), "unresolved_indices": union_unresolved,
         "paths": {**base_report["paths"], "pipeline_usage": str(pipeline_usage_path),
                   "pipeline_report": str(pipeline_report_path)},
     })
+    if barrier_report is not None:
+        base_report["semantic_barrier"] = barrier_report
+        base_report["semantic_barrier_unresolved_indices"] = barrier_report.get("unresolved_indices", [])
+        base_report["shortening_unresolved_indices"] = unresolved_indices
+        base_report["status"] = "completed_with_unresolved" if union_unresolved else "completed"
     _write_json(pipeline_report_path, base_report)
     print(f"Final reviewed JSON: {final_path}")
     print(f"Stages: critical {critical_start} -> {flash_critical} -> "
@@ -333,6 +444,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pro-max-input-tokens", type=int, default=50_000)
     parser.add_argument("--duration-profile", type=Path)
     parser.add_argument("--duration-fit-ratio", type=float, default=1.0)
+    parser.add_argument("--semantic-barrier", action="store_true")
+    parser.add_argument("--semantic-barrier-units", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--semantic-barrier-unit-max-cues", type=int, default=3)
+    parser.add_argument("--semantic-barrier-unit-max-gap-sec", type=float, default=0.3)
+    parser.add_argument("--semantic-barrier-model", default="openai/gpt-5.6-luna")
+    parser.add_argument("--semantic-barrier-server-url")
+    parser.add_argument("--semantic-barrier-hostname", default="127.0.0.1")
+    parser.add_argument("--semantic-barrier-port", type=int)
+    parser.add_argument("--semantic-barrier-batch-size", type=int, default=4)
+    parser.add_argument("--semantic-barrier-concurrency", type=int, default=1)
+    parser.add_argument("--semantic-barrier-context-window", type=int, default=3)
+    parser.add_argument("--semantic-barrier-transport-retries", type=int, default=1)
+    parser.add_argument("--semantic-barrier-schema-retries", type=int, choices=[0, 1], default=1)
+    parser.add_argument("--semantic-barrier-structured-output", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--output-dir", "-o", default="output/shorten_review")
     return parser
 
@@ -345,8 +470,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise ValueError("duration_fit_ratio must be finite and positive")
         duration_profile = (load_calibrated_duration_profile(args.duration_profile)
                             if args.duration_profile is not None else None)
+        barrier_config = PipelineConfig(
+            input_path=Path(args.input), output_dir=Path(args.output_dir), api_key="",
+            semantic_barrier_enabled=args.semantic_barrier,
+            semantic_barrier_units_enabled=args.semantic_barrier_units,
+            semantic_barrier_unit_max_cues=args.semantic_barrier_unit_max_cues,
+            semantic_barrier_unit_max_gap_sec=args.semantic_barrier_unit_max_gap_sec,
+            semantic_barrier_model=args.semantic_barrier_model,
+            semantic_barrier_server_url=args.semantic_barrier_server_url,
+            semantic_barrier_hostname=args.semantic_barrier_hostname,
+            semantic_barrier_port=args.semantic_barrier_port,
+            semantic_barrier_batch_size=args.semantic_barrier_batch_size,
+            semantic_barrier_concurrency=args.semantic_barrier_concurrency,
+            semantic_barrier_context_window=args.semantic_barrier_context_window,
+            semantic_barrier_transport_retries=args.semantic_barrier_transport_retries,
+             semantic_barrier_schema_retries=args.semantic_barrier_schema_retries,
+             semantic_barrier_structured_output=args.semantic_barrier_structured_output,
+        )
+        _validate_semantic_barrier_config(barrier_config)
     except ValueError as exc:
-        print(f"ERROR: invalid duration selection configuration: {exc}", file=sys.stderr)
+        print(f"ERROR: invalid pipeline configuration: {exc}", file=sys.stderr)
         return 2
     api_key = args.api_key or load_api_key("DEEPSEEK_API_KEY")
     if not api_key:
@@ -363,7 +506,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         pro_risk_threshold=args.pro_risk_threshold, pro_context_window=args.pro_context_window,
         pro_max_input_tokens=args.pro_max_input_tokens, base_url=args.base_url,
         duration_profile=duration_profile, duration_fit_ratio=args.duration_fit_ratio,
-    )
+        semantic_barrier_enabled=args.semantic_barrier,
+        semantic_barrier_units_enabled=args.semantic_barrier_units,
+        semantic_barrier_unit_max_cues=args.semantic_barrier_unit_max_cues,
+        semantic_barrier_unit_max_gap_sec=args.semantic_barrier_unit_max_gap_sec,
+        semantic_barrier_model=args.semantic_barrier_model,
+        semantic_barrier_server_url=args.semantic_barrier_server_url,
+        semantic_barrier_hostname=args.semantic_barrier_hostname,
+        semantic_barrier_port=args.semantic_barrier_port,
+        semantic_barrier_batch_size=args.semantic_barrier_batch_size,
+        semantic_barrier_concurrency=args.semantic_barrier_concurrency,
+        semantic_barrier_context_window=args.semantic_barrier_context_window,
+        semantic_barrier_transport_retries=args.semantic_barrier_transport_retries,
+         semantic_barrier_schema_retries=args.semantic_barrier_schema_retries,
+         semantic_barrier_structured_output=args.semantic_barrier_structured_output,
+     )
     try:
         run_pipeline(config)
     except PipelineStageError as exc:
