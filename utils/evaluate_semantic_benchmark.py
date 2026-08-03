@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 Pair = Tuple[str, int]
-KNOWN_PAIRS = {("opencode", "subscription"), ("openrouter", "metered_api"), ("ollama_cloud", "subscription")}
+KNOWN_PAIRS = {("opencode", "subscription"), ("openrouter", "metered_api"), ("ollama_cloud", "subscription"), ("deepseek", "metered_api"), ("cascade", "hybrid")}
 VERDICTS = {"pass", "fail", "uncertain", None}
 
 

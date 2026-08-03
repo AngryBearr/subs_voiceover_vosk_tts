@@ -69,6 +69,8 @@ def test_cli_defaults() -> None:
     assert (args.pro_thinking_mode, args.pro_batch_size, args.pro_context_window) == ("auto", 4, 3)
     assert args.pro_concurrency == 3
     assert (args.pro_risk_threshold, args.pro_max_input_tokens) == (35.0, 50_000)
+    assert args.multi_cue_editor is False
+    assert build_parser().parse_args(["input.json", "--multi-cue-editor"]).multi_cue_editor is True
 
 
 def test_default_pro_stage_enables_semantic_planner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,6 +85,13 @@ def test_default_pro_stage_enables_semantic_planner(monkeypatch: pytest.MonkeyPa
     result = pipeline_module._default_pro_stage([_item("original")], [_item("short")], config)
     assert result[0][0]["text"] == ["short"]
     assert captured["enable_planner"] is True
+    assert captured["enable_multi_cue_editor"] is False
+
+    captured.clear()
+    enabled = PipelineConfig(Path("input.json"), Path("output"), "key", enable_multi_cue_editor=True)
+    pipeline_module._default_pro_stage([_item("original")], [_item("short")], enabled)
+    assert captured["enable_planner"] is True
+    assert captured["enable_multi_cue_editor"] is True
 
 
 def test_pipeline_order_original_integrity_refresh_and_combined_reports(tmp_path: Path) -> None:

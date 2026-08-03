@@ -223,6 +223,14 @@ def test_metadata_backend_model_accounting_and_requests_must_match() -> None:
         evaluate_benchmark(man, {"E": report}, {"E": usage})
 
 
+def test_cascade_hybrid_pair_is_accepted() -> None:
+    report, usage = artifacts([1], {1: "pass"})
+    report["backend"] = usage["backend"] = "cascade"
+    report["accounting"] = usage["accounting"] = "hybrid"
+    result = evaluate_benchmark(manifest(case("E", 1)), {"E": report}, {"E": usage})
+    assert result["clear"]["correct"] == 1
+
+
 def test_cli_qualified_rejected_invalid_duplicate_and_newline(tmp_path: Any) -> None:
     man = manifest(case("E", 1))
     report, usage = artifacts([1], {1: "pass"})
@@ -260,3 +268,16 @@ def test_evaluator_has_no_transport_imports_or_calls() -> None:
     assert "import transport" not in source
     assert "subprocess" not in source
     assert "requests." not in source
+
+
+def test_deepseek_metered_tokens_without_provider_cost_have_none_status() -> None:
+    report, usage = artifacts([1], {1: "pass"})
+    report["backend"] = usage["backend"] = "deepseek"
+    report["accounting"] = usage["accounting"] = "metered_api"
+    usage.pop("provider_reported_cost_usd")
+    usage["provider_cost_is_billing_authoritative"] = False
+    result = evaluate_benchmark(manifest(case("E", 1)), {"E": report}, {"E": usage})
+    assert result["usage"]["cost_status"] == "none"
+    assert result["usage"]["cost"] is None
+    assert result["usage"]["tokens"]["input_tokens"]["value"] == 2
+    assert result["usage"]["provider_ids"] == ["p"] and result["usage"]["model_ids"] == ["provider-m"] and result["usage"]["finishes"] == ["stop"]

@@ -44,6 +44,7 @@ class PipelineConfig:
     pro_risk_threshold: float = 35.0
     pro_context_window: int = 3
     pro_max_input_tokens: int = 50_000
+    enable_multi_cue_editor: bool = False
     base_url: str = "https://api.deepseek.com"
     duration_profile: Optional[CalibratedDurationModel] = None
     duration_fit_ratio: float = 1.0
@@ -229,6 +230,7 @@ def _default_pro_stage(original: Items, shortened: Items,
         config.threshold, config.base_url,
         concurrency=config.pro_concurrency,
         enable_planner=True,
+        enable_multi_cue_editor=config.enable_multi_cue_editor,
         context_source=load_json(config.context_source) if config.context_source else None,
         duration_profile=config.duration_profile,
         duration_fit_ratio=config.duration_fit_ratio,
@@ -442,6 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pro-context-window", type=int, default=3)
     parser.add_argument("--pro-max-input-tokens", type=int, default=50_000)
+    parser.add_argument("--multi-cue-editor", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--duration-profile", type=Path)
     parser.add_argument("--duration-fit-ratio", type=float, default=1.0)
     parser.add_argument("--semantic-barrier", action="store_true")
@@ -505,6 +508,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         pro_concurrency=args.pro_concurrency,
         pro_risk_threshold=args.pro_risk_threshold, pro_context_window=args.pro_context_window,
         pro_max_input_tokens=args.pro_max_input_tokens, base_url=args.base_url,
+        enable_multi_cue_editor=args.multi_cue_editor,
         duration_profile=duration_profile, duration_fit_ratio=args.duration_fit_ratio,
         semantic_barrier_enabled=args.semantic_barrier,
         semantic_barrier_units_enabled=args.semantic_barrier_units,

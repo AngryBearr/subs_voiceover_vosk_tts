@@ -95,7 +95,36 @@ def verification(index: int, verdict: str = "pass", issues: list[str] | None = N
     required, failed = required or [], failed or set()
     return json.dumps({"results": [{"index": index, "verdict": verdict, "issues": issues or [],
         "required_checks": [{"issue": issue, "verdict": "fail" if issue in failed else "pass"}
-                             for issue in required]}]})
+                              for issue in required]}]})
+
+
+def multi_assessment(values: list[tuple[int, str, list[str]]]) -> str:
+    return json.dumps({"results": [
+        {"index": index, "verdict": verdict, "issues": issues}
+        for index, verdict, issues in values
+    ]})
+
+
+def multi_editor(values: list[tuple[int, str, str]]) -> str:
+    return json.dumps({"results": [
+        {"index": index, "decision": decision, "candidate": candidate}
+        for index, candidate, decision in values
+    ]})
+
+
+def multi_verification(values: list[tuple[int, str, list[str], list[str], set[str]]]) -> str:
+    return json.dumps({"results": [
+        {"index": index, "verdict": verdict, "issues": issues,
+         "required_checks": [{"issue": issue, "verdict": "fail" if issue in failed else "pass"}
+                              for issue in required]}
+        for index, verdict, issues, required, failed in values
+    ]})
+
+
+def unit_item(index: int, text: str) -> dict[str, Any]:
+    value = item(index, text)
+    value.update({"start": (index - 1) * 1100, "end": index * 1000})
+    return value
 
 
 def planner_response(index: int, source_text: str,
@@ -174,11 +203,233 @@ def test_duration_gate_is_strict_and_calibrated() -> None:
 def test_duration_profile_cli_flags_and_legacy_signature() -> None:
     args = build_parser().parse_args(["original.json", "shortened.json"])
     assert args.duration_profile is None and args.duration_fit_ratio == 1.0
+    assert args.multi_cue_editor is False
+    assert build_parser().parse_args(
+        ["original.json", "shortened.json", "--multi-cue-editor"]
+    ).multi_cue_editor is True
     args = build_parser().parse_args(["original.json", "shortened.json", "--duration-profile", "profile.json",
                                       "--duration-fit-ratio", "1.25"])
     assert str(args.duration_profile) == "profile.json" and args.duration_fit_ratio == 1.25
     target = ReviewTarget(0, 1, "Original", "short", 100, 1, 0, 1, False)
     assert review_validation_error(target, "short") is None
+
+
+def test_multi_cue_editor_commits_adjacent_targets_atomically_and_freezes_evidence() -> None:
+    original = [
+        unit_item(1, "Мы говорим,"),
+        unit_item(2, "что это важно"),
+        unit_item(3, "сегодня."),
+    ]
+    current = [
+        unit_item(1, "Говорим,"),
+        unit_item(2, "это важно"),
+        unit_item(3, "сегодня."),
+    ]
+    client = FakeClient([
+        multi_assessment([(1, "fail", ["object"]), (2, "fail", ["object"])]),
+        multi_editor([(1, "Говорим кратко,", "candidate"), (2, "Важно", "candidate")]),
+        multi_verification([
+            (1, "pass", [], ["object"], set()), (2, "pass", [], ["object"], set()),
+        ]),
+    ])
+    output, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, enable_multi_cue_editor=True,
+    ))
+    assert len(client.chat.completions.calls) == 3
+    editor_call = client.chat.completions.calls[1]
+    assert "unit_context:" in editor_call["messages"][1]["content"]
+    unit_payload = json.loads(editor_call["messages"][1]["content"].split("unit_context:", 1)[1])
+    assert unit_payload["cue_indices"] == [1, 2, 3]
+    assert unit_payload["editable_indices"] == [1, 2]
+    assert unit_payload["evidence_indices"] == [3]
+    assert [entry["index"] for entry in unit_payload["cues"]] == [1, 2, 3]
+    assert [entry["index"] for entry in unit_payload["cues"] if entry["editable"]] == [1, 2]
+    assert [entry["text"] for entry in output] == [["Говорим кратко,"], ["Важно"], ["сегодня."]]
+    assert report["unresolved_indices"] == []
+
+
+@pytest.mark.parametrize("response", [
+    multi_editor([(1, "one", "candidate")]),
+    multi_editor([(1, "one", "unresolved"), (2, "two", "candidate")]),
+    multi_editor([(1, "one/", "candidate"), (2, "two", "candidate")]),
+])
+def test_multi_cue_editor_rejects_incomplete_unresolved_or_formal_invalid_as_one_transaction(
+    response: str,
+) -> None:
+    original = [unit_item(1, "Мы говорим,"), unit_item(2, "что это важно")]
+    current = [unit_item(1, "Говорим,"), unit_item(2, "это важно")]
+    client = FakeClient([
+        multi_assessment([(1, "fail", ["object"]), (2, "fail", ["object"])]), response,
+        multi_verification([
+            (1, "pass", [], ["object"], set()), (2, "pass", [], ["object"], set()),
+        ]),
+        multi_editor([(1, "repair", "unresolved"), (2, "repair", "unresolved")]),
+    ])
+    output, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, enable_multi_cue_editor=True,
+    ))
+    assert [entry["text"] for entry in output] == [["Говорим,"], ["это важно"]]
+    assert all("editor" in report["outcomes"][index - 1]["stage_errors"] for index in (1, 2))
+
+
+def test_multi_cue_editor_evidence_editor_target_downgrades_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = [unit_item(1, "Мы говорим,"), unit_item(2, "что это важно"), unit_item(3, "и продолжаем")]
+    current = [unit_item(1, "Говорим,"), unit_item(2, "что это важно"), unit_item(3, "продолжаем")]
+    current[1]["analysis"].update({"is_checked": True, "mismatch_ratio": 2.0})
+    client = FakeClient([
+        multi_assessment([(1, "fail", ["object"]), (2, "pass", []), (3, "fail", ["object"])]),
+        json.dumps({"results": [
+            {"index": 1, "decision": "candidate", "candidate": "Говорим кратко,"},
+            {"index": 2, "decision": "candidate", "candidate": "Важно"},
+        ]}),
+        editor(3, "Продолжаем"),
+        multi_verification([
+            (1, "pass", [], ["object"], set()), (2, "pass", [], ["budget"], set()),
+            (3, "pass", [], ["object"], set()),
+        ]),
+    ])
+    asyncio.run(review_subtitles(original, current, "key", client=client, enable_multi_cue_editor=True))
+    editor_prompts = [call["messages"][1]["content"] for call in client.chat.completions.calls
+                      if call["messages"][0]["content"] == EDITOR_PROMPT]
+    assert editor_prompts and all("unit_context:" not in prompt for prompt in editor_prompts)
+    assert len(editor_prompts) >= 2
+
+
+def test_atomic_repair_without_initial_verifier_assessment_rolls_back_to_uncertain() -> None:
+    original = [unit_item(1, "Мы говорим,"), unit_item(2, "что это важно")]
+    current = [unit_item(1, "Мы/говорим,"), unit_item(2, "что/это важно")]
+    client = FakeClient([
+        multi_assessment([(1, "pass", []), (2, "pass", [])]),
+        multi_editor([(1, "", "unresolved"), (2, "", "unresolved")]),
+        multi_editor([(1, "Мы говорим кратко,", "candidate"), (2, "Важно", "candidate")]),
+        verification(1),
+        verification(2, "fail", ["grammar"]),
+    ])
+    output, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, enable_multi_cue_editor=True,
+    ))
+    assert [entry["text"] for entry in output] == [["Мы/говорим,"], ["что/это важно"]]
+    outcomes = {outcome["index"]: outcome for outcome in report["outcomes"]}
+    assert report["unresolved_indices"] == [1, 2]
+    for index in (1, 2):
+        assert outcomes[index]["verifier_verdict"] == "uncertain"
+        assert outcomes[index]["verifier_history"] == []
+
+
+def test_multi_cue_editor_oversized_group_falls_back_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = [unit_item(1, "Мы говорим,"), unit_item(2, "что это важно")]
+    current = [unit_item(1, "Говорим,"), unit_item(2, "это важно")]
+    client = FakeClient([
+        multi_assessment([(1, "fail", ["object"]), (2, "fail", ["object"])]),
+        multi_editor([(1, "Говорим кратко,", "candidate"), (2, "Важно", "candidate")]),
+        multi_verification([
+            (1, "pass", [], ["object"], set()), (2, "pass", [], ["object"], set()),
+        ]),
+    ])
+    original_estimator = reviewer.estimate_input_tokens
+    monkeypatch.setattr(reviewer, "estimate_input_tokens", lambda system, prompt:
+                        50_001 if "unit_context:" in prompt else original_estimator(system, prompt))
+    asyncio.run(review_subtitles(original, current, "key", client=client,
+                                 enable_multi_cue_editor=True))
+    editor_prompts = [call["messages"][1]["content"] for call in client.chat.completions.calls
+                      if call["messages"][0]["content"] == EDITOR_PROMPT]
+    assert len(editor_prompts) == 1
+    assert "unit_context:" not in editor_prompts[0]
+
+
+def test_atomic_repair_uses_full_unit_and_only_failed_subset(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = [unit_item(1, "Мы говорим,"), unit_item(2, "что это важно")]
+    current = [unit_item(1, "Говорим,"), unit_item(2, "это важно")]
+    client = FakeClient([
+        multi_assessment([(1, "fail", ["object"]), (2, "fail", ["object"])]),
+        multi_editor([(1, "Говорим кратко,", "candidate"), (2, "Важно", "candidate")]),
+        multi_verification([
+            (1, "fail", ["object"], ["object"], {"object"}),
+            (2, "pass", [], ["object"], set()),
+        ]),
+        multi_editor([(1, "Говорим очень кратко,", "candidate")]),
+        verification(1, required=["object"]),
+    ])
+    output, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, enable_multi_cue_editor=True,
+    ))
+    repair_call = client.chat.completions.calls[3]
+    repair_payload = json.loads(repair_call["messages"][1]["content"].split("unit_context:", 1)[1])
+    editor_payload = json.loads(
+        client.chat.completions.calls[1]["messages"][1]["content"].split("unit_context:", 1)[1]
+    )
+    assert repair_payload["unit_id"] == editor_payload["unit_id"]
+    assert repair_payload["cue_indices"] == [1, 2]
+    assert repair_payload["editable_indices"] == [1]
+    assert repair_payload["evidence_indices"] == [2]
+    assert output[0]["text"] == ["Говорим очень кратко,"]
+    assert output[1]["text"] == ["Важно"]
+    assert report["unresolved_indices"] == []
+
+
+def test_atomic_repair_failure_rolls_back_every_member_without_key_error() -> None:
+    original = [unit_item(1, "Мы говорим,"), unit_item(2, "что это важно")]
+    current = [unit_item(1, "Говорим,"), unit_item(2, "это важно")]
+    client = FakeClient([
+        multi_assessment([(1, "fail", ["object"]), (2, "fail", ["object"])]),
+        multi_editor([(1, "Говорим кратко,", "candidate"), (2, "Важно", "candidate")]),
+        multi_verification([
+            (1, "fail", ["object"], ["object"], {"object"}),
+            (2, "fail", ["object"], ["object"], {"object"}),
+        ]),
+        multi_editor([(1, "Говорим очень кратко,", "candidate"),
+                      (2, "Важно очень кратко", "candidate")]),
+        verification(1, required=["object"]),
+        verification(2, "fail", ["object"], ["object"], {"object"}),
+    ])
+    output, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=client, enable_multi_cue_editor=True,
+    ))
+    assert [entry["text"] for entry in output] == [["Говорим кратко,"], ["Важно"]]
+    outcomes = {entry["index"]: entry for entry in report["outcomes"]}
+    for index in (1, 2):
+        assert outcomes[index]["lineage"]["repair"] is None
+        assert len(outcomes[index]["verifier_history"]) == 1
+        assert outcomes[index]["verifier_required_checks"] == {"object": "fail"}
+    assert report["unresolved_indices"] == [1, 2]
+
+
+def test_atomic_repair_oversized_group_falls_back_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = [unit_item(1, "Мы говорим,"), unit_item(2, "что это важно")]
+    current = [unit_item(1, "Говорим,"), unit_item(2, "это важно")]
+    client = FakeClient([
+        multi_assessment([(1, "fail", ["object"]), (2, "fail", ["object"])]),
+        multi_editor([(1, "Говорим кратко,", "candidate"), (2, "Важно", "candidate")]),
+        multi_verification([
+            (1, "fail", ["object"], ["object"], {"object"}),
+            (2, "fail", ["object"], ["object"], {"object"}),
+        ]),
+        editor(1, "Говорим очень кратко,"), editor(2, "Важно очень кратко"),
+        verification(1, required=["object"]), verification(2, required=["object"]),
+    ])
+    original_estimator = reviewer.estimate_input_tokens
+    monkeypatch.setattr(reviewer, "estimate_input_tokens", lambda system, prompt:
+                        50_001 if "unit_context:" in prompt else original_estimator(system, prompt))
+    asyncio.run(review_subtitles(original, current, "key", client=client,
+                                 enable_multi_cue_editor=True))
+    repair_prompts = [call["messages"][1]["content"] for call in client.chat.completions.calls
+                      if call["messages"][0]["content"] == EDITOR_PROMPT][1:]
+    assert repair_prompts and all("unit_context:" not in prompt for prompt in repair_prompts)
+    output, report, _ = asyncio.run(review_subtitles(
+        original, current, "key", client=FakeClient([
+            multi_assessment([(1, "fail", ["object"]), (2, "fail", ["object"])]),
+            multi_editor([(1, "Говорим кратко,", "candidate"), (2, "Важно", "candidate")]),
+            multi_verification([
+                (1, "fail", ["object"], ["object"], {"object"}),
+                (2, "fail", ["object"], ["object"], {"object"}),
+            ]),
+            editor(1, "Говорим очень кратко,"), editor(2, "Важно очень кратко"),
+            verification(1, required=["object"]), verification(2, required=["object"]),
+        ]), enable_multi_cue_editor=True,
+    ))
+    assert report["unresolved_indices"] == []
+    assert all("repair" not in outcome["stage_errors"] for outcome in report["outcomes"])
+    assert [entry["text"] for entry in output] == [["Говорим очень кратко,"], ["Важно очень кратко"]]
 
 
 @pytest.mark.parametrize("fit_ratio", [True, 0, -1, float("inf"), float("nan")])

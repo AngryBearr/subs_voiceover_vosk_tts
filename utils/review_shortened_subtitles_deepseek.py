@@ -19,6 +19,7 @@ from utils.shorten_subtitles_deepseek import dynamic_max_tokens, shorten_via_dee
 from utils.semantic_plan import PLANNER_PROMPT, SemanticPlan, parse_semantic_plans
 from utils.semantic_requirements import PLANNER_ISSUE_CODES, SemanticRequirement, extract_semantic_requirements
 from utils.shortening_domain import CalibratedDurationModel, load_calibrated_duration_profile
+from utils.semantic_units import build_semantic_units
 
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_BATCH_SIZE = 4
@@ -89,6 +90,15 @@ class ReviewTarget:
     compression_percent: float
     min_words: int
     requires_shortening: bool
+
+
+@dataclass(frozen=True)
+class EditGroup:
+    """Stable editor membership, retained across the initial edit and repair."""
+
+    unit_id: str
+    cue_indices: tuple[int, ...]
+    editable_indices: tuple[int, ...]
 
 
 class DurationDiagnostic(TypedDict):
@@ -433,7 +443,8 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                              context_source: Optional[List[Dict[str, Any]]] = None,
                              concurrency: int = 3, enable_planner: bool = False,
                              duration_profile: Optional[CalibratedDurationModel] = None,
-                             duration_fit_ratio: float = 1.0) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+                             duration_fit_ratio: float = 1.0,
+                             enable_multi_cue_editor: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     """Run critic, conditional editor, blind verifier, and one bounded repair."""
     del thinking_mode, high_risk_threshold
     if duration_profile is not None and (isinstance(duration_fit_ratio, bool)
@@ -648,6 +659,62 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                 stage_errors["editor"][target.index] = f"formal_error:{initial_error}"
         editor_targets = [t for t in editor_targets if t.index not in blocked]
 
+        target_by_index = {target.index: target for target in editor_targets}
+        edit_groups: Dict[int, EditGroup] = {
+            target.index: EditGroup(f"cue:{target.index}", (target.index,), (target.index,))
+            for target in editor_targets
+        }
+        multi_groups: List[EditGroup] = []
+        if enable_multi_cue_editor and editor_targets:
+            changed_editor_indices = [
+                target.index for target in editor_targets
+                if join_text_lines(
+                    next(item for item in original if int(item["index"]) == target.index).get("text", "")
+                ) != join_text_lines(
+                    next(item for item in output if int(item["index"]) == target.index).get("text", "")
+                )
+            ]
+            units = build_semantic_units(
+                original, output, context_items=context_source,
+                target_indices=changed_editor_indices,
+            )
+            all_editor_indices = set(target_by_index)
+            for unit in units:
+                editable = tuple(index for index in unit.changed_indices if index in all_editor_indices)
+                evidence = set(unit.cue_indices) - set(editable)
+                if len(editable) < 2 or evidence & all_editor_indices:
+                    continue
+                group = EditGroup(unit.unit_id, unit.cue_indices, editable)
+                multi_groups.append(group)
+                for index in editable:
+                    edit_groups[index] = group
+
+        def unit_context(group: EditGroup, current_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+            by_original = {int(item["index"]): item for item in original}
+            by_current = {int(item["index"]): item for item in current_items}
+            return {
+                "unit_id": group.unit_id,
+                "cue_indices": list(group.cue_indices),
+                "editable_indices": list(group.editable_indices),
+                "evidence_indices": [index for index in group.cue_indices if index not in group.editable_indices],
+                "cues": [{
+                    "index": index,
+                    "original_text": join_text_lines(by_original[index].get("text", "")),
+                    "current_text": join_text_lines(by_current[index].get("text", "")),
+                    "editable": index in group.editable_indices,
+                    **({
+                        "max_chars": target_by_index[index].max_chars,
+                        "min_words": target_by_index[index].min_words,
+                        "issues": normalized_editor_issues(target_by_index[index]),
+                        "requires_shortening": target_by_index[index].requires_shortening,
+                        "anchors": [r.source_anchor for r in semantic_requirements[index]],
+                        "semantic_requirements": [r.as_dict() for r in semantic_requirements[index]],
+                        **plan_field(target_by_index[index]),
+                    } if index in target_by_index else {})
+                } for index in group.cue_indices],
+                "instruction": "Evidence indices are frozen. Return rows only for editable_indices. Do not move content between cue indices or change evidence.",
+            }
+
         def normalized_editor_issues(target: ReviewTarget) -> List[str]:
             issues = list(assessments["critic"][target.index][1]) + risk_hints[target.index]
             formal_error = review_validation_error(target, target.shortened_text, duration_profile=duration_profile,
@@ -665,8 +732,75 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                         **plan_field(t)} for t in group]
             return "Context:" + context(group, output) + "\nTargets:" + json.dumps(payload, ensure_ascii=False)
 
+        atomic_groups: List[EditGroup] = []
+        for group in multi_groups:
+            prompt = "unit_context:" + json.dumps(unit_context(group, output), ensure_ascii=False)
+            if estimate_input_tokens(EDITOR_PROMPT, prompt) <= max_input_tokens:
+                atomic_groups.append(group)
+
+        atomic_unit_ids = {group.unit_id for group in atomic_groups}
+
+        atomic_prompts = [
+            "unit_context:" + json.dumps(unit_context(group, output), ensure_ascii=False)
+            for group in atomic_groups
+        ]
+        atomic_responses = await asyncio.gather(*(
+            call("editor", EDITOR_PROMPT, prompt, None,
+                 [target_by_index[index] for index in group.editable_indices])
+            for group, prompt in zip(atomic_groups, atomic_prompts)
+        ))
+        for group, prompt, response in zip(atomic_groups, atomic_prompts, atomic_responses):
+            expected = set(group.editable_indices)
+            parsed = _parse_editor(response, expected)
+            if not parsed and response is not None and enable_planner:
+                retry_response = await call(
+                    "editor", EDITOR_PROMPT, prompt, None,
+                    [target_by_index[index] for index in group.editable_indices],
+                )
+                parsed = _parse_editor(retry_response, expected)
+                response = retry_response
+            errors: Dict[int, Optional[str]] = {}
+            for index in group.editable_indices:
+                target = target_by_index[index]
+                decision, candidate = parsed.get(index, ("unresolved", ""))
+                errors[index] = (
+                    review_validation_error(target, candidate, duration_profile=duration_profile,
+                                            duration_fit_ratio=duration_fit_ratio)
+                    if decision == "candidate" else ("unresolved" if parsed and decision == "unresolved" else "parse_failure")
+                )
+            if not parsed or any(errors[index] is not None for index in group.editable_indices):
+                for index in group.editable_indices:
+                    target = target_by_index[index]
+                    decisions["editor"][index] = None if not parsed else parsed[index][0]
+                    error = errors[index]
+                    stage_errors["editor"][index] = (
+                        ("api_failure" if response is None else "parse_failure") if not parsed
+                        else (f"formal_error:{error}" if error and error not in {"unresolved", "parse_failure"}
+                              else error or "parse_failure")
+                    )
+                    if parsed and error and error not in {"unresolved", "parse_failure"}:
+                        rejected: Dict[str, Any] = {"stage": "editor", "candidate": parsed[index][1], "reason": error}
+                        if error == "duration_too_long":
+                            rejected["duration_diagnostic"] = duration_diagnostic(
+                                target, parsed[index][1], duration_profile, duration_fit_ratio)
+                        lineage[index]["rejected"].append(rejected)
+                continue
+            for index in group.editable_indices:
+                target = target_by_index[index]
+                decision, candidate = parsed[index]
+                decisions["editor"][index] = decision
+                stage_errors["editor"].pop(index, None)
+                lineage[index]["editor"] = candidate
+                lineage[index]["final"] = candidate
+                if duration_profile is not None:
+                    lineage[index]["duration_diagnostic"] = duration_diagnostic(
+                        target, candidate, duration_profile, duration_fit_ratio)
+                output[target.position]["text"] = [candidate] if isinstance(output[target.position].get("text"), list) else candidate
+                valid_recovery.add(index)
+
         editor_batches, oversized = _split_stage_batches(
-            editor_targets, min(2, batch_size), EDITOR_PROMPT, editor_prompt, max_input_tokens
+            [target for target in editor_targets if edit_groups[target.index].unit_id not in atomic_unit_ids],
+            min(2, batch_size), EDITOR_PROMPT, editor_prompt, max_input_tokens
         )
         for target in oversized:
             stage_errors["editor"][target.index] = "input_too_large"
@@ -852,8 +986,74 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                      or ((risk_hints[t.index] or assessments["critic"][t.index][0] != "pass")
                          and t.index not in valid_recovery)))
         ]
+        failed_by_index = {target.index: target for target in failed}
+        atomic_repair_groups: List[EditGroup] = []
+        for group in multi_groups:
+            members = tuple(index for index in group.editable_indices if index in failed_by_index)
+            if not members:
+                continue
+            repair_group = EditGroup(group.unit_id, group.cue_indices, members)
+            repair_prompt = "unit_context:" + json.dumps(unit_context(repair_group, output), ensure_ascii=False)
+            if estimate_input_tokens(EDITOR_PROMPT, repair_prompt) <= max_input_tokens:
+                atomic_repair_groups.append(repair_group)
+        atomic_repair_ids = {group.unit_id for group in atomic_repair_groups}
+        atomic_repair_snapshots: Dict[int, Dict[str, Any]] = {}
+        atomic_repair_requests = [
+            (group, "unit_context:" + json.dumps(unit_context(group, output), ensure_ascii=False))
+            for group in atomic_repair_groups
+        ]
+        atomic_repair_responses = await asyncio.gather(*(
+            call("repair", EDITOR_PROMPT, prompt, None,
+                 [target_by_index[index] for index in group.editable_indices])
+            for group, prompt in atomic_repair_requests
+        ))
+        repaired: List[ReviewTarget] = []
+        for (group, prompt), response in zip(atomic_repair_requests, atomic_repair_responses):
+            expected = set(group.editable_indices)
+            parsed = _parse_editor(response, expected)
+            if not parsed and response is not None and enable_planner:
+                response = await call("repair", EDITOR_PROMPT, prompt, None,
+                                      [target_by_index[index] for index in group.editable_indices])
+                parsed = _parse_editor(response, expected)
+            errors: Dict[int, Optional[str]] = {}
+            for index in group.editable_indices:
+                target = target_by_index[index]
+                decision, candidate = parsed.get(index, ("unresolved", ""))
+                errors[index] = (review_validation_error(
+                    target, candidate, duration_profile=duration_profile, duration_fit_ratio=duration_fit_ratio
+                ) if decision == "candidate" else ("unresolved" if parsed else "parse_failure"))
+            if not parsed or any(errors[index] is not None for index in group.editable_indices):
+                for index in group.editable_indices:
+                    decisions["repair"][index] = None if not parsed else parsed[index][0]
+                    error = errors[index]
+                    stage_errors["repair"][index] = (
+                        ("api_failure" if response is None else "parse_failure") if not parsed
+                        else (f"formal_error:{error}" if error not in {"unresolved", "parse_failure"}
+                              else error)
+                    )
+                continue
+            for index in group.editable_indices:
+                target = target_by_index[index]
+                atomic_repair_snapshots[index] = {
+                    "lineage": copy.deepcopy(lineage[index]),
+                    "output_text": copy.deepcopy(output[target.position].get("text")),
+                    "assessment": copy.deepcopy(
+                        assessments["verifier"].get(index, ("uncertain", ["uncertain"]))
+                    ),
+                    "checks": copy.deepcopy(verifier_checks[index]),
+                    "history": copy.deepcopy(verifier_history[index]),
+                    "valid_recovery": index in valid_recovery,
+                }
+                decisions["repair"][index] = parsed[index][0]
+                candidate = parsed[index][1]
+                lineage[index]["repair"], lineage[index]["final"] = candidate, candidate
+                output[target.position]["text"] = [candidate] if isinstance(output[target.position].get("text"), list) else candidate
+                repaired.append(target)
+
         repair_requests: List[tuple[ReviewTarget, str]] = []
         for t in failed:
+            if edit_groups.get(t.index, EditGroup(f"cue:{t.index}", (t.index,), (t.index,))).unit_id in atomic_repair_ids:
+                continue
             issues = list(dict.fromkeys(
                 assessments["verifier"].get(t.index, ("uncertain", ["uncertain"]))[1]
                 + risk_hints[t.index] + assessments["critic"][t.index][1]
@@ -868,7 +1068,6 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             call("repair", EDITOR_PROMPT, prompt, None, [target])
             for target, prompt in repair_requests
         ))
-        repaired: List[ReviewTarget] = []
         repair_snapshots: Dict[int, Dict[str, Any]] = {}
         for (t, prompt), response in zip(repair_requests, repair_responses):
             parsed = _parse_editor(response, {t.index})
@@ -895,6 +1094,7 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                         t, candidate, duration_profile, duration_fit_ratio)
                 lineage[t.index]["rejected"].append(rejected)
             else:
+                stage_errors["repair"].pop(t.index, None)
                 repair_snapshots[t.index] = {
                     "final": lineage[t.index]["final"],
                     "output_text": copy.deepcopy(output[t.position].get("text")),
@@ -910,6 +1110,8 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
                 repaired.append(t)
         await asyncio.gather(*(verify([target], "reverify") for target in repaired))
         for target in repaired:
+            if target.index in atomic_repair_snapshots:
+                continue
             required = build_required_checks(risk_hints[target.index], assessments["critic"][target.index][1])
             verdict, reverify_issues = assessments["verifier"][target.index]
             checks = verifier_checks[target.index]
@@ -951,6 +1153,38 @@ async def review_subtitles(original: List[Dict[str, Any]], shortened: List[Dict[
             verifier_checks[target.index] = snapshot["checks"]
             if not snapshot["valid_recovery"]:
                 valid_recovery.discard(target.index)
+        failed_atomic_repair_ids: set[str] = set()
+        for group in atomic_repair_groups:
+            for index in group.editable_indices:
+                target = target_by_index[index]
+                required = build_required_checks(risk_hints[index], assessments["critic"][index][1])
+                verdict = assessments["verifier"][index][0]
+                checks = verifier_checks[index]
+                formal_error = review_validation_error(
+                    target, str(lineage[index]["final"]), duration_profile=duration_profile,
+                    duration_fit_ratio=duration_fit_ratio,
+                )
+                if not (verdict == "pass" and set(checks) == set(required)
+                        and all(value == "pass" for value in checks.values()) and formal_error is None):
+                    failed_atomic_repair_ids.add(group.unit_id)
+                    break
+        for group in atomic_repair_groups:
+            if group.unit_id not in failed_atomic_repair_ids:
+                for index in group.editable_indices:
+                    valid_recovery.add(index)
+                continue
+            for index in group.editable_indices:
+                snapshot = atomic_repair_snapshots[index]
+                target = target_by_index[index]
+                lineage[index] = snapshot["lineage"]
+                output[target.position]["text"] = snapshot["output_text"]
+                assessments["verifier"][index] = snapshot["assessment"]
+                verifier_checks[index] = snapshot["checks"]
+                verifier_history[index] = snapshot["history"]
+                if snapshot["valid_recovery"]:
+                    valid_recovery.add(index)
+                else:
+                    valid_recovery.discard(index)
     finally:
         if owns_client:
             await client.close()
@@ -1043,6 +1277,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
     parser.add_argument("--semantic-planner", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--multi-cue-editor", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--min-words", type=int, default=3)
     parser.add_argument("--avg-chars-per-sec", type=float, default=13.0)
     parser.add_argument("--target-ratio", type=float, default=1.5)
@@ -1079,8 +1314,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.model, args.thinking_mode, 35.0, args.context_window, args.batch_size, args.max_input_tokens,
             args.min_words, args.avg_chars_per_sec, args.target_ratio, args.base_url,
              context_source=load_json(Path(args.context_source)) if args.context_source else None,
-              concurrency=args.concurrency, enable_planner=args.semantic_planner,
-              duration_profile=duration_profile, duration_fit_ratio=args.duration_fit_ratio))
+             concurrency=args.concurrency, enable_planner=args.semantic_planner,
+             enable_multi_cue_editor=args.multi_cue_editor,
+             duration_profile=duration_profile, duration_fit_ratio=args.duration_fit_ratio))
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
