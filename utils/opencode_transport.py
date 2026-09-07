@@ -291,7 +291,7 @@ async def _http_delete(base_url: str, path: str, timeout: float = 10.0, auth_hea
         pass
 
 
-async def create_session(base_url: str, title: str = "shorten", auth_header: Optional[Dict[str, str]] = None) -> str:
+async def create_session(base_url: str, title: str = "session", auth_header: Optional[Dict[str, str]] = None) -> str:
     return (await _http_post(base_url, "/session", {"title": title}, auth_header=auth_header))["id"]
 
 

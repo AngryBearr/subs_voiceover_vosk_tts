@@ -231,7 +231,7 @@ async def request_json_schema(
         body: Dict[str, Any] = {
             "model": model_id,
             "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            "response_format": {"type": "json_schema", "json_schema": {"name": "subtitle_semantic_verification", "strict": True, "schema": copy.deepcopy(schema)}},
+            "response_format": {"type": "json_schema", "json_schema": {"name": "response", "strict": True, "schema": copy.deepcopy(schema)}},
             "provider": {"require_parameters": True},
             "stream": False,
             "temperature": float(temperature),
