@@ -12,8 +12,11 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+from utils.llm_types import CallRecord, DetailedResponse
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,35 @@ def _parse_model_string(model: str) -> Dict[str, str]:
     return {"providerID": "opencode-go", "modelID": model}
 
 
+def _provider_error(data: Dict[str, Any]) -> Optional[str]:
+    """Return a useful, redacted provider error without exposing raw metadata."""
+    info = data.get("info")
+    info = info if isinstance(info, dict) else {}
+    if "error" not in info and "error" not in data:
+        return None
+    error = info.get("error", data.get("error"))
+    labels: list[str] = []
+    message = ""
+    if isinstance(error, dict):
+        for key in ("name", "type"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in labels:
+                labels.append(value.strip()[:100])
+        raw_message = error.get("message")
+        raw_data = error.get("data")
+        if isinstance(raw_message, str):
+            message = raw_message
+        elif isinstance(raw_data, dict) and isinstance(raw_data.get("message"), str):
+            message = raw_data["message"]
+        elif isinstance(raw_data, str):
+            message = raw_data
+    elif isinstance(error, str):
+        message = error
+    label = " / ".join(labels) or "unknown"
+    detail = f"{label}: {message.strip()[:500] or 'unspecified provider error'}"
+    return _redact_transport_error(detail)
+
+
 def _extract_prompt_text(data: Dict[str, Any]) -> str:
     """Extract final text from a classic OpenCode prompt response."""
     if not isinstance(data, dict):
@@ -144,44 +176,22 @@ def _extract_prompt_text(data: Dict[str, Any]) -> str:
     if not isinstance(info, dict):
         raise RuntimeError("OpenCode response malformed: info must be an object")
 
+    provider_error = _provider_error(data)
+    if provider_error is not None:
+        raise RuntimeError(provider_error)
+
+    structured_value = info.get("structured", info.get("structured_output", data.get("structured_output")))
+    if structured_value is not None:
+        structured = structured_value
+        if not isinstance(structured, (dict, list)):
+            raise RuntimeError("OpenCode response malformed: structured must be an object or list")
+        return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
+
     parts = data.get("parts")
     if not isinstance(parts, list):
         raise RuntimeError("OpenCode response malformed: parts must be a list")
     if any(not isinstance(part, dict) for part in parts):
         raise RuntimeError("OpenCode response malformed: parts must contain objects")
-
-    error = info.get("error") if "error" in info else data.get("error")
-    if "error" in info or "error" in data:
-        error_type = ""
-        message = ""
-        if isinstance(error, dict):
-            raw_type = error.get("type")
-            raw_name = error.get("name")
-            if isinstance(raw_type, str) and raw_type.strip():
-                error_type = raw_type.strip()[:100]
-            elif isinstance(raw_name, str) and raw_name.strip():
-                error_type = raw_name.strip()[:100]
-
-            raw_message = error.get("message")
-            raw_data = error.get("data")
-            if isinstance(raw_message, str):
-                message = raw_message
-            elif isinstance(raw_data, dict) and isinstance(raw_data.get("message"), str):
-                message = raw_data["message"]
-            elif isinstance(raw_data, str):
-                message = raw_data
-        elif isinstance(error, str):
-            message = error
-
-        error_type = error_type or "unknown"
-        message = message.strip()[:500] or "unspecified provider error"
-        raise RuntimeError(f"OpenCode provider error: {error_type}: {message}")
-
-    if "structured" in info:
-        structured = info["structured"]
-        if not isinstance(structured, (dict, list)):
-            raise RuntimeError("OpenCode response malformed: structured must be an object or list")
-        return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
 
     text_parts = [
         part["text"]
@@ -296,7 +306,11 @@ async def create_session(base_url: str, title: str = "session", auth_header: Opt
 
 
 async def send_prompt_result(base_url: str, session_id: str, system_prompt: str, user_prompt: str, model: str, reasoning_effort: Optional[str] = None, auth_header: Optional[Dict[str, str]] = None, *, output_schema: Optional[Dict[str, Any]] = None) -> Optional[OpenCodePromptResult]:
+    if reasoning_effort is not None and (not isinstance(reasoning_effort, str) or not reasoning_effort.strip()):
+        return None
     body: Dict[str, Any] = {"parts": [{"type": "text", "text": user_prompt}], "model": _parse_model_string(model), "system": system_prompt}
+    if reasoning_effort is not None:
+        body["variant"] = reasoning_effort
     if output_schema is not None:
         body["format"] = {"type": "json_schema", "schema": copy.deepcopy(output_schema), "retryCount": 0}
     try:
@@ -310,6 +324,365 @@ async def send_prompt_result(base_url: str, session_id: str, system_prompt: str,
 async def send_prompt(base_url: str, session_id: str, system_prompt: str, user_prompt: str, model: str, reasoning_effort: Optional[str] = None, auth_header: Optional[Dict[str, str]] = None) -> Optional[str]:
     result = await send_prompt_result(base_url, session_id, system_prompt, user_prompt, model, reasoning_effort, auth_header)
     return result.text if result is not None else None
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _redact_transport_error(value: Any) -> str:
+    import re
+    message = value if isinstance(value, str) else "request failed"
+    message = " ".join(message.split())
+    message = re.sub(r"Bearer\s+\S+", "Bearer [redacted]", message, flags=re.IGNORECASE)
+    message = re.sub(r"(?:authorization|api[_ -]?key)\s*[:=]\s*[^\s,;]+", "[redacted-credential]", message, flags=re.IGNORECASE)
+    return message[:300] or "request failed"
+
+
+def _usage_from_info(info: Any) -> Optional[OpenCodePromptUsage]:
+    if not isinstance(info, dict):
+        return None
+    tokens = info.get("tokens")
+    if tokens is not None and not isinstance(tokens, dict):
+        return None
+    cache = tokens.get("cache") if isinstance(tokens, dict) else None
+    if cache is not None and not isinstance(cache, dict):
+        cache = None
+
+    def integer(value: Any) -> Optional[int]:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    usage_present = isinstance(tokens, dict) or "cost" in info
+    if not usage_present:
+        return None
+    parsed_values = [
+        integer(tokens.get("input") if isinstance(tokens, dict) else None),
+        integer(tokens.get("output") if isinstance(tokens, dict) else None),
+        integer(tokens.get("reasoning") if isinstance(tokens, dict) else None),
+        integer(tokens.get("total") if isinstance(tokens, dict) else None),
+        integer(cache.get("read") if isinstance(cache, dict) else None),
+        integer(cache.get("write") if isinstance(cache, dict) else None),
+        info.get("cost") if isinstance(info.get("cost"), (int, float)) and not isinstance(info.get("cost"), bool) and math.isfinite(float(info["cost"])) and info["cost"] >= 0 else None,
+    ]
+    if not any(value is not None for value in parsed_values):
+        return None
+    return OpenCodePromptUsage(
+        input_tokens=integer(tokens.get("input") if isinstance(tokens, dict) else None),
+        output_tokens=integer(tokens.get("output") if isinstance(tokens, dict) else None),
+        reasoning_tokens=integer(tokens.get("reasoning") if isinstance(tokens, dict) else None),
+        total_tokens=integer(tokens.get("total") if isinstance(tokens, dict) else None),
+        cache_read_tokens=integer(cache.get("read") if isinstance(cache, dict) else None),
+        cache_write_tokens=integer(cache.get("write") if isinstance(cache, dict) else None),
+        cost=info.get("cost") if isinstance(info.get("cost"), (int, float)) and not isinstance(info.get("cost"), bool) and math.isfinite(float(info["cost"])) and info["cost"] >= 0 else None,
+        provider_id=info.get("providerID") if isinstance(info.get("providerID"), str) else None,
+        model_id=info.get("modelID") if isinstance(info.get("modelID"), str) else None,
+        finish=info.get("finish") if isinstance(info.get("finish"), str) else None,
+    )
+
+
+def _usage_from_entry(entry: Dict[str, Any]) -> Optional[OpenCodePromptUsage]:
+    """Prefer the assistant summary; otherwise recover one step-finish usage."""
+    info_usage = _usage_from_info(entry.get("info"))
+    if info_usage is not None:
+        return info_usage
+    parts = entry.get("parts")
+    if not isinstance(parts, list):
+        return None
+    for part in reversed(parts):
+        if not isinstance(part, dict) or part.get("type") != "step-finish" or not isinstance(part.get("tokens"), dict):
+            continue
+        tokens = part["tokens"]
+
+        def integer(value: Any) -> Optional[int]:
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+        input_tokens = integer(tokens.get("input"))
+        output_tokens = integer(tokens.get("output"))
+        reasoning_tokens = integer(tokens.get("reasoning"))
+        total_tokens = integer(tokens.get("total"))
+        if input_tokens is None and output_tokens is None and reasoning_tokens is None and total_tokens is None:
+            continue
+        return OpenCodePromptUsage(input_tokens=input_tokens, output_tokens=output_tokens,
+                                   reasoning_tokens=reasoning_tokens, total_tokens=total_tokens,
+                                   provider_id=entry["info"].get("providerID") if isinstance(entry.get("info"), dict) else None,
+                                   model_id=entry["info"].get("modelID") if isinstance(entry.get("info"), dict) else None,
+                                   finish="step-finish")
+    return None
+
+
+def _assistant_entries(messages: Any) -> list[Dict[str, Any]]:
+    if isinstance(messages, dict):
+        messages = messages.get("messages", messages.get("data", []))
+    if not isinstance(messages, list):
+        return []
+    return [item for item in messages if isinstance(item, dict) and isinstance(item.get("info"), dict)
+            and item["info"].get("role", "assistant") == "assistant"]
+
+
+def _entry_identity(entry: Dict[str, Any]) -> str:
+    info = entry.get("info")
+    if not isinstance(info, dict):
+        info = {}
+    identity = entry.get("id") or info.get("id")
+    return str(identity) if identity is not None else json.dumps(entry, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _entry_has_error(entry: Dict[str, Any]) -> bool:
+    info = entry.get("info")
+    return (isinstance(info, dict) and "error" in info) or "error" in entry
+
+
+def _entry_is_terminal(entry: Dict[str, Any]) -> bool:
+    """Identify terminal response entries while ignoring tool-only history items."""
+    if _entry_has_error(entry):
+        return True
+    info = entry.get("info")
+    if isinstance(info, dict):
+        if any(key in info for key in ("structured", "structured_output", "finish")):
+            return True
+    parts = entry.get("parts")
+    if not isinstance(parts, list):
+        return False
+    return any(
+        isinstance(part, dict)
+        and (
+            (part.get("type") == "text" and isinstance(part.get("text"), str) and bool(part["text"].strip()))
+            or part.get("type") == "step-finish"
+        )
+        for part in parts
+    )
+
+
+def _final_entry(entries: list[Dict[str, Any]], post_data: Any, fetched: Any = None) -> Optional[Dict[str, Any]]:
+    """Select one terminal response and never fall back to an earlier text part."""
+    terminal = [entry for entry in entries if _entry_is_terminal(entry)]
+    if not terminal:
+        return None
+    post_entries = _assistant_entries([post_data]) if isinstance(post_data, dict) else []
+    post_ids = {_entry_identity(entry) for entry in post_entries}
+    fetched_entries = _assistant_entries(fetched)
+    fetched_ids = {_entry_identity(entry) for entry in fetched_entries}
+    post_ids &= fetched_ids
+    exact_post = next((entry for entry in terminal if _entry_identity(entry) in post_ids), None)
+    if exact_post is not None:
+        exact_position = terminal.index(exact_post)
+        if exact_position == len(terminal) - 1:
+            return exact_post
+    fetched_terminal = [entry for entry in fetched_entries if _entry_is_terminal(entry) and _entry_identity(entry) in {_entry_identity(item) for item in terminal}]
+    return fetched_terminal[-1] if fetched_terminal else terminal[-1]
+
+
+def _user_entries(messages: Any) -> list[Dict[str, Any]]:
+    if isinstance(messages, dict):
+        messages = messages.get("messages", messages.get("data", []))
+    if not isinstance(messages, list):
+        return []
+    return [item for item in messages if isinstance(item, dict) and isinstance(item.get("info"), dict)
+            and item["info"].get("role") == "user"]
+
+
+def _current_user_entries(
+    fetched: Any,
+    post_data: Any,
+    baseline_user_ids: set[str],
+    current_parent_ids: set[str],
+) -> list[Dict[str, Any]]:
+    candidates = _user_entries(fetched)
+    if isinstance(post_data, dict):
+        candidates += _user_entries([post_data])
+    selected: dict[str, Dict[str, Any]] = {}
+    for entry in candidates:
+        identity = _entry_identity(entry)
+        if identity not in baseline_user_ids and (not current_parent_ids or identity in current_parent_ids):
+            selected.setdefault(identity, entry)
+    return list(selected.values())
+
+
+def _current_assistant_entries(
+    fetched: Any,
+    post_data: Any,
+    baseline_assistant_ids: set[str],
+    baseline_user_ids: set[str],
+) -> list[Dict[str, Any]]:
+    """Keep only assistant steps belonging to the message submitted by this call."""
+    fetched_assistants = _assistant_entries(fetched)
+    post_assistants = _assistant_entries([post_data]) if isinstance(post_data, dict) else []
+    current_parent_ids: set[str] = set()
+    for entry in post_assistants:
+        parent = entry.get("info", {}).get("parentID")
+        if parent is not None:
+            current_parent_ids.add(str(parent))
+    for entry in _user_entries(fetched):
+        identity = _entry_identity(entry)
+        if identity not in baseline_user_ids:
+            current_parent_ids.add(identity)
+    post_ids = {_entry_identity(entry) for entry in post_assistants}
+    selected: dict[str, Dict[str, Any]] = {}
+    for entry in fetched_assistants + post_assistants:
+        identity = _entry_identity(entry)
+        info = entry.get("info", {})
+        parent = info.get("parentID")
+        belongs_to_prompt = (
+            identity in post_ids
+            or identity not in baseline_assistant_ids
+            and (not current_parent_ids or (parent is not None and str(parent) in current_parent_ids))
+        )
+        if belongs_to_prompt:
+            selected.setdefault(identity, entry)
+    # Older OpenCode responses omitted parentID.  If the POST response is also
+    # present in the fetched history, retain following assistant steps from
+    # that response group rather than treating them as an older invocation.
+    if not current_parent_ids and post_ids & baseline_assistant_ids:
+        identities = [_entry_identity(entry) for entry in fetched_assistants]
+        first = next((identities.index(identity) for identity in post_ids if identity in identities), None)
+        if first is not None:
+            for entry in fetched_assistants[first:]:
+                selected.setdefault(_entry_identity(entry), entry)
+    return list(selected.values())
+
+
+async def send_prompt_detailed(
+    base_url: str, session_id: str, system_prompt: str, user_prompt: str, model: str,
+    reasoning_effort: str, auth_header: Optional[Dict[str, str]] = None, *,
+    output_schema: Optional[Dict[str, Any]] = None, allow_length_tool: bool = False,
+    timeout: float = 300.0, native_structured_output: bool = False,
+) -> DetailedResponse:
+    """Send one isolated subtitle-agent message and account for every assistant step."""
+    started = _utc_now()
+    clock = time.monotonic()
+    calls: list[CallRecord] = []
+    post_started = False
+    post_succeeded = False
+    baseline_assistant_ids: set[str] = set()
+    baseline_user_ids: set[str] = set()
+    try:
+        if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():
+            raise ValueError("invalid_reasoning_effort")
+        if not isinstance(model, str) or not model.strip() or "/" not in model:
+            raise ValueError("model_required")
+        if not isinstance(session_id, str) or not session_id.strip() or not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("session_required")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(float(timeout)) or timeout <= 0:
+            raise ValueError("invalid_timeout")
+        if output_schema is not None and not isinstance(output_schema, dict):
+            raise ValueError("invalid_output_schema")
+        if not isinstance(native_structured_output, bool):
+            raise ValueError("invalid_native_structured_output")
+        requested_provider, requested_model = _parse_model_string(model).values()
+        try:
+            baseline = await _http_get(base_url, f"/session/{session_id}/message", timeout=float(timeout), auth_header=auth_header)
+        except Exception:
+            baseline = []
+        baseline_assistant_ids = {_entry_identity(entry) for entry in _assistant_entries(baseline)}
+        baseline_user_ids = {_entry_identity(entry) for entry in _user_entries(baseline)}
+        effective_system = system_prompt
+        if output_schema is not None and not native_structured_output:
+            compact_schema = json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
+            if compact_schema not in system_prompt and compact_schema not in user_prompt:
+                effective_system = f"{system_prompt}\n\nReturn JSON matching this schema: {compact_schema}"
+        body: Dict[str, Any] = {
+            "parts": [{"type": "text", "text": user_prompt}], "model": _parse_model_string(model),
+            "variant": reasoning_effort, "agent": "subtitle", "system": effective_system,
+            "tools": {"length_check_length": bool(allow_length_tool)},
+        }
+        if native_structured_output and output_schema is not None:
+            body["format"] = {"type": "json_schema", "schema": copy.deepcopy(output_schema), "retryCount": 0}
+        post_started = True
+        post_data = await _http_post(base_url, f"/session/{session_id}/message", body, timeout=float(timeout), auth_header=auth_header)
+        post_succeeded = True
+        try:
+            fetched = await _http_get(base_url, f"/session/{session_id}/message", timeout=float(timeout), auth_header=auth_header)
+        except Exception:
+            fetched = []
+        entries = _current_assistant_entries(fetched, post_data, baseline_assistant_ids, baseline_user_ids)
+        if not entries and isinstance(post_data, dict):
+            entries = _assistant_entries([post_data])
+        unique: dict[str, Dict[str, Any]] = {}
+        for entry in entries:
+            unique.setdefault(_entry_identity(entry), entry)
+        current_parent_ids = {
+            str(entry["info"]["parentID"])
+            for entry in entries
+            if entry["info"].get("parentID") is not None
+        }
+        current_users = _current_user_entries(fetched, post_data, baseline_user_ids, current_parent_ids)
+        user_metadata_mismatch = any(
+            (isinstance(entry.get("info", {}).get("modelID"), str)
+             and entry["info"]["modelID"] != requested_model)
+            or (isinstance(entry.get("info", {}).get("providerID"), str)
+                and entry["info"]["providerID"] != requested_provider)
+            or (isinstance(entry.get("info", {}).get("variant"), str)
+                and entry["info"]["variant"] != reasoning_effort)
+            for entry in current_users
+        )
+        for entry in unique.values():
+            info = entry["info"]
+            actual_model = info.get("modelID") if isinstance(info.get("modelID"), str) else None
+            actual_provider = info.get("providerID") if isinstance(info.get("providerID"), str) else None
+            actual_variant = info.get("variant") if isinstance(info.get("variant"), str) else None
+            mismatch = ((actual_model is not None and actual_model != requested_model)
+                        or (actual_provider is not None and actual_provider != requested_provider)
+                        or (actual_variant is not None and actual_variant != reasoning_effort)
+                        or user_metadata_mismatch)
+            has_error = "error" in info or "error" in entry
+            provider_error = _provider_error(entry) if has_error else None
+            error = provider_error or ("model_mismatch" if mismatch else None)
+            status = "error" if has_error else ("mismatch" if mismatch else "success")
+            parts = entry.get("parts")
+            tool_count = sum(1 for part in parts if isinstance(part, dict) and part.get("type") in {"tool", "tool-call"}) if isinstance(parts, list) else 0
+            calls.append(CallRecord(actual_provider or "unknown", actual_model or "unknown", actual_variant,
+                                    started, time.monotonic() - clock, _usage_from_entry(entry), status,
+                                    tool_calls=tool_count, error=error, requested_model=model,
+                                    requested_variant=reasoning_effort))
+        final_entry = _final_entry(list(unique.values()), post_data, fetched)
+        text: Optional[str] = None
+        final_error: Optional[str] = None
+        if final_entry is not None:
+            final_error = _provider_error(final_entry)
+            if final_error is None:
+                try:
+                    text = _extract_prompt_text(final_entry)
+                except Exception as exc:
+                    final_error = _redact_transport_error(str(exc))
+        if text is None and final_error is None:
+            final_error = "response contained no final text"
+        call_error = next((record.error for record in calls if record.status in {"error", "mismatch"} and record.error), None)
+        response_error = final_error or call_error
+        return DetailedResponse(text, calls, response_error)
+    except Exception as exc:
+        if post_started and not post_succeeded:
+            # Abort before fetching usage for every interrupted or failed POST.
+            try:
+                await _http_post(base_url, f"/session/{session_id}/abort", {}, timeout=10.0, auth_header=auth_header)
+            except Exception:
+                pass
+            try:
+                fetched = await _http_get(base_url, f"/session/{session_id}/message", timeout=10.0, auth_header=auth_header)
+                recovered = _current_assistant_entries(fetched, None, baseline_assistant_ids, baseline_user_ids)
+                requested_provider, requested_model = _parse_model_string(model).values()
+                for entry in recovered:
+                    info = entry["info"]
+                    actual_model = info.get("modelID") if isinstance(info.get("modelID"), str) else None
+                    actual_provider = info.get("providerID") if isinstance(info.get("providerID"), str) else None
+                    actual_variant = info.get("variant") if isinstance(info.get("variant"), str) else None
+                    mismatch = ((actual_model is not None and actual_model != requested_model)
+                                or (actual_provider is not None and actual_provider != requested_provider)
+                                or (actual_variant is not None and actual_variant != reasoning_effort))
+                    entry_error = _provider_error(entry)
+                    calls.append(CallRecord(
+                        actual_provider or "unknown", actual_model or "unknown", actual_variant,
+                        started, time.monotonic() - clock, _usage_from_entry(entry),
+                        "error" if entry_error else ("mismatch" if mismatch else "recovered"),
+                        error=entry_error or ("model_mismatch" if mismatch else None), requested_model=model,
+                        requested_variant=reasoning_effort,
+                    ))
+            except Exception:
+                pass
+        response_error = _redact_transport_error(str(exc))
+        if not calls:
+            calls.append(CallRecord("opencode", model if isinstance(model, str) else "unknown", reasoning_effort if isinstance(reasoning_effort, str) else None,
+                                    started, time.monotonic() - clock, None, "error", error=response_error))
+        return DetailedResponse(None, calls, response_error)
 
 
 async def delete_session(base_url: str, session_id: str, auth_header: Optional[Dict[str, str]] = None) -> None:
