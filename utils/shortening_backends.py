@@ -43,7 +43,7 @@ def transport_runtime_metadata() -> dict[str, str]:
 class LiveBackend:
     """Dispatch DeepSeek directly and OpenCode through isolated sessions."""
 
-    def __init__(self, server: CleanOpenCodeServer, *, deepseek_api_key: str | None = None,
+    def __init__(self, server: CleanOpenCodeServer | None = None, *, deepseek_api_key: str | None = None,
                  timeout: float = 300.0, max_tokens: int | None = None,
                  deepseek_base_url: str = "https://api.deepseek.com") -> None:
         self.runtime_metadata = transport_runtime_metadata()
@@ -83,6 +83,8 @@ class LiveBackend:
 
     async def _opencode(self, spec: ModelSpec, system_prompt: str, user_prompt: str,
                         output_schema: dict[str, Any], allow_length_tool: bool) -> DetailedResponse:
+        if self.server is None:
+            return DetailedResponse(None, [], "opencode_server_required")
         session_id: str | None = None
         try:
             from utils import opencode_transport

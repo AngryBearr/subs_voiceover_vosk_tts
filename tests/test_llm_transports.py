@@ -8,6 +8,7 @@ import pytest
 
 from utils import deepseek_transport as deepseek
 from utils import opencode_transport as opencode
+from utils.length_check import check_length
 
 
 def _deepseek_response(*, content: str | None = "{}", usage: object = None, tool_calls: object = None,
@@ -278,6 +279,67 @@ def test_deepseek_length_tool_replays_reasoning_and_limits_turns(monkeypatch: py
     assert seen[0]["tool_choice"] == "auto"
     assert seen[1]["tool_choice"] == "none"
     assert seen[1]["messages"][-1]["role"] == "tool"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("basis", ["unknown_basis", []])
+def test_deepseek_length_tool_rejects_unknown_or_unhashable_basis(
+    monkeypatch: pytest.MonkeyPatch, basis: object,
+) -> None:
+    tool_call = {
+        "id": "call-1", "type": "function",
+        "function": {"name": "check_length", "arguments": json.dumps({
+            "text": "а  …", "max_chars": 3, "length_basis": basis,
+        })},
+    }
+    responses = [
+        _deepseek_response(content=None, tool_calls=[tool_call], usage={"prompt_tokens": 1, "completion_tokens": 2}),
+        _deepseek_response(usage={"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5}),
+    ]
+    seen: list[dict[str, object]] = []
+
+    async def post(**kwargs: object) -> tuple[int, bytes]:
+        seen.append(kwargs["body"])  # type: ignore[arg-type]
+        return 200, responses.pop(0)
+
+    monkeypatch.setattr(deepseek, "_http_post_json", post)
+    result = asyncio.run(deepseek.request_json_detailed(
+        api_key="secret", model="deepseek-v4-flash", system_prompt="s", user_prompt="u",
+        allow_length_tool=True,
+    ))
+    assert result.text == "{}"
+    messages = seen[1]["messages"]
+    assert isinstance(messages, list)
+    tool_message = messages[-1]
+    assert isinstance(tool_message, dict)
+    assert json.loads(tool_message["content"]) == {"error": "invalid_tool_arguments"}
+
+
+def test_deepseek_normalized_length_tool_matches_pure_checker(monkeypatch: pytest.MonkeyPatch) -> None:
+    arguments = {"text": "а  …", "max_chars": 3, "length_basis": "normalized_tts_text"}
+    tool_call = {"id": "call-1", "type": "function", "function": {
+        "name": "check_length", "arguments": json.dumps(arguments),
+    }}
+    responses = [
+        _deepseek_response(content=None, tool_calls=[tool_call], usage={"prompt_tokens": 1, "completion_tokens": 2}),
+        _deepseek_response(usage={"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5}),
+    ]
+    seen: list[dict[str, object]] = []
+
+    async def post(**kwargs: object) -> tuple[int, bytes]:
+        seen.append(kwargs["body"])  # type: ignore[arg-type]
+        return 200, responses.pop(0)
+
+    monkeypatch.setattr(deepseek, "_http_post_json", post)
+    result = asyncio.run(deepseek.request_json_detailed(
+        api_key="secret", model="deepseek-v4-flash", system_prompt="s", user_prompt="u",
+        allow_length_tool=True,
+    ))
+    assert result.text == "{}"
+    messages = seen[1]["messages"]
+    assert isinstance(messages, list)
+    tool_message = messages[-1]
+    assert isinstance(tool_message, dict)
+    assert json.loads(tool_message["content"]) == check_length(**arguments)
 
 
 def test_opencode_detailed_deduplicates_post_message(monkeypatch: pytest.MonkeyPatch) -> None:

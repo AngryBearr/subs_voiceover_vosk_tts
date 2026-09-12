@@ -31,6 +31,25 @@ def _models() -> tuple[ModelSpec, ModelSpec]:
     return ModelSpec("fake", "generator", "off"), ModelSpec("fake", "arbiter", "off")
 
 
+def _calibrated_planner() -> PlannerConfig:
+    identity = {
+        "engine": "vosk", "voice": 8, "rate": 1.5,
+        "model_config_sha256": None, "model_fingerprint": "fingerprint",
+        "normalizer": "vosk_punctuation_v1_no_ruaccent", "normalizer_sha256": "hash",
+    }
+    profile = {
+        "status": "ok", "identity": identity,
+        "normalizer": "vosk_punctuation_v1_no_ruaccent",
+        "input_character_basis": "normalized_tts_text", "rate": 1.5,
+        "models": {"char_linear": {"name": "char_linear", "rate": 1.5, "coefficients": [0.01, 0.005]}},
+        "char_linear_guard_sec": 0.06,
+    }
+    return PlannerConfig(
+        cps=13.0, max_speed=1.5, length_basis="normalized_tts_text",
+        calibration_profile=profile, calibration_identity=identity,
+    )
+
+
 def test_run_trial_preflight_resolves_short_and_repeated_fit_without_llm(tmp_path: Path) -> None:
     items = [
         {"index": 41, "start": 0, "end": 100, "text": "Да.", "unknown": "keep"},
@@ -101,6 +120,52 @@ def test_measured_fit_does_not_transfer_to_different_text() -> None:
     assert analysis["estimate_source"] == "nominal_cps_estimate"
     assert analysis["reason"] != "actual_fit"
     assert analysis["is_critical"] is True
+
+
+def test_calibrated_measured_fit_is_actual_fit_and_repeated_overflow_stays_eligible(
+    tmp_path: Path,
+) -> None:
+    items = [
+        {"start": 0, "end": 100, "text": "Да, нет."},
+        {"start": 300, "end": 400, "text": "да да да"},
+    ]
+    planner = _calibrated_planner()
+    plans = plan_subtitles(items, planner)
+    assert [plan.status for plan in plans] == ["short_timing", "needs_shortening"]
+    calls: list[list[str]] = []
+
+    def verifier(selected: list[CuePlan], _: Path) -> dict[str, dict[str, Any]]:
+        assert {plan.cue_id for plan in selected} == {"cue-0", "cue-1"}
+        return {
+            "cue-0": {"original": "Да, нет.", "available_ms": 100, "duration_sec": 0.05},
+            "cue-1": {"original": "да да да", "available_ms": 100, "duration_sec": 0.2},
+        }
+
+    async def request(_: ModelSpec, __: str, user: str, schema: dict[str, Any], ___: bool) -> DetailedResponse:
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        ids = [row["cue_id"] for row in payload["targets"]]
+        calls.append(ids)
+        if "verdict" in json.dumps(schema):
+            response = {"results": [{"cue_id": cue_id, "verdict": "accept", "issues": [], "advice": ""} for cue_id in ids]}
+        else:
+            response = {"results": [{"cue_id": cue_id, "text": "да", "status": "ok"} for cue_id in ids]}
+        return DetailedResponse(json.dumps(response), [])
+
+    generator, arbiter = _models()
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=["cue-0", "cue-1"], planner_config=planner,
+        run_config=RunConfig(max_repairs=0), generator=generator, arbiter=arbiter,
+        output_dir=tmp_path / "calibrated", request_fn=request, original_timing_verifier=verifier,
+    ))
+    first, second = report["records"]
+    assert first["status"] == "actual_fits"
+    assert second["status"] == "accepted"
+    assert calls == [["cue-1"], ["cue-1"]]
+    checkpoint = json.loads((tmp_path / "calibrated" / "subtitles.json").read_text(encoding="utf-8"))
+    assert checkpoint[0]["analysis"]["estimate_source"] == "vosk_measurement"
+    assert checkpoint[0]["analysis"]["estimate_label"] == "vosk_calibration_char_linear"
+    assert checkpoint[0]["analysis"]["reason"] == "actual_fit"
+    assert checkpoint[0]["analysis"]["is_critical"] is False
 
 
 @pytest.mark.parametrize("duration", [10**1000, float("inf"), float("nan"), True, 0, -1])

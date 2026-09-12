@@ -77,8 +77,18 @@ def _planner_manifest(manifest: dict[str, Any]) -> None:
     configured = manifest.get("planner_config")
     if configured is None:
         return
+    if not isinstance(configured, dict):
+        raise ValueError("corpus planner configuration does not match the fixed experiment budget")
     expected = asdict(EXPECTED_PLANNER)
-    if not isinstance(configured, dict) or any(configured.get(key) != value for key, value in expected.items()):
+    original_fields = ("cps", "max_speed", "gap_ms", "context_before", "context_after")
+    additive_defaults = {
+        "length_basis": expected["length_basis"],
+        "calibration_profile": expected["calibration_profile"],
+        "calibration_identity": expected["calibration_identity"],
+    }
+    if any(field not in configured or configured[field] != expected[field] for field in original_fields):
+        raise ValueError("corpus planner configuration does not match the fixed experiment budget")
+    if any(field in configured and configured[field] != default for field, default in additive_defaults.items()):
         raise ValueError("corpus planner configuration does not match the fixed experiment budget")
 
 
@@ -710,7 +720,7 @@ async def run_experiment(manifest: dict[str, Any], manifest_dir: Path, output_di
     started = datetime.now(timezone.utc).isoformat()
     plan_manifest = {"schema_version": 1, "experiment_version": EXPERIMENT_VERSION, "status": "running",
                      "corpus_sha256": _canonical(manifest), "sample_case_ids": [case["case_id"] for case in cases],
-                      "params": {"repetitions": repetitions, "best_of": best_of, "audit": audit, "seed": seed,
+                     "params": {"repetitions": repetitions, "best_of": best_of, "audit": audit, "seed": seed,
                                  "length_tools": length_tools, "planner": asdict(EXPECTED_PLANNER),
                                  "run": asdict(RunConfig(gen_batch_size=6, review_batch_size=12, max_repairs=1, length_tools=length_tools))},
                      "case_metadata": [{"case_id": case["case_id"], "source_id": case["source_id"], "cue_id": case["cue_id"],
@@ -725,7 +735,7 @@ async def run_experiment(manifest: dict[str, Any], manifest_dir: Path, output_di
                      "prompt_strings": {"standard_generator": GENERATOR_SYSTEM_PROMPT, "standard_arbiter": ARBITER_SYSTEM_PROMPT,
                                         "candidate_system": CANDIDATE_SYSTEM_PROMPT, "selection_system": SELECTION_SYSTEM_PROMPT,
                                         "audit_system": AUDIT_SYSTEM_PROMPT},
-                     "prompt_versions": {"standard": "shortening-v1", "candidates": CANDIDATE_PROMPT_VERSION, "selection": SELECTION_PROMPT_VERSION, "audit": AUDIT_PROMPT_VERSION},
+                     "prompt_versions": {"standard": PROMPT_VERSION, "candidates": CANDIDATE_PROMPT_VERSION, "selection": SELECTION_PROMPT_VERSION, "audit": AUDIT_PROMPT_VERSION},
                      "models": {"generator": asdict(generator), "selector": asdict(SOL_SELECTOR), "main_auditor": asdict(MAIN_AUDITOR), "cross_auditor": asdict(CROSS_AUDITOR)},
                      "routing_note": "A shares B generation; B uses the standard repair loop; C uses one candidate batch and one Sol selection batch.",
                      "clock": {"started_at": started}}
@@ -795,7 +805,7 @@ async def run_experiment(manifest: dict[str, Any], manifest_dir: Path, output_di
                 result = {"global_case_id": case_id, "local_cue_id": cue_id, "source_id": source_id, "repetition": repetition + 1,
                           "original": case["original"],
                           "budget": {"max_chars": case["max_chars"], "available_ms": case["available_ms"]},
-                          "context": copy.deepcopy(case["context"]), "prompt_versions": {"standard": "shortening-v1", "candidates": CANDIDATE_PROMPT_VERSION if best_of else None},
+                          "context": copy.deepcopy(case["context"]), "prompt_versions": {"standard": PROMPT_VERSION, "candidates": CANDIDATE_PROMPT_VERSION if best_of else None},
                           "A": {"text": a_text, "status": "unreviewed" if a_text is not None else "unavailable", "candidate_hash": _sha(a_text.encode()) if a_text else None},
                           "B": {"text": b_text, "status": "accepted" if b_text is not None else "unavailable", "candidate_hash": _sha(b_text.encode()) if b_text else None},
                           "C": c if best_of == 5 else {"status": "unavailable", "reason": "best_of_disabled"},

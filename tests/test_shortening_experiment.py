@@ -3,13 +3,27 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from utils.llm_types import CallRecord, DetailedResponse
 from utils.opencode_transport import OpenCodePromptUsage
-from utils.shortening_experiment import _audit_status, _build_effects, _ledger_summary, _run_audits, _run_candidates, _validate_and_load, run_experiment
+from utils.shortening_experiment import (
+    EXPECTED_PLANNER,
+    _audit_status,
+    _build_effects,
+    _ledger_summary,
+    _planner_manifest,
+    _run_audits,
+    _run_candidates,
+    _validate_and_load,
+    run_experiment,
+)
 from utils.shortening_plan import PlannerConfig, plan_subtitles
+from utils.shortening_prompts import PROMPT_VERSION
 from utils.shortening_runner import ModelSpec
 
 
@@ -70,6 +84,10 @@ def test_experiment_shares_standard_generation_with_a_and_calls_c_once_per_stage
     assert sum(stage == "candidates" for stage, _ in calls) == 2
     assert sum(stage == "selection" for stage, _ in calls) == 2
     assert len(list((output / "r1" / "best5").rglob("calls.jsonl"))) == 1
+    experiment_manifest = json.loads((output / "experiment_manifest.json").read_text(encoding="utf-8"))
+    assert experiment_manifest["prompt_versions"]["standard"] == PROMPT_VERSION
+    case_results = json.loads((output / "case_results.json").read_text(encoding="utf-8"))
+    assert case_results and all(row["prompt_versions"]["standard"] == PROMPT_VERSION for row in case_results)
     projection = result["cost"]["projection_500"]["B"]
     assert len(projection["per_repetition"]) == 2
     assert projection["known_cost_usd"]["mean"] == projection["per_repetition"][0]["known_cost_usd"]
@@ -326,3 +344,39 @@ def test_order_check_reuses_main_order_in_literal_reverse(tmp_path: Path) -> Non
                                      output_dir=tmp_path / "order", request_fn=fake, seed=4))
     assert packets[1] == list(reversed(packets[0]))
     assert audits["order"]["s:cue-0"]["status"] == "complete"
+
+
+def test_legacy_and_default_planner_manifests_are_accepted() -> None:
+    legacy = {"planner_config": {
+        "cps": EXPECTED_PLANNER.cps,
+        "max_speed": EXPECTED_PLANNER.max_speed,
+        "gap_ms": EXPECTED_PLANNER.gap_ms,
+        "context_before": EXPECTED_PLANNER.context_before,
+        "context_after": EXPECTED_PLANNER.context_after,
+    }}
+    _planner_manifest(legacy)
+
+    default = {"planner_config": asdict(EXPECTED_PLANNER)}
+    _planner_manifest(default)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"length_basis": "normalized_tts_text"},
+        {"calibration_profile": {}},
+        {"calibration_identity": {}},
+    ],
+)
+def test_frozen_planner_rejects_nondefault_additive_fields(change: dict[str, Any]) -> None:
+    configured = asdict(EXPECTED_PLANNER)
+    configured.update(change)
+    with pytest.raises(ValueError, match="fixed experiment budget"):
+        _planner_manifest({"planner_config": configured})
+
+
+def test_frozen_planner_requires_every_original_field() -> None:
+    configured = asdict(EXPECTED_PLANNER)
+    del configured["cps"]
+    with pytest.raises(ValueError, match="fixed experiment budget"):
+        _planner_manifest({"planner_config": configured})

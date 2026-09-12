@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 import json
 import random
+from dataclasses import replace
 
 import pytest
 
+from utils.vosk_text import normalize_vosk_text
 from utils.shortening_plan import (
     CuePlan,
     PlannerConfig,
@@ -17,6 +19,25 @@ from utils.shortening_plan import (
     plan_subtitles,
     select_sample,
 )
+
+
+def _calibration_config(*, coefficients: list[float], guard: float = 0.0) -> PlannerConfig:
+    identity = {
+        "engine": "vosk", "voice": 8, "rate": 1.5,
+        "model_config_sha256": None, "model_fingerprint": "fingerprint",
+        "normalizer": "vosk_punctuation_v1_no_ruaccent", "normalizer_sha256": "hash",
+    }
+    profile = {
+        "status": "ok", "identity": identity,
+        "normalizer": "vosk_punctuation_v1_no_ruaccent",
+        "input_character_basis": "normalized_tts_text", "rate": 1.5,
+        "models": {"char_linear": {"name": "char_linear", "rate": 1.5, "coefficients": coefficients}},
+        "char_linear_guard_sec": guard,
+    }
+    return PlannerConfig(
+        cps=13.0, max_speed=1.5, length_basis="normalized_tts_text",
+        calibration_profile=profile, calibration_identity=identity,
+    )
 
 
 @pytest.mark.parametrize(
@@ -159,3 +180,57 @@ def test_analysis_keeps_gap_after_candidate_shortening() -> None:
 def test_invalid_analysis_is_json_safe() -> None:
     plan = CuePlan("cue-0", 0, "", None, None, 0, 0, None, 0.0, "invalid", "invalid")
     assert json.dumps(analysis_for_text(plan, "anything", PlannerConfig()))
+
+
+def test_normalized_planning_and_analysis_share_character_basis() -> None:
+    config = PlannerConfig(length_basis="normalized_tts_text", cps=13, max_speed=1.0)
+    original = "«Да…»"
+    plan = plan_subtitles([{"start": 0, "end": 1000, "text": original}], config)[0]
+    assert plan.text == original
+    assert plan.length_basis == "normalized_tts_text"
+    analysis = analysis_for_text(plan, original, config)
+    assert analysis["length_basis"] == "normalized_tts_text"
+    assert analysis["budget_remaining_chars"] == plan.max_chars - len('"Да..."')
+
+
+def test_calibrated_budget_can_be_below_nominal_without_double_speed() -> None:
+    config = _calibration_config(coefficients=[0.2, 0.1], guard=0.1)
+    original = "«абвгде»"
+    prepared = normalize_vosk_text(original)
+    plan = plan_subtitles([{"start": 0, "end": 1000, "text": original}], config)[0]
+
+    assert plan.max_chars == int((1.0 - 0.2 - 0.1) // 0.1)
+    assert plan.max_chars < int(13.0 * 1.5)
+    assert plan.reduction_fraction == pytest.approx(1.0 - plan.max_chars / len(prepared))
+    assert plan.required_ratio == pytest.approx((0.2 + 0.1 * len(prepared)) / 1.0)
+    analysis = analysis_for_text(plan, original, config)
+    assert analysis["budget_remaining_chars"] == plan.max_chars - len(prepared)
+    assert analysis["estimate_label"] == "vosk_calibration_char_linear"
+    assert analysis["estimate_basis"] == "vosk_calibration_char_linear"
+
+
+def test_calibrated_budget_can_exceed_nominal_and_uses_normalized_fields() -> None:
+    config = _calibration_config(coefficients=[0.1, 0.02])
+    original = "а  б, в"
+    prepared = normalize_vosk_text(original)
+    plan = plan_subtitles([{"start": 0, "end": 1000, "text": original}], config)[0]
+
+    assert plan.max_chars == 45
+    assert plan.max_chars > int(13.0 * 1.5)
+    assert plan.status == "fits"
+    assert plan.reduction_fraction == 0.0
+    assert plan.required_ratio == pytest.approx((0.1 + 0.02 * len(prepared)) / 1.0)
+    analysis = analysis_for_text(plan, original, config)
+    assert analysis["budget_remaining_chars"] == plan.max_chars - len(prepared)
+
+
+def test_measured_fit_keeps_evidence_source_separate_from_calibrated_forecast() -> None:
+    config = _calibration_config(coefficients=[0.1, 0.02])
+    plan = plan_subtitles([{"start": 0, "end": 1000, "text": "а б"}], config)[0]
+    measured = replace(plan, estimate_source="vosk_measurement")
+    analysis = analysis_for_text(measured, measured.text, config)
+    assert analysis["estimate_source"] == "vosk_measurement"
+    assert analysis["estimate_label"] == "vosk_calibration_char_linear"
+    assert analysis["estimate_basis"] == "vosk_calibration_char_linear"
+    assert analysis["reason"] == "actual_fit"
+    assert analysis["is_critical"] is False

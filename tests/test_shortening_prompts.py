@@ -20,7 +20,7 @@ from utils.shortening_prompts import (
 
 
 def test_versioned_prompts_and_strict_schemas() -> None:
-    assert PROMPT_VERSION == "shortening-v1"
+    assert PROMPT_VERSION == "shortening-v2"
     assert "FULL essential meaning" in GENERATOR_SYSTEM_PROMPT
     assert "JSON only" in ARBITER_SYSTEM_PROMPT
     for schema, required in ((generation_schema(), {"cue_id", "text", "status"}), (review_schema(), {"cue_id", "verdict", "issues", "advice"})):
@@ -33,11 +33,11 @@ def test_prompt_payload_fields_and_no_history() -> None:
     context = [{"cue_id": "cue-0", "text": "before", "is_target": False, "provider": "omit"}]
     generation = build_generation_prompt(
         context,
-        [{"cue_id": "cue-1", "original": "original", "max_chars": 5, "prior_candidate": "old", "feedback": "short"}],
+        [{"cue_id": "cue-1", "original": "original", "max_chars": 5, "length_basis": "normalized_tts_text", "prior_candidate": "old", "feedback": "short"}],
     )
     review = build_review_prompt(
         context,
-        [{"cue_id": "cue-1", "original": "original", "candidate": "new", "max_chars": 5, "actual_chars": 3, "history": "omit"}],
+        [{"cue_id": "cue-1", "original": "original", "candidate": "new", "max_chars": 5, "actual_chars": 3, "length_basis": "normalized_tts_text", "history": "omit"}],
     )
     assert "provider" not in generation
     assert "history" not in review
@@ -47,6 +47,8 @@ def test_prompt_payload_fields_and_no_history() -> None:
     review_payload = json.loads(review.split("Input JSON:\n", 1)[1])
     assert generation_payload["schema"] == generation_schema()
     assert review_payload["schema"] == review_schema()
+    assert generation_payload["targets"][0]["length_basis"] == "normalized_tts_text"
+    assert review_payload["targets"][0]["length_basis"] == "normalized_tts_text"
 
 
 def test_generation_parse_and_deterministic_order() -> None:

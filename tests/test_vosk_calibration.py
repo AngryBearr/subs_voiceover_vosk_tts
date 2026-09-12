@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,9 @@ from utils.vosk_calibration import (
     duration_features,
     max_chars_for_window,
     measure_corpus,
+    predict_character_duration,
     predict_duration,
+    validate_character_profile,
 )
 from utils.vosk_text import normalize_vosk_text
 
@@ -220,3 +223,87 @@ def test_real_model_initialization_failure_has_failed_checkpoint(tmp_path: Path)
     assert report["summary"]["logical_observations"] == 0
     checkpoint = json.loads((output / "progress.json").read_text(encoding="utf-8"))
     assert checkpoint["status"] == "failed"
+
+
+def test_character_profile_validation_is_strict_and_prediction_is_normalized() -> None:
+    identity = {
+        "engine": "vosk", "voice": 8, "rate": 1.5,
+        "model_config_sha256": None, "model_fingerprint": "fingerprint",
+        "normalizer": "vosk_punctuation_v1_no_ruaccent", "normalizer_sha256": "hash",
+    }
+    profile = {
+        "status": "ok", "identity": identity, "normalizer": "vosk_punctuation_v1_no_ruaccent",
+        "input_character_basis": "normalized_tts_text", "rate": 1.5,
+        "models": {"char_linear": {"name": "char_linear", "rate": 1.5, "coefficients": [0.2, 0.1]}},
+        "char_linear_guard_sec": 0.3,
+    }
+    validate_character_profile(profile, expected_identity=identity)
+    assert predict_character_duration(profile, "а…", expected_identity=identity) == pytest.approx(0.6)
+    for field, value in (("char_linear_guard_sec", float("nan")), ("rate", True)):
+        invalid = dict(profile)
+        invalid[field] = value
+        with pytest.raises(ValueError):
+            validate_character_profile(invalid, expected_identity=identity)
+    invalid_model = dict(profile)
+    invalid_model["models"] = {"char_linear": {"name": "char_linear", "rate": 1.5, "coefficients": [0.2, 0.0]}}
+    with pytest.raises(ValueError):
+        validate_character_profile(invalid_model, expected_identity=identity)
+
+    for field, value in (
+        ("char_linear_guard_sec", -1.0),
+        ("char_linear_guard_sec", float("inf")),
+        ("char_linear_guard_sec", True),
+        ("char_linear_guard_sec", None),
+        ("rate", -1.0),
+        ("rate", float("nan")),
+        ("rate", float("inf")),
+        ("rate", True),
+    ):
+        invalid = copy.deepcopy(profile)
+        if value is None:
+            del invalid[field]
+        else:
+            invalid[field] = value
+        with pytest.raises(ValueError):
+            validate_character_profile(invalid, expected_identity=identity)
+
+    for index, value in ((0, -0.1), (0, float("nan")), (0, float("inf")), (0, True),
+                         (1, -0.1), (1, float("nan")), (1, float("inf")), (1, True)):
+        invalid = copy.deepcopy(profile)
+        invalid["models"]["char_linear"]["coefficients"][index] = value
+        with pytest.raises(ValueError):
+            validate_character_profile(invalid, expected_identity=identity)
+
+    missing_guard = copy.deepcopy(profile)
+    del missing_guard["char_linear_guard_sec"]
+    missing_guard["guard_sec"] = 99.0
+    with pytest.raises(ValueError):
+        validate_character_profile(missing_guard, expected_identity=identity)
+    assert max_chars_for_window(missing_guard, 1000, expected_identity=identity) == 0
+
+    legacy = {
+        "status": "ok",
+        "identity": identity,
+        "models": {"char_linear": {"coefficients": [0.0, 0.1]}},
+        "guard_sec": 0.2,
+    }
+    assert max_chars_for_window(legacy, 1000, expected_identity=identity) == 8
+    with pytest.raises(ValueError):
+        validate_character_profile(legacy, expected_identity=identity)
+
+    for field, value in (
+        ("rate", 1.0),
+        ("input_character_basis", "display_text"),
+    ):
+        invalid = copy.deepcopy(profile)
+        invalid[field] = value
+        with pytest.raises(ValueError):
+            validate_character_profile(invalid, expected_identity=identity)
+    invalid_model_rate = copy.deepcopy(profile)
+    invalid_model_rate["models"]["char_linear"]["rate"] = 1.0
+    with pytest.raises(ValueError):
+        validate_character_profile(invalid_model_rate, expected_identity=identity)
+    invalid_identity = copy.deepcopy(identity)
+    invalid_identity["voice"] = 7
+    with pytest.raises(ValueError):
+        validate_character_profile(profile, expected_identity=invalid_identity)

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import utils.shortening_runner as shortening_runner
 from utils.llm_types import CallRecord, DetailedResponse
 from utils.opencode_transport import OpenCodePromptUsage
 from utils.shortening_plan import PlannerConfig, plan_subtitles
@@ -206,6 +207,84 @@ def test_request_exception_marks_accounting_unknown_and_preserves_source(tmp_pat
     assert report["cost"]["projection_500"]["unknown_cost"] is True
     assert report["cost"]["projection_500"]["applicable"] is False
     assert "incomplete_run" in report["cost"]["projection_500"]["inapplicable_reasons"]
+
+
+def test_report_metadata_is_preserved_on_failed_checkpoints(tmp_path: Path) -> None:
+    items, plans, planner, ids = _run_config(tmp_path)
+
+    async def failing(_: ModelSpec, __: str, ___: str, ____: dict[str, Any], _____: bool) -> DetailedResponse:
+        raise RuntimeError("failed")
+
+    metadata = {"trial": "sh03", "config": "caller-owned"}
+    output = tmp_path / "metadata"
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=[ids[0]], planner_config=planner,
+        run_config=RunConfig(), generator=ModelSpec("deepseek", "m", "off"),
+        arbiter=ModelSpec("opencode", "a", "medium"), output_dir=output,
+        request_fn=failing, report_metadata=metadata,
+    ))
+    assert report["metadata"] == metadata
+    checkpoint = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert checkpoint["metadata"] == metadata
+
+
+def test_normalized_local_candidate_can_have_over_cap_raw_whitespace(tmp_path: Path) -> None:
+    items = [{"start": 0, "end": 1000, "text": "long original text here"}]
+    planner = PlannerConfig(cps=3.0, max_speed=1.0, length_basis="normalized_tts_text")
+    plans = plan_subtitles(items, planner)
+    assert plans[0].max_chars == 3
+
+    async def fake(_: ModelSpec, __: str, user: str, schema: dict[str, Any], ___: bool) -> DetailedResponse:
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        ids = [row["cue_id"] for row in payload["targets"]]
+        if "verdict" in json.dumps(schema):
+            response = {"results": [{"cue_id": cue_id, "verdict": "accept", "issues": [], "advice": ""} for cue_id in ids]}
+        else:
+            response = {"results": [{"cue_id": cue_id, "text": "a  b", "status": "ok"} for cue_id in ids]}
+        return DetailedResponse(json.dumps(response), [])
+
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=["cue-0"], planner_config=planner,
+        run_config=RunConfig(max_repairs=0), generator=ModelSpec("deepseek", "m", "off"),
+        arbiter=ModelSpec("opencode", "a", "medium"), output_dir=tmp_path / "normalized",
+        request_fn=fake,
+    ))
+    record = report["records"][0]
+    assert record["status"] == "accepted"
+    assert record["final_text"] == "a  b"
+    assert record["history"][0]["local"]["actual_chars"] == 3
+    assert len(record["candidate"]) == 4
+
+
+def test_checkpoint_metadata_is_present_on_every_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items, plans, planner, ids = _run_config(tmp_path)
+    metadata = {"trial": "sh03", "checkpoint": "all"}
+    captured: list[dict[str, Any]] = []
+
+    def capture(_: Path, report: dict[str, Any], __: list[dict[str, Any]]) -> None:
+        captured.append(json.loads(json.dumps(report)))
+
+    monkeypatch.setattr(shortening_runner, "_checkpoint", capture)
+
+    async def fake(_: ModelSpec, __: str, user: str, schema: dict[str, Any], ___: bool) -> DetailedResponse:
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        ids_in_batch = [row["cue_id"] for row in payload["targets"]]
+        if "verdict" in json.dumps(schema):
+            response = {"results": [{"cue_id": cue_id, "verdict": "accept", "issues": [], "advice": ""} for cue_id in ids_in_batch]}
+        else:
+            response = {"results": [{"cue_id": cue_id, "text": "short", "status": "ok"} for cue_id in ids_in_batch]}
+        return DetailedResponse(json.dumps(response), [])
+
+    asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=[ids[0]], planner_config=planner,
+        run_config=RunConfig(), generator=ModelSpec("deepseek", "m", "off"),
+        arbiter=ModelSpec("opencode", "a", "medium"), output_dir=tmp_path / "checkpoints",
+        request_fn=fake, report_metadata=metadata,
+    ))
+    assert len(captured) >= 3
+    assert all(report["metadata"] == metadata for report in captured)
 
 
 def test_known_deepseek_cost_survives_unknown_openai_accounting(tmp_path: Path) -> None:

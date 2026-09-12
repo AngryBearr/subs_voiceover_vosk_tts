@@ -79,3 +79,12 @@ def test_opencode_module_not_found_error_keeps_only_safe_module_name(monkeypatch
 
     assert result.error == "ModuleNotFoundError:aiohttp"
     assert "secret" not in (result.error or "")
+
+
+def test_opencode_without_server_fails_closed() -> None:
+    backend = LiveBackend(None)
+    result = asyncio.run(backend(
+        ModelSpec("opencode", "openai/gpt-5.6-luna", "medium"),
+        "system", "user", {}, False,
+    ))
+    assert result.error == "opencode_server_required"

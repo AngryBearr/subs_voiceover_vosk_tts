@@ -412,6 +412,82 @@ def _profile_identity(model_metadata: dict[str, Any], voice: int, rate: float) -
     }
 
 
+def model_metadata(model_path: Path) -> dict[str, Any]:
+    """Return the frozen metadata identity for a Vosk model directory."""
+    return _model_metadata(model_path)
+
+
+def profile_identity(model_metadata: dict[str, Any], voice: int, rate: float) -> dict[str, Any]:
+    """Return the frozen profile identity for model, voice, and rate."""
+    return _profile_identity(model_metadata, voice, rate)
+
+
+def validate_character_profile(
+    profile: dict[str, Any], *, expected_identity: dict[str, Any]
+) -> None:
+    """Strictly validate a frozen normalized character-linear calibration profile."""
+    if not isinstance(profile, dict):
+        raise ValueError("profile is not an object")
+    if not isinstance(expected_identity, dict):
+        raise TypeError("expected_identity must be an object")
+    assert_profile_compatible(profile, expected_identity)
+    identity = profile.get("identity")
+    if type(identity) is not type(expected_identity) or identity != expected_identity:
+        raise ValueError("profile identity mismatch")
+    if profile.get("status") != "ok":
+        raise ValueError("profile is invalid or has profile_error status")
+    if profile.get("normalizer") != NORMALIZER_NAME:
+        raise ValueError("profile has invalid normalizer")
+    if profile.get("input_character_basis") != "normalized_tts_text":
+        raise ValueError("profile has invalid input character basis")
+
+    def finite_number(value: Any) -> bool:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            return math.isfinite(float(value))
+        except (OverflowError, ValueError):
+            return False
+
+    profile_rate = profile.get("rate")
+    identity_rate = expected_identity.get("rate")
+    if not finite_number(profile_rate) or profile_rate <= 0:
+        raise ValueError("profile rate must be finite and positive")
+    if type(profile_rate) is not type(identity_rate) or profile_rate != identity_rate:
+        raise ValueError("profile rate does not match identity")
+    models = profile.get("models")
+    if not isinstance(models, dict):
+        raise ValueError("profile models are invalid")
+    char_linear = models.get("char_linear")
+    if not isinstance(char_linear, dict) or char_linear.get("name") != "char_linear":
+        raise ValueError("profile char_linear model is invalid")
+    model_rate = char_linear.get("rate")
+    if type(model_rate) is not type(profile_rate) or model_rate != profile_rate:
+        raise ValueError("profile char_linear rate mismatch")
+    coefficients = char_linear.get("coefficients")
+    if not isinstance(coefficients, list) or len(coefficients) != 2:
+        raise ValueError("profile char_linear coefficients are invalid")
+    if any(not finite_number(value) for value in coefficients):
+        raise ValueError("profile char_linear coefficients are invalid")
+    if coefficients[0] < 0 or coefficients[1] <= 0:
+        raise ValueError("profile char_linear coefficients are invalid")
+    guard = profile.get("char_linear_guard_sec")
+    if not finite_number(guard) or guard < 0:
+        raise ValueError("profile char_linear guard is invalid")
+
+
+def predict_character_duration(
+    profile: dict[str, Any], text: str, *, expected_identity: dict[str, Any]
+) -> float:
+    """Predict duration with the validated unguarded normalized character model."""
+    validate_character_profile(profile, expected_identity=expected_identity)
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    coefficients = profile["models"]["char_linear"]["coefficients"]
+    normalized = normalize_vosk_text(text)
+    return float(coefficients[0] + coefficients[1] * len(normalized))
+
+
 def _package_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
     for package in ("numpy", "scipy", "soundfile", "vosk-tts"):

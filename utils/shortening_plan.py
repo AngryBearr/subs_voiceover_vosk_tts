@@ -12,7 +12,13 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any
 
+from utils.length_check import LengthBasis, prepare_length_text
 from utils.text_metrics import classify_text, count_words, is_repetition_candidate
+from utils.vosk_calibration import (
+    max_chars_for_window,
+    predict_character_duration,
+    validate_character_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,9 @@ class PlannerConfig:
     gap_ms: int = 200
     context_before: int = 3
     context_after: int = 3
+    length_basis: LengthBasis = "display_text"
+    calibration_profile: dict[str, Any] | None = None
+    calibration_identity: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -35,6 +44,17 @@ class PlannerConfig:
             raise ValueError("cps must be finite and positive")
         if not speed.is_finite() or speed < Decimal("1") or speed > Decimal("1.5"):
             raise ValueError("max_speed must be between 1.0 and 1.5")
+        if self.length_basis not in {"display_text", "normalized_tts_text"}:
+            raise ValueError("invalid length_basis")
+        if (self.calibration_profile is None) != (self.calibration_identity is None):
+            raise ValueError("calibration_profile and calibration_identity must be supplied together")
+        if self.calibration_profile is not None or self.calibration_identity is not None:
+            if self.length_basis != "normalized_tts_text":
+                raise ValueError("calibration requires normalized_tts_text length_basis")
+            assert self.calibration_profile is not None and self.calibration_identity is not None
+            validate_character_profile(self.calibration_profile, expected_identity=self.calibration_identity)
+            if self.calibration_identity.get("rate") != self.max_speed:
+                raise ValueError("calibration identity rate must equal max_speed")
         for name, value in (
             ("gap_ms", self.gap_ms),
             ("context_before", self.context_before),
@@ -65,6 +85,7 @@ class CuePlan:
     reason: str = "unknown"
     estimate_source: str = "nominal_cps_estimate"
     invalid_timing: bool = False
+    length_basis: LengthBasis = "display_text"
 
 
 @dataclass(frozen=True)
@@ -132,6 +153,20 @@ def _decimal_budget(config: PlannerConfig, available_ms: int) -> int:
     return int(budget.to_integral_value(rounding=ROUND_FLOOR))
 
 
+def _budget(config: PlannerConfig, available_ms: int) -> int:
+    if config.calibration_profile is None:
+        return _decimal_budget(config, available_ms)
+    assert config.calibration_identity is not None
+    result = max_chars_for_window(
+        config.calibration_profile,
+        available_ms,
+        expected_identity=config.calibration_identity,
+    )
+    if result is None:
+        raise ValueError("calibrated character budget is unavailable")
+    return result
+
+
 def _severity(reduction_fraction: float, status: str) -> str:
     if status == "invalid":
         return "invalid"
@@ -168,8 +203,9 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
     for record in records:
         cue_id = record.cue_id
         if not record.timing_valid or not record.text_valid:
-            words_count = count_words(record.text) if record.text_valid else 0
-            repetition_candidate = is_repetition_candidate(record.text) if record.text_valid else False
+            prepared_text = prepare_length_text(record.text, config.length_basis) if record.text_valid else ""
+            words_count = count_words(prepared_text) if record.text_valid else 0
+            repetition_candidate = is_repetition_candidate(prepared_text) if record.text_valid else False
             invalid_timing = not record.timing_valid
             plans.append(
                 CuePlan(
@@ -188,27 +224,41 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
                     repetition_candidate=repetition_candidate,
                     reason="invalid_timing" if invalid_timing else "invalid_text",
                     invalid_timing=invalid_timing,
+                    length_basis=config.length_basis,
                 )
             )
             continue
 
         assert record.start is not None and record.end is not None
         available_ms = available_by_position[record.position]
-        max_chars = _decimal_budget(config, available_ms)
-        original_length = len(record.text)
-        required_ratio = (
-            (Decimal(original_length) / Decimal(str(config.cps)))
-            / (Decimal(available_ms) / Decimal(1000))
-            if available_ms > 0
-            else None
-        )
+        prepared_text = prepare_length_text(record.text, config.length_basis)
+        max_chars = _budget(config, available_ms)
+        original_length = len(prepared_text)
+        if available_ms > 0:
+            if config.calibration_profile is not None:
+                assert config.calibration_identity is not None
+                required_ratio = (
+                    predict_character_duration(
+                        config.calibration_profile,
+                        record.text,
+                        expected_identity=config.calibration_identity,
+                    )
+                    / (available_ms / 1000.0)
+                )
+            else:
+                required_ratio = (
+                    Decimal(original_length) / Decimal(str(config.cps))
+                    / (Decimal(available_ms) / Decimal(1000))
+                )
+        else:
+            required_ratio = None
         required_ratio_float = float(required_ratio) if required_ratio is not None else None
         reduction = (
             max(0.0, 1.0 - (max_chars / original_length))
             if original_length
             else 0.0
         )
-        classification = classify_text(record.text, max_chars)
+        classification = classify_text(prepared_text, max_chars)
         plans.append(
             CuePlan(
                 cue_id=cue_id,
@@ -226,6 +276,12 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
                 repetition_candidate=classification.repetition_candidate,
                 short_timing_risk=classification.short_timing_risk,
                 reason=classification.reason,
+                estimate_source=(
+                    "vosk_calibration_char_linear"
+                    if config.calibration_profile is not None
+                    else "nominal_cps_estimate"
+                ),
+                length_basis=config.length_basis,
             )
         )
     return plans
@@ -401,28 +457,36 @@ def analysis_for_text(
         raise TypeError("config must be a PlannerConfig")
     if not isinstance(text, str):
         raise TypeError("text must be a string")
+    if plan.length_basis != config.length_basis:
+        raise ValueError("plan and config length_basis mismatch")
+    prepared_text = prepare_length_text(text, plan.length_basis)
     same_text = text == plan.text
-    estimate_source = plan.estimate_source if same_text else "nominal_cps_estimate"
+    calibrated = config.calibration_profile is not None
+    estimate_source = (
+        "vosk_measurement"
+        if calibrated and same_text and plan.status == "fits" and plan.estimate_source == "vosk_measurement"
+        else "vosk_calibration_char_linear"
+        if calibrated
+        else plan.estimate_source
+        if same_text
+        else "nominal_cps_estimate"
+    )
     budget_basis = (
+        "vosk_calibration_char_linear"
+        if calibrated
+        else
         "measured_budget_estimate"
         if estimate_source == "measured_budget_estimate"
         else "stricter_character_budget"
     )
+    estimate_label = "vosk_calibration_char_linear" if calibrated else "nominal_cps_estimate"
     base: dict[str, Any] = {
         "duration_sec": None,
         "estimated_sec": None,
-        "estimate_label": "nominal_cps_estimate",
-        "estimate_basis": "nominal_cps_estimate",
-        "budget_label": (
-            "measured_budget_estimate"
-            if estimate_source == "measured_budget_estimate"
-            else "stricter_character_budget"
-        ),
-        "budget_basis": (
-            "measured_budget_estimate"
-            if estimate_source == "measured_budget_estimate"
-            else "stricter_character_budget"
-        ),
+        "estimate_label": estimate_label,
+        "estimate_basis": estimate_label,
+        "budget_label": budget_basis,
+        "budget_basis": budget_basis,
         "max_chars": None,
         "budget_remaining_chars": None,
         "mismatch_ratio": None,
@@ -430,16 +494,22 @@ def analysis_for_text(
         "extended_duration_sec": None,
         "extended_mismatch_ratio": None,
         "used_gap_sec": None,
-        "words_count": count_words(text),
+        "words_count": count_words(prepared_text),
         "is_short_segment": False,
         "is_checked": False,
         "is_critical": False,
         "available_ms": plan.available_ms,
         "short_timing_risk": False,
-        "repetition_candidate": is_repetition_candidate(text),
+        "repetition_candidate": is_repetition_candidate(prepared_text),
         "reason": "invalid_timing" if plan.invalid_timing else "invalid_text",
         "estimate_source": estimate_source,
         "invalid_timing": plan.invalid_timing,
+        "length_basis": plan.length_basis,
+        "estimate_rate": (
+            config.calibration_profile.get("rate")
+            if calibrated and config.calibration_profile is not None
+            else None
+        ),
     }
     if plan.status == "invalid" or plan.start is None or plan.end is None or plan.end <= plan.start:
         return base
@@ -447,7 +517,15 @@ def analysis_for_text(
     assert plan.start is not None and plan.end is not None
     duration_ms = plan.end - plan.start
     duration_sec = duration_ms / 1000.0
-    estimated_sec = len(text) / float(config.cps)
+    estimated_sec = (
+        predict_character_duration(
+            config.calibration_profile,
+            text,
+            expected_identity=config.calibration_identity,
+        )
+        if calibrated and config.calibration_profile is not None and config.calibration_identity is not None
+        else len(prepared_text) / float(config.cps)
+    )
     mismatch_ratio = estimated_sec / duration_sec
     diff_sec = estimated_sec - duration_sec
     extended_duration_sec: float | None = None
@@ -457,7 +535,7 @@ def analysis_for_text(
         extended_duration_sec = plan.available_ms / 1000.0
         extended_mismatch_ratio = estimated_sec / extended_duration_sec
         used_gap_sec = (plan.available_ms - duration_ms) / 1000.0
-    classification = classify_text(text, plan.max_chars)
+    classification = classify_text(prepared_text, plan.max_chars)
     words_count = classification.words_count
     short_timing_risk = classification.short_timing_risk
     reason = classification.reason
@@ -475,7 +553,7 @@ def analysis_for_text(
             "duration_sec": duration_sec,
             "estimated_sec": estimated_sec,
             "max_chars": plan.max_chars,
-            "budget_remaining_chars": plan.max_chars - len(text),
+            "budget_remaining_chars": plan.max_chars - len(prepared_text),
             "mismatch_ratio": mismatch_ratio,
             "diff_sec": diff_sec,
             "extended_duration_sec": extended_duration_sec,
@@ -490,6 +568,8 @@ def analysis_for_text(
             "repetition_candidate": classification.repetition_candidate,
             "reason": reason,
             "estimate_source": estimate_source,
+            "estimate_label": estimate_label,
+            "estimate_basis": estimate_label,
             "budget_label": budget_basis,
             "budget_basis": budget_basis,
             "invalid_timing": plan.invalid_timing,

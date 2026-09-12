@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable
 
 from utils.json_to_srt import json_to_srt
 from utils.llm_types import CallRecord, DetailedResponse
-from utils.length_check import check_length
+from utils.length_check import check_length, prepare_length_text
 from utils.shortening_costs import estimate_record_cost, project_500, summarize_costs
 from utils.shortening_plan import (
     CuePlan,
@@ -142,7 +142,7 @@ def _plan_payload(plan: CuePlan) -> dict[str, Any]:
 
 
 def _local_check(candidate: str, plan: CuePlan) -> dict[str, Any]:
-    length = check_length(candidate, plan.max_chars)
+    length = check_length(candidate, plan.max_chars, plan.length_basis)
     valid = bool(candidate.strip()) and "\n" not in candidate and "\r" not in candidate and candidate == candidate.strip()
     return {
         "nonempty": bool(candidate.strip()),
@@ -151,6 +151,7 @@ def _local_check(candidate: str, plan: CuePlan) -> dict[str, Any]:
         "actual_chars": length["length"],
         "max_chars": length["max_chars"],
         "within_length": length["fits"],
+        "length_basis": plan.length_basis,
         "valid": valid,
     }
 
@@ -288,8 +289,9 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
                   arbiter: ModelSpec, output_dir: Path, records: list[dict[str, Any]],
                   stage_calls: dict[str, list[CallRecord]], source_path: str | None,
                    source_hash: str, export_error: str | None = None, selected_initial: dict[str, Any] | None = None,
-                   *, run_state: str = "running", request_counts: dict[str, int] | None = None,
-                   request_failures: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                    *, run_state: str = "running", request_counts: dict[str, int] | None = None,
+                    request_failures: list[dict[str, Any]] | None = None,
+                    report_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     accepted = sum(record["status"] == "accepted" for record in records)
     actual_fits = sum(record["status"] == "actual_fits" for record in records)
     manual = len(records) - accepted - actual_fits
@@ -360,6 +362,7 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
         "config": {"planner": asdict(planner), "run": asdict(run_config)},
         "model": {"generator": asdict(generator), "arbiter": asdict(arbiter)},
         "prompt_version": PROMPT_VERSION,
+        "length_basis": planner.length_basis,
         "selected_ids": list(target_ids),
         "source_manifest": {"path": source_path, "absolute_path": os.path.abspath(source_path) if source_path else None, "sha256": source_hash},
         "records": records,
@@ -388,6 +391,8 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
     }
     if selected_initial is not None:
         report["selection"] = selected_initial
+    if report_metadata is not None:
+        report["metadata"] = copy.deepcopy(report_metadata)
     return report
 
 
@@ -427,7 +432,11 @@ def _prepare_checkpoint(source: list[dict[str, Any]], records: list[dict[str, An
 
 def _forecast_plan(plan: CuePlan) -> CuePlan:
     """Derive risk metadata for plans constructed by older callers."""
-    classification = classify_text(plan.text, plan.max_chars) if plan.status != "invalid" else None
+    classification = (
+        classify_text(prepare_length_text(plan.text, plan.length_basis), plan.max_chars)
+        if plan.status != "invalid"
+        else None
+    )
     if classification is None:
         return plan
     return replace(
@@ -556,7 +565,8 @@ def _apply_preflight(
 async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target_ids: list[str],
                     planner_config: PlannerConfig, run_config: RunConfig, generator: ModelSpec,
                     arbiter: ModelSpec, output_dir: Path, request_fn: RequestFunction,
-                    original_timing_verifier: OriginalTimingVerifier | None = None) -> dict[str, Any]:
+                     original_timing_verifier: OriginalTimingVerifier | None = None,
+                     report_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run one independent trial and write fail-closed checkpoints after each batch."""
     if output_dir.exists():
         raise FileExistsError(f"output directory already exists: {output_dir}")
@@ -566,6 +576,10 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
         raise TypeError("plans must be CuePlan objects")
     if not isinstance(run_config, RunConfig):
         raise TypeError("run_config must be RunConfig")
+    if report_metadata is not None and not isinstance(report_metadata, dict):
+        raise TypeError("report_metadata must be an object")
+    if any(plan.length_basis != planner_config.length_basis for plan in plans):
+        raise ValueError("all plans must match planner length_basis")
     plans = [_forecast_plan(plan) for plan in plans]
     plan_by_id = {plan.cue_id: plan for plan in plans}
     if len(plan_by_id) != len(plans):
@@ -597,8 +611,8 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
     def save(run_state: str) -> dict[str, Any]:
         report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter,
                                output_dir, records, stage_calls, source_path, _source_hash(items),
-                               run_state=run_state, request_counts=request_counts,
-                               request_failures=request_failures)
+                                run_state=run_state, request_counts=request_counts,
+                                request_failures=request_failures, report_metadata=report_metadata)
         _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
         return report
 
@@ -623,8 +637,9 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
     def checkpoint() -> None:
         report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter,
                                output_dir, records, stage_calls, source_path, _source_hash(items),
-                               run_state="incomplete" if request_failures else "running",
-                               request_counts=request_counts, request_failures=request_failures)
+                                run_state="incomplete" if request_failures else "running",
+                                request_counts=request_counts, request_failures=request_failures,
+                                report_metadata=report_metadata)
         _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
 
     async def run_generation(
@@ -641,7 +656,15 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
                     "feedback": json.dumps({
                         "issues": record.get("final_review", {}).get("issues", []) if isinstance(record.get("final_review"), dict) else [],
                         "advice": record.get("final_review", {}).get("advice", "") if isinstance(record.get("final_review"), dict) else "",
-                        "overage": max(0, len(candidate) - plan_by_id[cue_id].max_chars) if isinstance(candidate, str) else 0,
+                        "overage": (
+                            max(
+                                0,
+                                len(prepare_length_text(candidate, plan_by_id[cue_id].length_basis))
+                                - plan_by_id[cue_id].max_chars,
+                            )
+                            if isinstance(candidate, str)
+                            else 0
+                        ),
                         "failure": {
                             "class": record.get("failure"),
                             **({"error": next((event["error"] for event in reversed(record["history"])
@@ -655,7 +678,12 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
             targets: list[dict[str, Any]] = []
             for cue_id in batch:
                 plan = plan_by_id[cue_id]
-                row: dict[str, Any] = {"cue_id": cue_id, "original": plan.text, "max_chars": plan.max_chars}
+                row: dict[str, Any] = {
+                    "cue_id": cue_id,
+                    "original": plan.text,
+                    "max_chars": plan.max_chars,
+                    "length_basis": plan.length_basis,
+                }
                 if stage == "repair":
                     row.update({"prior_candidate": feedback[cue_id]["candidate"], "feedback": feedback[cue_id]["feedback"]})
                 targets.append(row)
@@ -781,8 +809,11 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
             for cue_id in batch:
                 record = record_by_id[cue_id]
                 candidate = record["original"] if record.get("failure") in {"cannot_shorten", "protocol_misuse"} else record.get("candidate", record["original"])
+                plan = plan_by_id[cue_id]
                 targets.append({"cue_id": cue_id, "original": record["original"], "candidate": candidate,
-                                "max_chars": record["budget"]["max_chars"], "actual_chars": len(candidate)})
+                                "max_chars": record["budget"]["max_chars"],
+                                "actual_chars": len(prepare_length_text(candidate, plan.length_basis)),
+                                "length_basis": plan.length_basis})
             response = await _request(
                 request_fn, arbiter, ARBITER_SYSTEM_PROMPT, build_review_prompt(context, targets), review_schema(), False,
                 stage=stage, ids=batch, output_dir=output_dir, stage_calls=stage_calls,
@@ -856,6 +887,7 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
     final_report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
                                  records, stage_calls, source_path, _source_hash(items),
                                  run_state="incomplete" if request_failures else "completed",
-                                 request_counts=request_counts, request_failures=request_failures)
+                                  request_counts=request_counts, request_failures=request_failures,
+                                  report_metadata=report_metadata)
     _checkpoint(output_dir, final_report, _prepare_checkpoint(source_copy, records, plans, planner_config))
     return final_report

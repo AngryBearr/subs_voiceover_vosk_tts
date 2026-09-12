@@ -1,8 +1,9 @@
 # Задачи: надёжное сокращение полного файла
 
 Статус на 12 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
-HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью проверена в
-рабочем дереве, но ещё не закоммичена; SH-03 и все последующие задачи ожидают.
+HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью проверена и
+зафиксирована коммитом `c5bf383`; SH-03 реализована и проверена, но ещё
+не закоммичена; SH-04 и все последующие задачи ожидают.
 
 ## Цель
 
@@ -51,7 +52,7 @@ was not committed was historical; SH-01 is present in HEAD `ec0cbaf`.
 
 **Готово, когда:** из шести строк при одной ошибочной сохраняются пять корректных; принятые результаты не генерируются заново; ошибки протокола не выдаются за смысловые отказы. Проверяется без платных запросов.
 
-**Implementation note (SH-02, completed and fully verified in the working tree):**
+**Implementation note (SH-02, committed as `c5bf383` and fully verified):**
 Ordinary generation, review, repair, and recheck now use bounded per-cue partial
 parsing and shared extra recovery rounds. Valid JSON rows with identifiable IDs
 are isolated, valid neighbours are checkpointed, and missing or invalid rows get
@@ -84,7 +85,7 @@ exited 0 and returned `{"status": "ok"}`. All five CLI `--help` checks
 `shortening_corpus`, and `vosk_calibration`) exited 0. `git diff HEAD --check`
 exited 0. No paid or real model/TTS calls were made.
 
-### [ ] SH-03. Обычный запуск для одного файла и профиля — P0
+### [x] SH-03. Обычный запуск для одного файла и профиля — P0
 
 Зависит от SH-01 и SH-02. Планируемая новая точка входа: `utils/shorten_file.py`; экспериментальные команды остаются совместимыми.
 
@@ -96,6 +97,24 @@ exited 0. No paid or real model/TTS calls were made.
 - Сохранять таймкоды, индексы JSON и неизвестные поля. Для SRT отдельно документировать его нумерацию.
 
 **Готово, когда:** одна команда даёт новые JSON/SRT и отчёт; предварительный расчёт доступен без сети; несовместимый профиль отклоняется. Подключение в `pipeline.py` не обязательно для первой версии. Платный эксперимент пока не нужен.
+
+**Implementation and verification note (SH-03, 12 September 2026):** The
+single-model [`utils.shorten_file`](shorten_file.md) command processes one whole
+SRT or JSON file, including UTF-8 BOM input, using one selected model for both
+generation and review. Planning, local checks, and the optional length tool use
+the normalized length basis, and the frozen Vosk profile must match the model,
+voice, rate, and text normalizer. Offline `--dry-run` uses a lazy backend and
+does not make LLM, network, Vosk, or synthesis calls; legacy experimental CLI
+behavior remains compatible. Resume is not implemented yet.
+
+Final verification: `uv run --active --no-sync -m pytest -q` reported `316
+passed` and compileall for `utils tests pipeline.py ui/gradio_app.py` passed;
+new and legacy CLI `--help` checks passed. A real existing Vosk model and frozen
+profile passed the offline BOM SRT/JSON smoke check, while invalid voice and
+rate values were rejected before output creation. No paid LLM or real synthesis
+calls were made. The temporary local log, not a durable artifact, is
+`/tmp/opencode/sh03-final-20260912/baseline.log`. SH-03 remains uncommitted; the
+next task is SH-04.
 
 ### [ ] SH-04. Возобновление без повторной оплаты — P0
 
@@ -112,6 +131,9 @@ exited 0. No paid or real model/TTS calls were made.
 Зависит от SH-02…SH-04. Планируемые результаты: редактируемый `review.json` и читаемый `review.md`.
 
 Включать только нерешённые случаи: оригинал, соседний контекст, кандидаты, лимит и фактическую длину, причину, последнюю критику модели и предлагаемое действие. Отдельно показывать короткие фразы, ошибки таймингов и ошибки протокола.
+
+SH-05 should consume SH-11's canonical outcome markers and queue only cues
+whose outcome is unresolved or needs attention.
 
 Команда применения правок принимает только явно одобренные известные `cue_id`, проверяет хеш исходника, формат и бюджет. Устаревшие и превышающие лимит правки не применяются молча. Остальные строки и таймкоды не меняются.
 
@@ -188,11 +210,81 @@ exited 0. No paid or real model/TTS calls were made.
 - Независимый контроль пока выборочный, полного финального допуска сейчас нет. Вердикт модели не даёт гарантии 100%; бесконечных повторов и автоматических правок текста не будет.
 - Приёмка будущего режима: все запрошенные ID покрыты в бюджете, границы контекста проверены, нет утечки идентичности или истории, неизвестные случаи попали в очередь, расходы отделены, ошибки пачек изолированы, а пробные тесты по возможности обходятся без модельных вызовов.
 
+### [ ] SH-11. Per-subtitle outcome markers for review and safe reanalysis — P1
+
+Depends on SH-03; coordinate with SH-05 and implement alongside it before SH-08.
+This is a plan for a new capability, not a claim that an implementation already
+exists.
+
+Track two independent dimensions for every subtitle: whether its text changed,
+and its outcome/evidence. The outcome vocabulary must distinguish `unchanged and
+fits`, `accepted correction`, `needs attention/unresolved`, `invalid/error`, and
+`not checked` (unverified). Never equate a modified cue with a solved cue, an LLM
+acceptance with measured audio fit, or an untested cue with a resolved one.
+
+Canonical metadata belongs in JSON or a sidecar, outside spoken text. For each
+stable `cue_id`, retain the outcome and reason, the validation source
+(`prediction`, `model`, `human`, or `measured`), measured timing as a separate
+field, source-text, current-text, source-timing, current-timing, and profile
+fingerprints, and relevant context needed to reuse a semantic decision. Expose
+every cue's status in a
+human-readable report. SH-05 must queue only unresolved cues.
+
+An optional, separately named, review-only annotated SRT may show a clear
+`NEEDS REVIEW` marker and map it by `cue_id`, but it must never alter the primary
+subtitle, spoken text, or times. Annotations must never be fed to TTS or length
+checks. Do not claim silent machine attributes in SRT; SRT has no such
+non-standard metadata contract here.
+
+The analyzer may skip repeated expensive processing only when recorded
+approval/evidence matches the current input, text, times, configuration, profile,
+and relevant context for that type of check. It must always retain lightweight
+integrity checks and changed-neighbor-window checks. It must never skip an
+unresolved cue merely because it was attempted or changed, or skip missing actual
+measurement merely because a text-accept flag exists. Outdated evidence
+invalidates the skip, and an explicit force-recheck option must be available.
+
+**Готово, когда:** offline tests cover a mixed set of fits, changed-and-accepted,
+unresolved, error, and unverified cues; reports clearly distinguish these states
+while machine/TTS content remains unchanged; markers survive export through the
+sidecar; changed text, timing, profile, or context invalidates cached evidence;
+and analysis does not hide unresolved cues or remove them from the denominator.
+
+### Known bugs — fixes deferred by user
+
+**Audit note (12 September 2026; static code findings only):** the following
+issues are recorded for later triage. No fixes or tests are claimed here, and no
+automatic work has started.
+
+- **BUG-01 — P0:** `runner._request` catches `CancelledError`, so subsequent batch
+  calls may continue. A future fix must preserve unknown accounting and re-raise
+  cancellation. Add a fake-cancellation test proving that no later calls occur
+  and a checkpoint is not falsely marked complete.
+- **BUG-02 — P1:** legacy `utils.shorten_subtitles._execute` can lose an
+  incomplete child `run_state`, leaving the parent marked complete with exit 0.
+  A future fix must propagate incomplete status and nonzero exit distinctly from
+  an ordinary manual unresolved result. Test with a mocked child and no network.
+- **BUG-03 — P1:** legacy `shorten_subtitles._execute` overwrites
+  `runner.cost.projection_500` with `len(stages)` (four categories, not the
+  request count) and drops `applicable`/`inapplicable_reasons`. A future fix must
+  retain the runner projection and counters. Tests must compare the runner with
+  the CLI report and preserve reasons and real counts.
+
+The user will triage these bugs later; they do not take over the current order,
+and no automatic work is requested. Recheck them before any paid runs. The
+legacy diagnostic `timing_profile` identity limitation is tracked with SH-03;
+do not reopen SH-03, which is now implemented with frozen calibration identity
+checking in the new command. The legacy diagnostic interface is separate; the
+new `shorten_file` command does validate identity.
+
 ## Порядок работы
 
 SH-00 → SH-01 → SH-02 → SH-03 → SH-04 → SH-05 → SH-08.
 
 SH-06 — по результатам первого пилота. SH-07 обязателен перед очисткой, но не должен оттеснять задачи качества. SH-09 отложен.
+
+SH-11 accompanies SH-05 and must be implemented before SH-08; the main order and
+the current next task, SH-04, remain unchanged.
 
 ## Коммиты и гипотезы
 
@@ -228,6 +320,7 @@ SH-06 — по результатам первого пилота. SH-07 обя�
 результат и измеренные объёмы не выдавались за новую проверку реализации.
 
 Текущее решение на 12 сентября 2026: SH-00 и SH-01 реализованы и уже
-присутствовали в HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью
-проверена в рабочем дереве, но ещё не закоммичена; следующая — SH-03, а SH-04
-и все последующие задачи ожидают. Автоматический коммит не выполняется.
+присутствовали в HEAD `ec0cbaf` до этой задачи; SH-02 зафиксирована коммитом
+`c5bf383`; SH-03 реализована, но ещё
+не закоммичена; следующая — SH-04, а все последующие задачи ожидают.
+Автоматический коммит не выполняется.

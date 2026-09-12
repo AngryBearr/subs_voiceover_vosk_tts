@@ -62,12 +62,13 @@ def _tool_schema() -> Dict[str, Any]:
         "type": "function",
         "function": {
             "name": _TOOL_NAME,
-            "description": "Check Unicode Python code-point length against a character budget.",
+            "description": "Check Unicode Python code-point length against a character budget using the supplied length basis.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
                     "max_chars": {"type": "integer", "minimum": 0},
+                    "length_basis": {"type": "string", "enum": ["display_text", "normalized_tts_text"]},
                 },
                 "required": ["text", "max_chars"],
                 "additionalProperties": False,
@@ -404,9 +405,12 @@ async def request_json_detailed(
                             else:
                                 try:
                                     args = json.loads(arguments)
-                                    if not isinstance(args, dict) or set(args) != {"text", "max_chars"}:
+                                    if not isinstance(args, dict) or not {"text", "max_chars"}.issubset(args) or set(args) - {"text", "max_chars", "length_basis"}:
                                         raise ValueError
-                                    result = check_length(args["text"], args["max_chars"])
+                                    basis = args.get("length_basis", "display_text")
+                                    if basis not in {"display_text", "normalized_tts_text"}:
+                                        raise ValueError
+                                    result = check_length(args["text"], args["max_chars"], basis)
                                 except (TypeError, ValueError, json.JSONDecodeError):
                                     result = {"error": "invalid_tool_arguments"}
                             messages.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, ensure_ascii=False, separators=(",", ":"))})
