@@ -1,7 +1,7 @@
 {
   "analysis": {
     "avg_chars_per_sec": 13.0,
-    "max_mismatch_ratio": 1.3,
+    "max_mismatch_ratio": 1.5,
     "fail_on_critical": false
   },
   "normalization": {

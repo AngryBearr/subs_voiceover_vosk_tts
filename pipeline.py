@@ -93,7 +93,7 @@ def run_pipeline(
     analysis_result = analyze_subtitles_items(
         subs,
         avg_chars_per_sec=float(a_cfg.get("avg_chars_per_sec", 13.0)),
-        max_mismatch_ratio=float(a_cfg.get("max_mismatch_ratio", 1.3)),
+        max_mismatch_ratio=float(a_cfg.get("max_mismatch_ratio", 1.5)),
     )
     analyzed_items = analysis_result["items"]
     analyzed_json = json_dir / "subs_analyzed.json"

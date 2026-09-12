@@ -74,7 +74,7 @@ def _run_config(tmp_path: Path, *, max_repairs: int = 1, review_batch_size: int 
 
 def test_short_timing_is_denominator_only(tmp_path: Path) -> None:
     items = _items()
-    items[0]["text"] = ["verylongword verylongword"]
+    items[0]["text"] = ["verylongword unusualword"]
     planner = PlannerConfig(cps=5, max_speed=1.0, gap_ms=200)
     plans = plan_subtitles(items, planner)
     short_id = next(plan.cue_id for plan in plans if plan.status == "short_timing")
@@ -284,7 +284,7 @@ def test_projection_is_applicable_for_reviewed_manual_semantic_attempt(tmp_path:
 
 def test_projection_is_inapplicable_without_a_reviewed_candidate(tmp_path: Path) -> None:
     items = _items()
-    items[0]["text"] = ["verylongword verylongword"]
+    items[0]["text"] = ["verylongword unusualword"]
     planner = PlannerConfig(cps=5, max_speed=1.0, gap_ms=200)
     plans = plan_subtitles(items, planner)
     short_id = next(plan.cue_id for plan in plans if plan.status == "short_timing")

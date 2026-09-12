@@ -19,9 +19,33 @@ from utils.shortening_plan import (
 )
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["Да.", "Я не знаю.", "Пошли, пошли, пошли.", "Да, нет, да."],
+)
+def test_russian_short_examples_share_fit_and_overflow_classification(text: str) -> None:
+    fit = plan_subtitles([{"start": 0, "end": 2000, "text": text}], PlannerConfig())[0]
+    overflow = plan_subtitles([{"start": 0, "end": 100, "text": text}], PlannerConfig())[0]
+    assert fit.status == "fits"
+    assert fit.short_timing_risk is False
+    assert overflow.status in {"short_timing", "needs_shortening"}
+    assert overflow.short_timing_risk is True
+    assert overflow.words_count == len(text.split())
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(-1, 100), (0, 0), (100, 0), (False, 100), (0, True), ("0", 100)],
+)
+def test_non_integer_and_invalid_timing_values_are_invalid(start: object, end: object) -> None:
+    plan = plan_subtitles([{"start": start, "end": end, "text": "Да."}], PlannerConfig())[0]
+    assert plan.status == "invalid"
+    assert plan.invalid_timing is True
+
+
 def test_budget_boundaries_and_last_cue() -> None:
     items = [
-        {"start": 0, "end": 1000, "text": "x x " + "x" * 18},
+        {"start": 0, "end": 1000, "text": "x x x " + "x" * 18},
         {"start": 1200, "end": 2200, "text": "last"},
     ]
     plans = plan_subtitles(items, PlannerConfig())

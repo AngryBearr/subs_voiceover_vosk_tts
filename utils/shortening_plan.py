@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any
 
+from utils.text_metrics import classify_text, count_words, is_repetition_candidate
+
 
 @dataclass(frozen=True)
 class PlannerConfig:
@@ -57,6 +59,12 @@ class CuePlan:
     reduction_fraction: float
     severity: str
     status: str
+    words_count: int = 0
+    repetition_candidate: bool = False
+    short_timing_risk: bool = False
+    reason: str = "unknown"
+    estimate_source: str = "nominal_cps_estimate"
+    invalid_timing: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,6 +168,9 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
     for record in records:
         cue_id = record.cue_id
         if not record.timing_valid or not record.text_valid:
+            words_count = count_words(record.text) if record.text_valid else 0
+            repetition_candidate = is_repetition_candidate(record.text) if record.text_valid else False
+            invalid_timing = not record.timing_valid
             plans.append(
                 CuePlan(
                     cue_id=cue_id,
@@ -173,6 +184,10 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
                     reduction_fraction=0.0,
                     severity="invalid",
                     status="invalid",
+                    words_count=words_count,
+                    repetition_candidate=repetition_candidate,
+                    reason="invalid_timing" if invalid_timing else "invalid_text",
+                    invalid_timing=invalid_timing,
                 )
             )
             continue
@@ -193,12 +208,7 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
             if original_length
             else 0.0
         )
-        if original_length <= max_chars:
-            status = "fits"
-        elif len(record.text.split()) <= 2:
-            status = "short_timing"
-        else:
-            status = "needs_shortening"
+        classification = classify_text(record.text, max_chars)
         plans.append(
             CuePlan(
                 cue_id=cue_id,
@@ -210,8 +220,12 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
                 max_chars=max_chars,
                 required_ratio=required_ratio_float,
                 reduction_fraction=reduction,
-                severity=_severity(reduction, status),
-                status=status,
+                severity=_severity(reduction, classification.status),
+                status=classification.status,
+                words_count=classification.words_count,
+                repetition_candidate=classification.repetition_candidate,
+                short_timing_risk=classification.short_timing_risk,
+                reason=classification.reason,
             )
         )
     return plans
@@ -387,13 +401,28 @@ def analysis_for_text(
         raise TypeError("config must be a PlannerConfig")
     if not isinstance(text, str):
         raise TypeError("text must be a string")
+    same_text = text == plan.text
+    estimate_source = plan.estimate_source if same_text else "nominal_cps_estimate"
+    budget_basis = (
+        "measured_budget_estimate"
+        if estimate_source == "measured_budget_estimate"
+        else "stricter_character_budget"
+    )
     base: dict[str, Any] = {
         "duration_sec": None,
         "estimated_sec": None,
         "estimate_label": "nominal_cps_estimate",
         "estimate_basis": "nominal_cps_estimate",
-        "budget_label": "stricter_character_budget",
-        "budget_basis": "stricter_character_budget",
+        "budget_label": (
+            "measured_budget_estimate"
+            if estimate_source == "measured_budget_estimate"
+            else "stricter_character_budget"
+        ),
+        "budget_basis": (
+            "measured_budget_estimate"
+            if estimate_source == "measured_budget_estimate"
+            else "stricter_character_budget"
+        ),
         "max_chars": None,
         "budget_remaining_chars": None,
         "mismatch_ratio": None,
@@ -401,14 +430,21 @@ def analysis_for_text(
         "extended_duration_sec": None,
         "extended_mismatch_ratio": None,
         "used_gap_sec": None,
-        "words_count": None,
+        "words_count": count_words(text),
         "is_short_segment": False,
         "is_checked": False,
         "is_critical": False,
+        "available_ms": plan.available_ms,
+        "short_timing_risk": False,
+        "repetition_candidate": is_repetition_candidate(text),
+        "reason": "invalid_timing" if plan.invalid_timing else "invalid_text",
+        "estimate_source": estimate_source,
+        "invalid_timing": plan.invalid_timing,
     }
     if plan.status == "invalid" or plan.start is None or plan.end is None or plan.end <= plan.start:
         return base
 
+    assert plan.start is not None and plan.end is not None
     duration_ms = plan.end - plan.start
     duration_sec = duration_ms / 1000.0
     estimated_sec = len(text) / float(config.cps)
@@ -421,17 +457,19 @@ def analysis_for_text(
         extended_duration_sec = plan.available_ms / 1000.0
         extended_mismatch_ratio = estimated_sec / extended_duration_sec
         used_gap_sec = (plan.available_ms - duration_ms) / 1000.0
-    words_count = len(text.split())
+    classification = classify_text(text, plan.max_chars)
+    words_count = classification.words_count
+    short_timing_risk = classification.short_timing_risk
+    reason = classification.reason
     is_short_segment = duration_sec < 1.0
-    is_checked = not (is_short_segment and words_count < 3)
-    effective_ratio = (
-        extended_mismatch_ratio
-        if extended_mismatch_ratio is not None
-        else mismatch_ratio
-    )
+    is_checked = True
     # The acoustic character cap is intentionally stricter than the nominal CPS
     # estimate.  It is a diagnostic flag, not a semantic judgment.
-    is_critical = len(text) > plan.max_chars
+    is_critical = classification.status != "fits"
+    if same_text and plan.status == "fits" and plan.estimate_source == "vosk_measurement":
+        short_timing_risk = False
+        is_critical = False
+        reason = "actual_fit"
     base.update(
         {
             "duration_sec": duration_sec,
@@ -447,6 +485,14 @@ def analysis_for_text(
             "is_short_segment": is_short_segment,
             "is_checked": is_checked,
             "is_critical": is_critical,
+            "available_ms": plan.available_ms,
+            "short_timing_risk": short_timing_risk,
+            "repetition_candidate": classification.repetition_candidate,
+            "reason": reason,
+            "estimate_source": estimate_source,
+            "budget_label": budget_basis,
+            "budget_basis": budget_basis,
+            "invalid_timing": plan.invalid_timing,
         }
     )
     return base

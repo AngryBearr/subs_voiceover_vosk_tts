@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import functools
 import hashlib
 import json
 import math
@@ -35,6 +36,7 @@ from utils.opencode_clean import CleanOpenCodeServer
 from utils.shortening_plan import CuePlan, PlannerConfig, plan_subtitles, select_sample
 from utils.shortening_timing import apply_timing_profile
 from utils.shortening_runner import ModelSpec, RunConfig, run_trial
+from utils.shortening_audio import TEXT_MODES, verify_original_timing
 from utils.shortening_prompts import ARBITER_SYSTEM_PROMPT, GENERATOR_SYSTEM_PROMPT, PROMPT_VERSION
 
 
@@ -144,6 +146,8 @@ def _validate_args(args: argparse.Namespace) -> None:
             resolve_deepseek_token_limit(effort, args.max_tokens)
     if args.generators and len(set(args.generators)) != len(args.generators):
         raise ValueError("duplicate --generator choices are not allowed")
+    if isinstance(args.preflight_voice, bool) or not isinstance(args.preflight_voice, int) or args.preflight_voice < 0:
+        raise ValueError("preflight_voice must be a non-negative integer")
 
 
 def _source_hash(path: Path) -> str:
@@ -330,6 +334,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--deepseek-model", choices=DEEPSEEK_MODEL_CHOICES, default=DEEPSEEK_CURRENT_MODEL)
     parser.add_argument("--timing-profile", type=Path, help="apply an explicit measured-audio diagnostic profile")
     parser.add_argument("--selection-manifest", type=Path, help="freeze IDs from a prior selection manifest")
+    parser.add_argument("--preflight-model-path", type=Path, help="opt-in Vosk model used for original timing preflight")
+    parser.add_argument("--preflight-voice", type=int, default=8)
+    parser.add_argument("--preflight-text-mode", choices=list(TEXT_MODES), default="punctuation")
     return parser
 
 
@@ -347,6 +354,10 @@ async def _execute(args: argparse.Namespace, items: list[dict[str, Any]], plans:
         return 0
     manifest.update({"status": "running", "dry_run": False, "started_at": _utc_now()})
     _write(manifest_path, manifest)
+    planner = PlannerConfig(cps=args.cps, max_speed=args.max_speed, gap_ms=args.gap_ms)
+    if args.preflight_model_path is not None:
+        if not args.preflight_model_path.exists() or not args.preflight_model_path.is_dir():
+            raise FileNotFoundError(f"preflight model path does not exist or is not a directory: {args.preflight_model_path}")
     deepseek_needed = any(spec.provider == "deepseek" for spec in generators)
     if deepseek_needed:
         try:
@@ -375,17 +386,28 @@ async def _execute(args: argparse.Namespace, items: list[dict[str, Any]], plans:
         finally:
             if inherited_key is not None:
                 os.environ["DEEPSEEK_API_KEY"] = inherited_key
-        planner = PlannerConfig(cps=args.cps, max_speed=args.max_speed, gap_ms=args.gap_ms)
         config = RunConfig(gen_batch_size=args.generation_batch_size, review_batch_size=args.review_batch_size,
                            max_repairs=args.max_repairs, length_tools=args.length_tools)
         arbiter = ModelSpec("opencode", "openai/gpt-5.6-sol", "medium")
+        original_timing_verifier = (
+            functools.partial(
+                verify_original_timing,
+                model_path=args.preflight_model_path,
+                voice=args.preflight_voice,
+                speech_rate=planner.max_speed,
+                text_mode=args.preflight_text_mode,
+            )
+            if args.preflight_model_path is not None
+            else None
+        )
         reports: list[dict[str, Any]] = []
         for generator in generators:
             for repetition in range(1, args.repetitions + 1):
                 trial_dir = args.output_dir / _model_key(generator) / f"r{repetition}"
                 report = await run_trial(items=copy.deepcopy(items), plans=plans, target_ids=target_ids,
                                          planner_config=planner, run_config=config, generator=generator,
-                                         arbiter=arbiter, output_dir=trial_dir, request_fn=backend)
+                                         arbiter=arbiter, output_dir=trial_dir, request_fn=backend,
+                                         original_timing_verifier=original_timing_verifier)
                 report["source_manifest"].update({
                     "path": str(args.input), "absolute_path": str(args.input.resolve()),
                     "sha256": _source_hash(args.input), "parent_manifest": str(manifest_path.resolve()),

@@ -406,7 +406,7 @@ def build_demo() -> gr.Blocks:
                 do_analysis = gr.Checkbox(value=True, label="Analyze subtitles")
                 with gr.Row():
                     avg_chars_per_sec = gr.Number(value=13.0, label="Avg chars/sec")
-                    max_mismatch_ratio = gr.Number(value=1.3, label="Max mismatch ratio")
+                    max_mismatch_ratio = gr.Number(value=1.5, label="Max mismatch ratio")
 
                 gr.Markdown("## Subtitle preprocessing")
                 with gr.Row():

@@ -25,6 +25,7 @@ import soundfile as sf
 from scipy.optimize import nnls
 
 from utils.vosk_text import normalize_vosk_text
+from utils.text_metrics import count_words
 
 
 NORMALIZER_NAME = "vosk_punctuation_v1_no_ruaccent"
@@ -111,7 +112,7 @@ def duration_features(text: str) -> dict[str, float]:
         "char_count": normalized_char_count,
         "normalized_char_count": normalized_char_count,
         "nonspace_chars": float(sum(not character.isspace() for character in normalized)),
-        "word_count": float(len(normalized.split())),
+        "word_count": float(count_words(normalized)),
         "vowel_count": russian_vowel_count,
         "russian_vowel_count": russian_vowel_count,
         "punctuation_count": float(sum(character in _PUNCTUATION for character in normalized)),

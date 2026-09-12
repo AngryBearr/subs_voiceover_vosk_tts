@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from utils.vosk_text import normalize_vosk_text
+from utils.shortening_plan import CuePlan
+from utils.text_metrics import count_words
 
 MAX_SPEECH_RATE = 1.5
 RAW_PREPROCESSING = "raw_no_ruaccent"
@@ -409,12 +411,12 @@ def verify_audio(
             if status == "accepted":
                 assert final_audio is not None
                 assert final_text is not None
-                final_words_count = len(final_fields["display_text"].split()) if final_fields is not None else 0
+                final_words_count = count_words(final_fields["display_text"]) if final_fields is not None else 0
                 result["final_words_count"] = final_words_count
                 result["final_chars_count"] = len(final_fields["display_text"]) if final_fields is not None else 0
                 if final_fits:
                     result["timing_action"] = "fits"
-                elif final_words_count <= 2:
+                elif 1 <= final_words_count <= 3:
                     result["timing_action"] = "short_phrase_overlap_pending"
                     metadata["summary"]["short_final_overlap_count"] += 1
                 else:
@@ -441,6 +443,133 @@ def verify_audio(
     metadata["summary"]["physical_file_count"] = len(cache)
     _write_json(checkpoint, metadata)
     return metadata
+
+
+def verify_original_timing(
+    plans: list[CuePlan],
+    output_dir: Path,
+    *,
+    model_path: Path,
+    voice: int = 8,
+    speech_rate: float = 1.5,
+    synthesis_fn: SynthesisCallable | None = None,
+    text_mode: str = "punctuation",
+) -> dict[str, dict[str, Any]]:
+    """Measure only original text for short timing-risk plans."""
+    if not isinstance(plans, list) or not all(isinstance(plan, CuePlan) for plan in plans):
+        raise TypeError("plans must contain CuePlan objects")
+    cue_ids = [plan.cue_id for plan in plans]
+    if len(set(cue_ids)) != len(cue_ids):
+        raise ValueError("plans must not contain duplicate cue IDs")
+    for plan in plans:
+        valid_timing = (
+            isinstance(plan.start, int)
+            and not isinstance(plan.start, bool)
+            and isinstance(plan.end, int)
+            and not isinstance(plan.end, bool)
+            and plan.start >= 0
+            and plan.end > plan.start
+            and plan.available_ms > 0
+        )
+        if plan.status == "invalid" or plan.invalid_timing or not valid_timing:
+            raise ValueError(f"cannot preflight invalid timing plan: {plan.cue_id}")
+    if not plans:
+        return {}
+    if isinstance(speech_rate, bool):
+        raise ValueError("speech_rate must be finite")
+    try:
+        requested_rate = float(speech_rate)
+    except (TypeError, ValueError):
+        raise ValueError("speech_rate must be finite") from None
+    if not math.isfinite(requested_rate):
+        raise ValueError("speech_rate must be finite")
+    report = {
+        "records": [
+            {
+                "cue_id": plan.cue_id,
+                "position": plan.position,
+                "status": "short_timing",
+                "original": plan.text,
+                "final_text": plan.text,
+                "budget": {
+                    "available_ms": plan.available_ms,
+                    "start": plan.start,
+                    "end": plan.end,
+                    "max_chars": plan.max_chars,
+                },
+            }
+            for plan in plans
+        ],
+        "source_manifest": {"absolute_path": None, "sha256": None},
+    }
+    preflight_dir = output_dir / "preflight_audio"
+    measured = verify_audio(
+        report,
+        preflight_dir,
+        model_path=model_path,
+        voice=voice,
+        speech_rate=speech_rate,
+        limit=len(plans),
+        synthesis_fn=synthesis_fn,
+        text_mode=text_mode,
+    )
+    expected_ids = {plan.cue_id for plan in plans}
+    rows = measured.get("records")
+    if not isinstance(rows, list):
+        raise ValueError("preflight audio report records are invalid")
+    actual_ids = [row.get("cue_id") for row in rows if isinstance(row, dict)]
+    if set(actual_ids) != expected_ids or len(actual_ids) != len(expected_ids):
+        raise ValueError("preflight audio report cue IDs do not match plans")
+    if len(set(actual_ids)) != len(actual_ids):
+        raise ValueError("preflight audio report contains duplicate cue IDs")
+    audio_metadata = {
+        "speech_rate": measured.get("speech_rate"),
+        "voice": measured.get("voice"),
+        "model_path": measured.get("model_path"),
+        "preprocessing": measured.get("preprocessing"),
+    }
+    result: dict[str, dict[str, Any]] = {}
+    plan_by_id = {plan.cue_id: plan for plan in plans}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("cue_id") not in plan_by_id:
+            raise ValueError("preflight audio report contains an unknown cue ID")
+        cue_id = str(row["cue_id"])
+        plan = plan_by_id[cue_id]
+        has_error = row.get("error") is not None or row.get("error_type") is not None or row.get("status") == "error"
+        if row.get("original_text") is not None and row.get("original_text") != plan.text:
+            raise ValueError("preflight audio report original text does not match plan")
+        if row.get("position") is not None and row.get("position") != plan.position:
+            raise ValueError("preflight audio report position does not match plan")
+        returned_window = row.get("available_ms")
+        if returned_window is None and not has_error:
+            raise ValueError("preflight audio report is missing measurement window")
+        if returned_window is not None:
+            if isinstance(returned_window, bool) or not isinstance(returned_window, (int, float)):
+                raise ValueError("preflight audio report window is invalid")
+            try:
+                returned_window_float = float(returned_window)
+            except (OverflowError, TypeError, ValueError):
+                raise ValueError("preflight audio report window is invalid") from None
+            if not math.isfinite(returned_window_float) or returned_window_float != float(plan.available_ms):
+                raise ValueError("preflight audio report window does not match plan")
+        evidence: dict[str, Any] = {
+            "original": plan.text,
+            **audio_metadata,
+        }
+        if returned_window is not None:
+            evidence["available_ms"] = returned_window
+        original_audio = row.get("original")
+        if isinstance(original_audio, dict) and "duration_sec" in original_audio:
+            evidence["duration_sec"] = original_audio["duration_sec"]
+        if row.get("error") is not None:
+            evidence["error"] = row["error"]
+        if row.get("error_type") is not None:
+            evidence["error_type"] = row["error_type"]
+        if row.get("status") is not None:
+            evidence["status"] = row["status"]
+        evidence["audio"] = row
+        result[cue_id] = evidence
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:

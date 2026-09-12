@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from utils.shortening_plan import CuePlan, PlannerConfig
+from utils.text_metrics import classify_text
 
 
 PROFILE_SCHEMA_VERSION = 1
@@ -264,12 +265,8 @@ def _status_for(plan: CuePlan, max_chars: int) -> tuple[str, str, float]:
         return plan.status, plan.severity, plan.reduction_fraction
     length = len(plan.text)
     reduction = max(0.0, 1.0 - (max_chars / length)) if length else 0.0
-    if length <= max_chars:
-        status = "fits"
-    elif len(plan.text.split()) <= 2:
-        status = "short_timing"
-    else:
-        status = "needs_shortening"
+    classification = classify_text(plan.text, max_chars)
+    status = classification.status
     if status == "fits":
         severity = "fits"
     elif reduction <= 0.20:
@@ -330,8 +327,18 @@ def apply_timing_profile(
         if plan.status == "invalid":
             continue
         status, severity, reduction = _status_for(plan, maximum)
+        classification = classify_text(plan.text, maximum)
         result[plan.position if 0 <= plan.position < len(result) and result[plan.position].cue_id == cue_id else result.index(plan)] = replace(
-            plan, max_chars=maximum, reduction_fraction=reduction, severity=severity, status=status
+            plan,
+            max_chars=maximum,
+            reduction_fraction=reduction,
+            severity=severity,
+            status=status,
+            words_count=classification.words_count,
+            repetition_candidate=classification.repetition_candidate,
+            short_timing_risk=classification.short_timing_risk,
+            reason=classification.reason,
+            estimate_source="measured_budget_estimate",
         )
     return result
 

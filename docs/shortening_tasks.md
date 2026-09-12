@@ -1,7 +1,8 @@
 # Задачи: надёжное сокращение полного файла
 
-Статус на 10 сентября 2026: SH-00 выполнена в baseline-коммите; SH-01 и все
-остальные задачи остаются ожидающими и не начинались.
+Статус на 10 сентября 2026: SH-00 выполнена в baseline-коммите; SH-01
+реализована и проверена в рабочем дереве, но ещё не закоммичена; SH-02 и все
+последующие задачи ожидают.
 
 ## Цель
 
@@ -19,7 +20,15 @@
 
 **Проверка:** 175 тестов пройдены за 3.38 секунды, exit 0; compileall и две чистые metadata-проверки завершились успешно. Платных вызовов моделей не было. Состояние можно восстановить по указанному SHA.
 
-### [ ] SH-01. Общий анализатор и короткие фразы — P0
+### [x] SH-01. Общий анализатор и короткие фразы — P0
+
+**Implementation note (completed in the working tree; not committed):** The shared
+planner/analyzer use 1.5× acceleration and a 200 ms reserve, classify 1–3-word
+timing risks and exact-word repetitions, and provide opt-in original Vosk
+preflight via `--preflight-model-path` with voice/text-mode options. Actual fits
+need no LLM; failed or missing evidence remains unresolved. Fresh offline
+verification recorded 215 tests passed and compileall exit 0, using fake
+synthesis; no real Vosk or paid calls were made, and no commit was created.
 
 Зависит от SH-00. Основные файлы: `utils/analyze_text.py`, `utils/shortening_plan.py`.
 
@@ -184,5 +193,6 @@ SH-06 — по результатам первого пилота. SH-07 обя�
 сжимались; baseline-коммита ещё не было. Последний на тот момент тестовый
 результат и измеренные объёмы не выдавались за новую проверку реализации.
 
-Текущее решение: SH-00 зафиксирована указанным baseline-коммитом; SH-01 и все
-остальные задачи ожидают отдельного решения и не отмечены начатыми.
+Текущее решение: SH-00 зафиксирована указанным baseline-коммитом; SH-01
+реализована и проверена в рабочем дереве, но ещё не закоммичена; SH-02 и все
+остальные задачи ожидают отдельного решения.

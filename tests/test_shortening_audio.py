@@ -152,19 +152,52 @@ def test_long_final_overflow_needs_timing_revision(tmp_path: Path) -> None:
     model = tmp_path / "model"
     model.mkdir()
     result = verify_audio(
-        _report(_record(0, "accepted", original="original", final_text="one two three", available_ms=100)),
+        _report(_record(0, "accepted", original="original", final_text="one two three four", available_ms=100)),
         tmp_path / "audio",
         model_path=model,
-        synthesis_fn=_synthesizer({"original": 0.01, "one two three": 0.1209}),
+        synthesis_fn=_synthesizer({"original": 0.01, "one two three four": 0.1209}),
     )
 
     row = result["records"][0]
-    assert row["final_words_count"] == 3
+    assert row["final_words_count"] == 4
     assert row["timing_action"] == "needs_timing_revision"
     assert row["final_fits"] is False
     assert result["summary"]["actual_fits"] == 0
     assert result["summary"]["short_final_overlap_count"] == 0
     assert result["summary"]["long_final_overflow_count"] == 1
+
+
+def test_four_word_repetition_is_not_short_overlap(tmp_path: Path) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    result = verify_audio(
+        _report(_record(0, "accepted", original="original", final_text="go go go go", available_ms=100)),
+        tmp_path / "audio",
+        model_path=model,
+        synthesis_fn=_synthesizer({"original": 0.01, "go go go go": 0.1209}),
+    )
+
+    row = result["records"][0]
+    assert row["final_words_count"] == 4
+    assert row["timing_action"] == "needs_timing_revision"
+    assert result["summary"]["short_final_overlap_count"] == 0
+    assert result["summary"]["long_final_overflow_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("final_text", "action"),
+    [("go go go", "short_phrase_overlap_pending"), ("go go go go", "needs_timing_revision")],
+)
+def test_repetition_overlap_boundary_is_three_words(tmp_path: Path, final_text: str, action: str) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    result = verify_audio(
+        _report(_record(0, "accepted", original="original", final_text=final_text, available_ms=100)),
+        tmp_path / "audio",
+        model_path=model,
+        synthesis_fn=_synthesizer({"original": 0.01, final_text: 0.1209}),
+    )
+    assert result["records"][0]["timing_action"] == action
 
 
 def test_excludes_manual_and_caps_by_source_position(tmp_path: Path) -> None:
