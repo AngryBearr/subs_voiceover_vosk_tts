@@ -1,8 +1,8 @@
 # Задачи: надёжное сокращение полного файла
 
-Статус на 10 сентября 2026: SH-00 выполнена в baseline-коммите; SH-01
-реализована и проверена в рабочем дереве, но ещё не закоммичена; SH-02 и все
-последующие задачи ожидают.
+Статус на 12 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
+HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью проверена в
+рабочем дереве, но ещё не закоммичена; SH-03 и все последующие задачи ожидают.
 
 ## Цель
 
@@ -22,13 +22,14 @@
 
 ### [x] SH-01. Общий анализатор и короткие фразы — P0
 
-**Implementation note (completed in the working tree; not committed):** The shared
+**Implementation note (completed; historical verification):** The shared
 planner/analyzer use 1.5× acceleration and a 200 ms reserve, classify 1–3-word
 timing risks and exact-word repetitions, and provide opt-in original Vosk
 preflight via `--preflight-model-path` with voice/text-mode options. Actual fits
 need no LLM; failed or missing evidence remains unresolved. Fresh offline
 verification recorded 215 tests passed and compileall exit 0, using fake
-synthesis; no real Vosk or paid calls were made, and no commit was created.
+synthesis; no real Vosk or paid calls were made. The note that this verification
+was not committed was historical; SH-01 is present in HEAD `ec0cbaf`.
 
 Зависит от SH-00. Основные файлы: `utils/analyze_text.py`, `utils/shortening_plan.py`.
 
@@ -42,13 +43,46 @@ synthesis; no real Vosk or paid calls were made, and no commit was created.
 
 **Готово, когда:** анализатор и планировщик согласованы; тесты покрывают перечисленные примеры, неверные тайминги и различие прогноза с фактическим измерением. Новые платные запросы не нужны.
 
-### [ ] SH-02. Не терять всю пачку из-за одной плохой строки — P0
+### [x] SH-02. Не терять всю пачку из-за одной плохой строки — P0
 
 Зависит от SH-01. Основной файл: `utils/shortening_runner.py`.
 
 Перенести построчную проверку в обычное создание, проверку и исправление субтитров. Валидные соседние строки сохраняются; отсутствующие и неверные строки получают собственные ошибки. Чужие и неоднозначные идентификаторы не применяются. Повторно обрабатываются только нерешённые строки, в пределах заданного числа попыток.
 
 **Готово, когда:** из шести строк при одной ошибочной сохраняются пять корректных; принятые результаты не генерируются заново; ошибки протокола не выдаются за смысловые отказы. Проверяется без платных запросов.
+
+**Implementation note (SH-02, completed and fully verified in the working tree):**
+Ordinary generation, review, repair, and recheck now use bounded per-cue partial
+parsing and shared extra recovery rounds. Valid JSON rows with identifiable IDs
+are isolated, valid neighbours are checkpointed, and missing or invalid rows get
+their own errors. A malformed envelope or repeated raw JSON keys fails the whole
+response safely rather than allowing ambiguous application. Protocol failures
+are not treated as semantic impossibility. The resilience matrix covers
+six-row salvage, persistent malformed generation/review, mixed repair and
+recheck rows, protocol misuse, transport failures, per-request usage
+completeness, and source/export preservation.
+
+The `max_repairs` value is a shared 0..2 extra-round budget (at most one
+generation and one review request per cue in each extra round). Each repair
+counts a corrective generation request, including one caused by a protocol
+failure; review-only recovery does not spend a generation call. A malformed
+judge response rechecks the same candidate. Returned transport failures are
+recorded but are not automatically repeated.
+
+Mode-C parsers and selection logic were not modified. Arm A is still evaluated
+from the first generation attempt; it may remain unavailable if that attempt
+failed while B recovered. The shared request ledger now also records returned
+transport failures, so this change can affect failure reporting without changing
+mode-C parsing or selection.
+
+**Verification (12 September 2026):** `uv run --active --no-sync -m pytest -q`
+reported `257 passed in 3.40s`, exit 0. `uv run --active --no-sync -m
+compileall -q utils tests pipeline.py ui/gradio_app.py` exited 0. Both
+`utils.opencode_clean --check` modes (with and without `--with-length-tool`)
+exited 0 and returned `{"status": "ok"}`. All five CLI `--help` checks
+(`shorten_subtitles`, `shortening_experiment`, `shortening_replay`,
+`shortening_corpus`, and `vosk_calibration`) exited 0. `git diff HEAD --check`
+exited 0. No paid or real model/TTS calls were made.
 
 ### [ ] SH-03. Обычный запуск для одного файла и профиля — P0
 
@@ -193,6 +227,7 @@ SH-06 — по результатам первого пилота. SH-07 обя�
 сжимались; baseline-коммита ещё не было. Последний на тот момент тестовый
 результат и измеренные объёмы не выдавались за новую проверку реализации.
 
-Текущее решение: SH-00 зафиксирована указанным baseline-коммитом; SH-01
-реализована и проверена в рабочем дереве, но ещё не закоммичена; SH-02 и все
-остальные задачи ожидают отдельного решения.
+Текущее решение на 12 сентября 2026: SH-00 и SH-01 реализованы и уже
+присутствовали в HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью
+проверена в рабочем дереве, но ещё не закоммичена; следующая — SH-03, а SH-04
+и все последующие задачи ожидают. Автоматический коммит не выполняется.

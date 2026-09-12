@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from utils.llm_types import CallRecord, DetailedResponse
 from utils.opencode_transport import OpenCodePromptUsage
 from utils.shortening_plan import PlannerConfig, plan_subtitles
@@ -326,3 +328,118 @@ def test_persisted_cost_estimates_match_primary_summary(tmp_path: Path) -> None:
     assert estimates[1]["direct_cost_usd"] == 0.0
     assert estimates[2]["unknown"] is True
     assert estimates[2]["cost_usd"] is None
+
+
+def test_accounting_failure_is_per_request_when_other_requests_have_complete_usage(tmp_path: Path) -> None:
+    items, plans, planner, ids = _run_config(tmp_path)
+    selected = ids[:2]
+    usage = OpenCodePromptUsage(input_tokens=10, output_tokens=3)
+    invocation = 0
+
+    async def fake(spec: ModelSpec, system: str, user: str, schema: dict[str, Any], tools: bool) -> DetailedResponse:
+        nonlocal invocation
+        invocation += 1
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        target_ids = [row["cue_id"] for row in payload["targets"]]
+        if invocation == 2:
+            raise RuntimeError("lost response")
+        is_review = "verdict" in json.dumps(schema)
+        result = ([{"cue_id": cue_id, "verdict": "accept", "issues": [], "advice": ""} for cue_id in target_ids]
+                  if is_review else [{"cue_id": cue_id, "text": "short", "status": "ok"} for cue_id in target_ids])
+        return DetailedResponse(json.dumps({"results": result}), [
+            CallRecord(spec.provider, spec.model, spec.variant, "2026-09-10T00:00:00Z", 0.1, usage, "success"),
+        ])
+
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=selected, planner_config=planner,
+        run_config=RunConfig(gen_batch_size=1, review_batch_size=1, max_repairs=2),
+        generator=ModelSpec("deepseek", "m", "off"), arbiter=ModelSpec("deepseek", "m", "off"),
+        output_dir=tmp_path / "per-request-accounting", request_fn=fake,
+    ))
+    records = {record["cue_id"]: record for record in report["records"]}
+    assert records[selected[0]]["status"] == "accepted"
+    assert records[selected[1]]["status"] == "error"
+    assert report["summary"]["request_failures"][0]["accounting_incomplete"] is True
+    assert report["summary"]["accounting_complete"] is False
+    assert report["cost"]["direct"]["known_subtotal_usd"] > 0
+    assert report["cost"]["direct"]["known_subtotal_is_partial"] is True
+    assert "missing_usage" in report["cost"]["projection_500"]["inapplicable_reasons"]
+
+
+@pytest.mark.parametrize("failure_variant", ["error", "text_none"])
+def test_failed_response_with_complete_usage_keeps_accounting_complete_but_run_incomplete(
+    tmp_path: Path, failure_variant: str,
+) -> None:
+    items, plans, planner, ids = _run_config(tmp_path)
+    usage = OpenCodePromptUsage(input_tokens=10, output_tokens=3)
+    calls = 0
+
+    async def fake(spec: ModelSpec, system: str, user: str, schema: dict[str, Any], tools: bool) -> DetailedResponse:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        target_ids = [row["cue_id"] for row in payload["targets"]]
+        call = CallRecord(spec.provider, spec.model, spec.variant, "2026-09-10T00:00:00Z", 0.1, usage, "error")
+        if calls == 2:
+            return DetailedResponse(None, [call], "provider failed") if failure_variant == "error" else DetailedResponse(None, [call])
+        result = ([{"cue_id": cue_id, "text": "short", "status": "ok"} for cue_id in target_ids]
+                  if "verdict" not in json.dumps(schema) else
+                  [{"cue_id": cue_id, "verdict": "accept", "issues": [], "advice": ""} for cue_id in target_ids])
+        return DetailedResponse(json.dumps({"results": result}), [call])
+
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=[ids[0]], planner_config=planner,
+        run_config=RunConfig(max_repairs=0),
+        generator=ModelSpec("deepseek", "m", "off"), arbiter=ModelSpec("deepseek", "m", "off"),
+        output_dir=tmp_path / f"complete-failed-{failure_variant}", request_fn=fake,
+    ))
+    failure = report["summary"]["request_failures"][0]
+    assert report["run_state"] == "incomplete"
+    assert failure["accounting_incomplete"] is False
+    assert report["summary"]["accounting_complete"] is True
+    assert report["cost"]["direct"]["accounting_complete"] is True
+    assert "missing_usage" not in report["cost"]["projection_500"]["inapplicable_reasons"]
+
+
+@pytest.mark.parametrize("stage", ["generation", "review"])
+@pytest.mark.parametrize("failure_variant", ["exception", "error", "text_none"])
+def test_transport_failure_never_retries_and_preserves_successful_neighbor(
+    tmp_path: Path, stage: str, failure_variant: str,
+) -> None:
+    items, plans, planner, ids = _run_config(tmp_path)
+    selected = ids[:2]
+    usage = OpenCodePromptUsage(input_tokens=10, output_tokens=3)
+    failed = False
+
+    async def fake(spec: ModelSpec, system: str, user: str, schema: dict[str, Any], tools: bool) -> DetailedResponse:
+        nonlocal failed
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        target_ids = [row["cue_id"] for row in payload["targets"]]
+        is_review = "verdict" in json.dumps(schema)
+        current_stage = "review" if is_review else "generation"
+        if current_stage == stage and not failed:
+            failed = True
+            if failure_variant == "exception":
+                raise RuntimeError("transport failed")
+            call = CallRecord(spec.provider, spec.model, spec.variant, "2026-09-10T00:00:00Z", 0.1, usage, "error")
+            return DetailedResponse(None, [call], "provider failed" if failure_variant == "error" else None)
+        result = ([{"cue_id": cue_id, "text": "short", "status": "ok"} for cue_id in target_ids]
+                  if not is_review else
+                  [{"cue_id": cue_id, "verdict": "accept", "issues": [], "advice": ""} for cue_id in target_ids])
+        call = CallRecord(spec.provider, spec.model, spec.variant, "2026-09-10T00:00:00Z", 0.1, usage, "success")
+        return DetailedResponse(json.dumps({"results": result}), [call])
+
+    output = tmp_path / f"transport-{stage}-{failure_variant}"
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=selected, planner_config=planner,
+        run_config=RunConfig(gen_batch_size=1, review_batch_size=1, max_repairs=2),
+        generator=ModelSpec("deepseek", "m", "off"), arbiter=ModelSpec("deepseek", "m", "off"),
+        output_dir=output, request_fn=fake,
+    ))
+    request_rows = [json.loads(line) for line in (output / "requests.jsonl").read_text(encoding="utf-8").splitlines()
+                    if json.loads(line)["state"] == "start"]
+    assert not any(row["stage"] in {"repair", "recheck"} for row in request_rows)
+    records = {record["cue_id"]: record for record in report["records"]}
+    assert sum(record["status"] == "accepted" for record in records.values()) == 1
+    assert report["run_state"] == "incomplete"
+    assert report["summary"]["request_failures"]

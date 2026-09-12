@@ -324,7 +324,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--generator", action="append", choices=sorted(GENERATOR_CHOICES), dest="generators")
     parser.add_argument("--generation-batch-size", type=int, default=6)
     parser.add_argument("--review-batch-size", type=int, default=12)
-    parser.add_argument("--max-repairs", type=int, default=1)
+    parser.add_argument("--max-repairs", type=int, default=1,
+                        help="shared extra recovery-round budget (0..2) for generation and review")
     parser.add_argument("--length-tools", action="store_true")
     parser.add_argument("--cps", type=float, default=13.0)
     parser.add_argument("--gap-ms", type=int, default=200)

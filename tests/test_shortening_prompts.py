@@ -93,3 +93,21 @@ def test_parsers_reject_code_fences_unknown_top_level_and_non_strings() -> None:
     payload = {"results": [{"cue_id": "a", "text": "A", "status": True}]}
     with pytest.raises(ValueError):
         parse_generation(json.dumps(payload), ["a"])
+
+
+@pytest.mark.parametrize("parser", [parse_generation, parse_review])
+def test_strict_and_partial_parsers_fail_closed_on_repeated_raw_cue_id_keys(parser: object) -> None:
+    raw = '{"results":[{"cue_id":"a","cue_id":"a","text":"A","status":"ok"}]}'
+    if parser is parse_review:
+        raw = '{"results":[{"cue_id":"a","cue_id":"a","verdict":"accept","issues":[],"advice":""}]}'
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        parser(raw, ["a"])  # type: ignore[operator]
+
+
+@pytest.mark.parametrize("parser", [parse_generation, parse_review])
+def test_strict_parsers_validate_expected_id_type_and_shape(parser: object) -> None:
+    for expected_ids in (("a",), ["a", "a"], ["a", 1]):
+        with pytest.raises(ValueError):
+            parser('{"results":[]}', expected_ids)  # type: ignore[operator]
+    with pytest.raises(ValueError):
+        parser('{"results":{}}', ["a"])  # type: ignore[operator]

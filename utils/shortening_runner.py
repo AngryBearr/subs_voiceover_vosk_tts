@@ -31,12 +31,13 @@ from utils.shortening_plan import (
 from utils.shortening_prompts import (
     ARBITER_SYSTEM_PROMPT,
     GENERATOR_SYSTEM_PROMPT,
+    PartialParseResult,
     PROMPT_VERSION,
     build_generation_prompt,
     build_review_prompt,
     generation_schema,
-    parse_generation,
-    parse_review,
+    parse_generation_partial,
+    parse_review_partial,
     review_schema,
 )
 from utils.text_metrics import classify_text
@@ -215,14 +216,24 @@ async def _request(request_fn: RequestFunction, model: ModelSpec, system: str, u
     request_counts[stage] = request_counts.get(stage, 0) + 1
     _request_log(output_dir, request_id, stage, model, ids, system, user, schema, "start",
                  started_at=started_at, elapsed_sec=0.0)
+    caught_failure = False
     try:
         response = await request_fn(model, system, user, schema, allow_tool)
     except (Exception, asyncio.CancelledError) as exc:
+        caught_failure = True
         error = type(exc).__name__
         request_failures.append({"request_id": request_id, "stage": stage, "target_ids": list(ids),
                                  "model": asdict(model), "error": error, "started_at": started_at,
                                  "accounting_incomplete": True})
         response = DetailedResponse(None, [], error)
+    if not caught_failure and (response.error is not None or response.text is None):
+        response_accounting_complete = bool(response.calls) and bool(
+            summarize_costs(response.calls).get("accounting_complete", False)
+        )
+        request_failures.append({"request_id": request_id, "stage": stage, "target_ids": list(ids),
+                                 "model": asdict(model), "error": _safe_error(response, "transport"),
+                                 "started_at": started_at,
+                                 "accounting_incomplete": not response_accounting_complete})
     for call in response.calls:
         _record_call(call, stage=stage, target_ids=ids, model=model, output_dir=output_dir, request_id=request_id)
         stage_calls.setdefault(stage, []).append(call)
@@ -287,7 +298,13 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
     all_calls = [call for calls in stage_calls.values() for call in calls]
     direct = summarize_costs(all_calls)
     repairs = sum(1 for record in records for event in record["history"] if event.get("stage") == "repair")
-    accounting_complete = not request_failures and bool(direct.get("accounting_complete", True))
+    # A failed response is recorded even when the provider supplied a usage-bearing
+    # call record.  In that case the known ledger remains usable.  Failure entries
+    # without an explicit accounting flag are incomplete for safety, and each
+    # request is evaluated independently rather than against the run-wide ledger.
+    accounting_complete = bool(direct.get("accounting_complete", True)) and not any(
+        failure.get("accounting_incomplete", True) for failure in (request_failures or [])
+    )
     if not accounting_complete:
         direct["accounting_complete"] = False
         direct["known_subtotal_is_partial"] = True
@@ -593,200 +610,247 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
         and record_by_id[plan.cue_id].get("status") not in {"actual_fits", "timing_unverified"}
     ]
 
-    async def run_generation(ids: list[str], *, stage: str, feedback: dict[str, dict[str, Any]] | None = None) -> set[str]:
-        failed: set[str] = set()
+    generation_queue: list[str] = []
+    review_queue: list[str] = []
+
+    def can_retry(round_index: int | None) -> bool:
+        return run_config.max_repairs > 0 if round_index is None else round_index + 1 < run_config.max_repairs
+
+    def queue_unique(queue: list[str], cue_id: str) -> None:
+        if cue_id not in queue and record_by_id[cue_id].get("status") not in {"accepted", "actual_fits", "short_timing"}:
+            queue.append(cue_id)
+
+    def checkpoint() -> None:
+        report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter,
+                               output_dir, records, stage_calls, source_path, _source_hash(items),
+                               run_state="incomplete" if request_failures else "running",
+                               request_counts=request_counts, request_failures=request_failures)
+        _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
+
+    async def run_generation(
+        ids: list[str], *, stage: str, round_index: int | None,
+    ) -> list[str]:
+        review_ids: list[str] = []
+        feedback: dict[str, dict[str, Any]] = {}
+        if stage == "repair":
+            for cue_id in ids:
+                record = record_by_id[cue_id]
+                candidate = record.get("candidate")
+                feedback[cue_id] = {
+                    "candidate": candidate if isinstance(candidate, str) else "",
+                    "feedback": json.dumps({
+                        "issues": record.get("final_review", {}).get("issues", []) if isinstance(record.get("final_review"), dict) else [],
+                        "advice": record.get("final_review", {}).get("advice", "") if isinstance(record.get("final_review"), dict) else "",
+                        "overage": max(0, len(candidate) - plan_by_id[cue_id].max_chars) if isinstance(candidate, str) else 0,
+                        "failure": {
+                            "class": record.get("failure"),
+                            **({"error": next((event["error"] for event in reversed(record["history"])
+                                               if isinstance(event.get("error"), str)), None)}
+                               if any(isinstance(event.get("error"), str) for event in record["history"]) else {}),
+                        },
+                    }, ensure_ascii=False),
+                }
         for batch in make_batches(source_copy, plans, ids, planner_config, run_config.gen_batch_size, run_config.max_context_chars):
             context = _target_context(source_copy, plans, batch, planner_config)
             targets: list[dict[str, Any]] = []
             for cue_id in batch:
                 plan = plan_by_id[cue_id]
                 row: dict[str, Any] = {"cue_id": cue_id, "original": plan.text, "max_chars": plan.max_chars}
-                if feedback and cue_id in feedback:
-                    row.update({"prior_candidate": feedback[cue_id].get("candidate", ""), "feedback": feedback[cue_id].get("feedback", "")})
+                if stage == "repair":
+                    row.update({"prior_candidate": feedback[cue_id]["candidate"], "feedback": feedback[cue_id]["feedback"]})
                 targets.append(row)
-            user = build_generation_prompt(context, targets)
-            response = await _request(request_fn, generator, GENERATOR_SYSTEM_PROMPT, user, generation_schema(),
-                                      run_config.length_tools, stage=stage, ids=batch, output_dir=output_dir,
-                                      stage_calls=stage_calls, request_counts=request_counts,
-                                      request_failures=request_failures)
-            if response.error is not None or response.text is None:
-                for cue_id in batch:
-                    record_by_id[cue_id]["status"] = "error"
-                    record_by_id[cue_id]["failure"] = "transport"
-                    record_by_id[cue_id]["history"].append({"stage": stage, "status": "error", "failure": "transport"})
-                    failed.add(cue_id)
+            response = await _request(
+                request_fn, generator, GENERATOR_SYSTEM_PROMPT, build_generation_prompt(context, targets),
+                generation_schema(), run_config.length_tools, stage=stage, ids=batch, output_dir=output_dir,
+                stage_calls=stage_calls, request_counts=request_counts, request_failures=request_failures,
+            )
+            parsed: PartialParseResult | None = None
+            if response.error is None and response.text is not None:
+                parsed = parse_generation_partial(response.text, batch)
             else:
-                try:
-                    result = parse_generation(response.text, batch)
-                except Exception:
-                    result = None
-                if result is None:
-                    for cue_id in batch:
-                        record_by_id[cue_id]["status"] = "error"
-                        record_by_id[cue_id]["failure"] = "schema"
-                        record_by_id[cue_id]["history"].append({"stage": stage, "status": "error", "failure": "schema"})
-                        failed.add(cue_id)
-                else:
-                    for cue_id, row in result.items():
-                        record = record_by_id[cue_id]
-                        candidate = row["text"] if row["status"] == "ok" else record["original"]
-                        record["candidate"] = candidate
-                        local = _local_check(candidate, plan_by_id[cue_id])
-                        attempt_number = sum(1 for event in record["history"] if event.get("stage") == stage)
-                        record["history"].append({"stage": stage, "attempt": attempt_number,
-                                                  "generator_status": row["status"], "candidate": candidate, "local": local})
-                        record["generator_status"] = row["status"]
-                        # A successful row supersedes any stale outcome for the prior candidate,
-                        # while the immutable history retains that prior outcome.
-                        record.pop("failure", None)
+                parsed = None
+            for cue_id in batch:
+                record = record_by_id[cue_id]
+                attempt = sum(1 for event in record["history"] if event.get("stage") == stage) + 1
+                prior_candidate = record.get("candidate")
+                response_issues = parsed.response_issues if parsed is not None else []
+                if response.error is not None or response.text is None:
+                    record["status"] = "error"
+                    record["failure"] = "transport"
+                    record["history"].append({"stage": stage, "attempt": attempt, "status": "error",
+                                              "failure": "transport", "response_issues": response_issues})
+                    continue
+                assert parsed is not None
+                if cue_id in parsed.errors:
+                    reason = parsed.errors[cue_id]
+                    record["status"] = "error"
+                    record["failure"] = "schema"
+                    record["history"].append({"stage": stage, "attempt": attempt, "status": "error",
+                                              "failure": "schema", "error": reason,
+                                              "response_issues": response_issues})
+                    if can_retry(round_index):
+                        queue_unique(generation_queue, cue_id)
+                    continue
+                row = parsed.results[cue_id]
+                candidate = row["text"] if row["status"] == "ok" else record["original"]
+                local = _local_check(candidate, plan_by_id[cue_id])
+                record["candidate"] = candidate
+                # Any successfully parsed generation row supersedes the prior
+                # candidate, including protocol and local-validation failures.
+                # The old judgment remains available in history only.
+                record["final_review"] = None
+                record["generator_status"] = row["status"]
+                record["history"].append({"stage": stage, "attempt": attempt,
+                                          "generator_status": row["status"], "candidate": candidate,
+                                          "local": local, "response_issues": response_issues})
+                if row["status"] == "cannot_shorten":
+                    if row["text"] not in ("", record["original"]):
+                        # The claimed replacement is protocol data, never a candidate.
+                        record["candidate"] = prior_candidate if isinstance(prior_candidate, str) else None
+                        record["history"][-1]["candidate"] = record["original"]
+                        record["history"][-1]["local"] = _local_check(record["original"], plan_by_id[cue_id])
+                        record["failure"] = "protocol_misuse"
+                        record["history"][-1]["error"] = "cannot_shorten returned changed text"
+                        record["status"] = "manual"
+                        record["final_text"] = record["original"]
+                        if can_retry(round_index):
+                            queue_unique(generation_queue, cue_id)
+                    elif stage == "repair":
+                        record["failure"] = "cannot_shorten"
+                        record["status"] = "manual"
+                        record["final_text"] = record["original"]
+                    else:
+                        record["failure"] = "cannot_shorten"
                         record["status"] = "pending"
-                        record["final_review"] = None
-                        if row["status"] == "cannot_shorten":
-                            if row.get("text") not in (None, "", record["original"]):
-                                record["failure"] = "protocol_misuse"
-                                record["status"] = "manual"
-                            else:
-                                record["failure"] = "cannot_shorten"
-                        elif not local["valid"]:
-                            record["status"] = "error"
-                            record["failure"] = "schema"
-                            failed.add(cue_id)
-            report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
-                                   records, stage_calls, source_path, _source_hash(items),
-                                   run_state="incomplete" if request_failures else "running",
-                                   request_counts=request_counts, request_failures=request_failures)
-            _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
-        return failed
+                        queue_unique(review_ids, cue_id)
+                elif not local["valid"]:
+                    record["status"] = "error"
+                    record["failure"] = "schema"
+                    record["history"][-1]["error"] = "generated candidate failed local format validation"
+                    if can_retry(round_index):
+                        queue_unique(generation_queue, cue_id)
+                else:
+                    # A valid new candidate clears only stale schema state; its complete history remains.
+                    record.pop("failure", None)
+                    record["status"] = "pending"
+                    record["final_review"] = None
+                    queue_unique(review_ids, cue_id)
+            checkpoint()
+        return review_ids
 
-    generation_failed = await run_generation(eligible_ids, stage="generation")
-    reviewable = [cue_id for cue_id in eligible_ids if cue_id not in generation_failed]
-    review_results: dict[str, dict[str, Any]] = {}
-
-    def apply_judgment(cue_id: str, verdict: dict[str, Any], *, initial: bool) -> None:
+    def apply_review_result(
+        cue_id: str, verdict: dict[str, Any], *, initial: bool, round_index: int | None,
+        next_generation: list[str],
+    ) -> None:
         record = record_by_id[cue_id]
-        candidate = record["candidate"] if record.get("failure") != "cannot_shorten" else record["original"]
-        local = _local_check(candidate, plan_by_id[cue_id])
         if record.get("failure") == "protocol_misuse":
             record["status"] = "manual"
             record["final_text"] = record["original"]
-        elif verdict["verdict"] == "accept" and local["valid"] and local["within_length"]:
+            return
+        candidate = record["original"] if record.get("failure") == "cannot_shorten" else record.get("candidate", record["original"])
+        local = _local_check(candidate, plan_by_id[cue_id])
+        record["final_review"] = verdict
+        if verdict["verdict"] == "accept" and local["valid"] and local["within_length"]:
+            record.pop("failure", None)
             record["status"] = "accepted"
             record["final_text"] = candidate
             if initial:
                 record["initial_accepted"] = True
-        elif verdict["verdict"] != "impossible" and run_config.max_repairs:
+        elif verdict["verdict"] == "impossible":
+            record["status"] = "manual"
+            record["failure"] = "semantic"
+            record["final_text"] = record["original"]
+        elif can_retry(round_index):
+            if record.get("failure") == "schema":
+                record.pop("failure", None)
             record["status"] = "pending"
+            queue_unique(next_generation, cue_id)
         else:
             record["status"] = "manual"
-            record["failure"] = "semantic" if verdict["verdict"] == "impossible" else _reason_for(plan_by_id[cue_id], candidate, local, verdict["verdict"])
+            record["failure"] = _reason_for(plan_by_id[cue_id], candidate, local, verdict["verdict"])
+            record["final_text"] = record["original"]
 
-    for batch in make_batches(source_copy, plans, reviewable, planner_config, run_config.review_batch_size, run_config.max_context_chars):
-        context = _target_context(source_copy, plans, batch, planner_config)
-        targets = []
-        for cue_id in batch:
-            record = record_by_id[cue_id]
-            candidate = record["original"] if record.get("failure") in {"cannot_shorten", "protocol_misuse"} else record["candidate"]
-            targets.append({"cue_id": cue_id, "original": record["original"], "candidate": candidate,
-                            "max_chars": record["budget"]["max_chars"], "actual_chars": len(candidate)})
-        user = build_review_prompt(context, targets)
-        response = await _request(request_fn, arbiter, ARBITER_SYSTEM_PROMPT, user, review_schema(), False,
-                                  stage="review", ids=batch, output_dir=output_dir, stage_calls=stage_calls,
-                                  request_counts=request_counts, request_failures=request_failures)
-        if response.error is not None or response.text is None:
-            for cue_id in batch:
-                record_by_id[cue_id]["status"] = "error"
-                record_by_id[cue_id]["failure"] = "transport"
-                record_by_id[cue_id]["history"].append({"stage": "review", "status": "error", "failure": "transport"})
-        else:
-            try:
-                parsed = parse_review(response.text, batch)
-            except Exception:
-                parsed = None
-            if parsed is None:
-                for cue_id in batch:
-                    record_by_id[cue_id]["status"] = "error"
-                    record_by_id[cue_id]["failure"] = "schema"
-                    record_by_id[cue_id]["history"].append({"stage": "review", "status": "error", "failure": "schema"})
-            else:
-                review_results.update(parsed)
-                for cue_id, verdict in parsed.items():
-                    record_by_id[cue_id]["final_review"] = verdict
-                    record_by_id[cue_id]["history"].append({"stage": "review", "judgment": verdict})
-                    apply_judgment(cue_id, verdict, initial=True)
-        report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
-                               records, stage_calls, source_path, _source_hash(items),
-                               run_state="incomplete" if request_failures else "running",
-                               request_counts=request_counts, request_failures=request_failures)
-        _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
-
-    repair_ids = [cue_id for cue_id in reviewable
-                  if cue_id in review_results and record_by_id[cue_id]["status"] == "pending"]
-
-    for repair_attempt in range(run_config.max_repairs):
-        if not repair_ids:
-            break
-        feedback = {
-            cue_id: {"candidate": record_by_id[cue_id]["candidate"],
-                     "feedback": json.dumps({"issues": record_by_id[cue_id].get("final_review", {}).get("issues", []),
-                                              "advice": record_by_id[cue_id].get("final_review", {}).get("advice", ""),
-                                               "overage": max(0, len(record_by_id[cue_id]["candidate"]) - plan_by_id[cue_id].max_chars)}, ensure_ascii=False)}
-            for cue_id in repair_ids
-        }
-        failed = await run_generation(repair_ids, stage="repair", feedback=feedback)
-        changed = [cue_id for cue_id in repair_ids if cue_id not in failed and record_by_id[cue_id].get("failure") not in {"cannot_shorten", "protocol_misuse"}]
-        final_ids: list[str] = []
-        for cue_id in changed:
-            candidate = record_by_id[cue_id]["candidate"]
-            local = _local_check(candidate, plan_by_id[cue_id])
-            if not local["valid"]:
-                record_by_id[cue_id]["status"] = "manual"
-                record_by_id[cue_id]["failure"] = "schema"
-            else:
-                final_ids.append(cue_id)
-        next_repair: list[str] = []
-        for batch in make_batches(source_copy, plans, final_ids, planner_config, run_config.review_batch_size, run_config.max_context_chars):
+    async def run_review(
+        ids: list[str], *, stage: str, initial: bool, round_index: int | None,
+    ) -> tuple[list[str], list[str]]:
+        next_generation: list[str] = []
+        next_review: list[str] = []
+        for batch in make_batches(source_copy, plans, ids, planner_config, run_config.review_batch_size, run_config.max_context_chars):
             context = _target_context(source_copy, plans, batch, planner_config)
-            targets = [{"cue_id": cue_id, "original": record_by_id[cue_id]["original"],
-                        "candidate": record_by_id[cue_id]["candidate"], "max_chars": plan_by_id[cue_id].max_chars,
-                        "actual_chars": len(record_by_id[cue_id]["candidate"])} for cue_id in batch]
-            response = await _request(request_fn, arbiter, ARBITER_SYSTEM_PROMPT, build_review_prompt(context, targets),
-                                      review_schema(), False, stage="recheck", ids=batch, output_dir=output_dir,
-                                      stage_calls=stage_calls, request_counts=request_counts,
-                                      request_failures=request_failures)
-            parsed_batch: dict[str, dict[str, Any]] | None = None
-            if response.error is None and response.text is not None:
-                try:
-                    parsed_batch = parse_review(response.text, batch)
-                except Exception:
-                    parsed_batch = None
+            targets: list[dict[str, Any]] = []
             for cue_id in batch:
-                verdict = parsed_batch.get(cue_id) if parsed_batch is not None else None
-                record_by_id[cue_id]["history"].append({"stage": "recheck", "judgment": verdict})
-                if verdict is None:
-                    record_by_id[cue_id]["status"] = "error"
-                    record_by_id[cue_id]["failure"] = "schema" if response.error is None else "transport"
+                record = record_by_id[cue_id]
+                candidate = record["original"] if record.get("failure") in {"cannot_shorten", "protocol_misuse"} else record.get("candidate", record["original"])
+                targets.append({"cue_id": cue_id, "original": record["original"], "candidate": candidate,
+                                "max_chars": record["budget"]["max_chars"], "actual_chars": len(candidate)})
+            response = await _request(
+                request_fn, arbiter, ARBITER_SYSTEM_PROMPT, build_review_prompt(context, targets), review_schema(), False,
+                stage=stage, ids=batch, output_dir=output_dir, stage_calls=stage_calls,
+                request_counts=request_counts, request_failures=request_failures,
+            )
+            parsed: PartialParseResult | None = (
+                parse_review_partial(response.text, batch)
+                if response.error is None and response.text is not None
+                else None
+            )
+            for cue_id in batch:
+                record = record_by_id[cue_id]
+                attempt = sum(1 for event in record["history"] if event.get("stage") == stage) + 1
+                response_issues = parsed.response_issues if parsed is not None else []
+                if response.error is not None or response.text is None:
+                    record["status"] = "error"
+                    record["failure"] = "transport"
+                    record["history"].append({"stage": stage, "attempt": attempt, "status": "error",
+                                              "failure": "transport", "response_issues": response_issues})
+                elif parsed is not None and cue_id in parsed.errors:
+                    record["status"] = "error"
+                    record["failure"] = "schema"
+                    record["history"].append({"stage": stage, "attempt": attempt, "status": "error",
+                                              "failure": "schema", "error": parsed.errors[cue_id],
+                                              "response_issues": response_issues})
+                    if can_retry(round_index):
+                        queue_unique(next_review, cue_id)
                 else:
-                    review_results[cue_id] = verdict
-                    record_by_id[cue_id]["final_review"] = verdict
-                    local = _local_check(record_by_id[cue_id]["candidate"], plan_by_id[cue_id])
-                    if verdict["verdict"] == "accept" and local["valid"] and local["within_length"]:
-                        record_by_id[cue_id]["status"] = "accepted"
-                        record_by_id[cue_id]["final_text"] = record_by_id[cue_id]["candidate"]
-                    else:
-                        record_by_id[cue_id]["status"] = "manual"
-                        record_by_id[cue_id]["failure"] = "timing" if not local["within_length"] else "semantic"
-                        if repair_attempt + 1 < run_config.max_repairs and verdict["verdict"] != "impossible":
-                            next_repair.append(cue_id)
-            report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
-                                   records, stage_calls, source_path, _source_hash(items),
-                                   run_state="incomplete" if request_failures else "running",
-                                   request_counts=request_counts, request_failures=request_failures)
-            _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
-        repair_ids = next_repair
+                    assert parsed is not None
+                    verdict = parsed.results[cue_id]
+                    record["history"].append({"stage": stage, "attempt": attempt,
+                                              "judgment": verdict, "response_issues": response_issues})
+                    apply_review_result(cue_id, verdict, initial=initial, round_index=round_index,
+                                        next_generation=next_generation)
+            checkpoint()
+        return next_generation, next_review
+
+    initial_review = await run_generation(eligible_ids, stage="generation", round_index=None)
+    repair_from_review, review_recovery = await run_review(
+        initial_review, stage="review", initial=True, round_index=None,
+    )
+    generation_queue = list(dict.fromkeys(generation_queue + repair_from_review))
+    review_queue = list(dict.fromkeys(review_queue + review_recovery))
+
+    for round_index in range(run_config.max_repairs):
+        # Snapshot both queues: work discovered during this round belongs to the next round,
+        # except that a newly generated candidate receives its review in this same round.
+        generation_ids = list(generation_queue)
+        review_ids = list(review_queue)
+        generation_queue = []
+        review_queue = []
+        if not generation_ids and not review_ids:
+            break
+        generated_review = await run_generation(generation_ids, stage="repair", round_index=round_index)
+        review_ids = list(dict.fromkeys(generated_review + review_ids))
+        next_generation, next_review = await run_review(
+            review_ids, stage="recheck", initial=False, round_index=round_index,
+        )
+        generation_queue = list(dict.fromkeys(generation_queue + next_generation))
+        review_queue = list(dict.fromkeys(review_queue + next_review))
 
     for record in records:
-        if record["status"] in {"pending", "short_timing"}:
-            record["status"] = "manual" if record["status"] == "pending" else "short_timing"
+        if record["status"] == "pending":
+            candidate = record.get("candidate") if isinstance(record.get("candidate"), str) else record["original"]
+            local = _local_check(candidate, plan_by_id[record["cue_id"]])
+            verdict = record.get("final_review", {}).get("verdict") if isinstance(record.get("final_review"), dict) else None
+            record["status"] = "manual"
+            record["failure"] = _reason_for(plan_by_id[record["cue_id"]], candidate, local, verdict)
         if record["status"] != "accepted":
             record["final_text"] = record["original"]
     final_report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
