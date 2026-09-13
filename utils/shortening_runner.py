@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import json
@@ -15,6 +14,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from filelock import FileLock, Timeout
 
 from utils.json_to_srt import json_to_srt
 from utils.llm_types import CallRecord, DetailedResponse
@@ -40,6 +41,23 @@ from utils.shortening_prompts import (
     parse_review_partial,
     review_schema,
 )
+from utils.shortening_resume import (
+    RunJournal,
+    ResumeError,
+    UnknownRequestsError,
+    append_jsonl,
+    atomic_json,
+    canonical_hash,
+    ensure_manifest,
+    load_baseline,
+    save_baseline,
+    RUNNER_ALGORITHM_VERSION,
+)
+
+# Compatibility aliases used by the pre-SH04 experiment runner.  The durable
+# implementations are shared so legacy consumers retain their public shape.
+_atomic_json = atomic_json
+_append_jsonl = append_jsonl
 from utils.text_metrics import classify_text
 
 
@@ -73,24 +91,6 @@ RequestFunction = Callable[[ModelSpec, str, str, dict[str, Any], bool], Awaitabl
 OriginalTimingVerifier = Callable[[list[CuePlan], Path], dict[str, dict[str, Any]]]
 
 
-def _json_default(value: Any) -> Any:
-    if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
-    return str(value)
-
-
-def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-    os.close(handle)
-    temporary = Path(raw)
-    try:
-        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=_json_default) + "\n", encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def _atomic_text(path: Path, value: str) -> None:
     handle, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     os.close(handle)
@@ -102,13 +102,6 @@ def _atomic_text(path: Path, value: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _append_jsonl(path: Path, value: Any) -> None:
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(value, ensure_ascii=False, default=_json_default, separators=(",", ":")) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-
-
 def _safe_error(response: DetailedResponse | None, fallback: str) -> str:
     if response is None or response.error is None:
         return fallback
@@ -116,9 +109,10 @@ def _safe_error(response: DetailedResponse | None, fallback: str) -> str:
 
 
 def _record_call(call: CallRecord, *, stage: str, target_ids: list[str], model: ModelSpec,
-                 output_dir: Path, request_id: str) -> None:
+                 output_dir: Path, request_id: str, call_index: int = 0) -> None:
     payload = {
         "request_id": request_id,
+        "call_index": call_index,
         "stage": stage,
         "target_ids": list(target_ids),
         "model": asdict(model),
@@ -126,11 +120,51 @@ def _record_call(call: CallRecord, *, stage: str, target_ids: list[str], model: 
         "record": asdict(call),
         "cost_estimate": estimate_record_cost(call),
     }
-    _append_jsonl(output_dir / "calls.jsonl", payload)
+    append_jsonl(output_dir / "calls.jsonl", payload)
 
 
 def _source_hash(items: list[dict[str, Any]]) -> str:
-    return hashlib.sha256(json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return canonical_hash(items)
+
+
+def _module_hashes() -> dict[str, str]:
+    names = (
+        "shortening_runner.py", "shortening_resume.py", "shortening_plan.py",
+        "shortening_prompts.py", "length_check.py", "text_metrics.py", "vosk_text.py",
+        "shortening_costs.py",
+    )
+    root = Path(__file__).parent
+    return {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in names
+    }
+
+
+def _manifest_contract(
+    items: list[dict[str, Any]], plans: list[CuePlan], target_ids: list[str],
+    planner_config: PlannerConfig, run_config: RunConfig, generator: ModelSpec,
+    arbiter: ModelSpec, report_metadata: dict[str, Any] | None,
+    has_original_timing_verifier: bool,
+) -> dict[str, Any]:
+    return {
+        "source": {"items": copy.deepcopy(items), "sha256": _source_hash(items)},
+        "initial_plans": [_plan_payload(plan) for plan in plans],
+        "target_ids": list(target_ids),
+        "planner": asdict(planner_config),
+        "run": asdict(run_config),
+        "models": {"generator": asdict(generator), "arbiter": asdict(arbiter)},
+        "report_metadata": copy.deepcopy(report_metadata) if report_metadata is not None else None,
+        "has_original_timing_verifier": has_original_timing_verifier,
+        "prompt_version": PROMPT_VERSION,
+        "prompts": {
+            "generator_system": GENERATOR_SYSTEM_PROMPT,
+            "arbiter_system": ARBITER_SYSTEM_PROMPT,
+            "generation_schema": generation_schema(),
+            "review_schema": review_schema(),
+        },
+        "runner_algorithm_version": RUNNER_ALGORITHM_VERSION,
+        "module_sha256": _module_hashes(),
+    }
 
 
 def _target_context(items: list[dict[str, Any]], plans: list[CuePlan], ids: list[str], planner: PlannerConfig) -> list[dict[str, Any]]:
@@ -188,8 +222,9 @@ def _reason_for(plan: CuePlan, candidate: str, local: dict[str, Any], verdict: s
 
 def _request_log(output_dir: Path, request_id: str, stage: str, model: ModelSpec,
                  target_ids: list[str], system: str, user: str, schema: dict[str, Any],
-                 state: str, text: str | None = None, error: str | None = None,
-                 started_at: str | None = None, elapsed_sec: float | None = None) -> None:
+                 allow_tool: bool, state: str, text: str | None = None, error: str | None = None,
+                 started_at: str | None = None, elapsed_sec: float | None = None,
+                 call_count: int | None = None, failure: dict[str, Any] | None = None) -> None:
     # Prompts are saved for reproduction, but credentials and model reasoning are
     # never put into this record; the response field contains only final text.
     payload: dict[str, Any] = {
@@ -197,53 +232,71 @@ def _request_log(output_dir: Path, request_id: str, stage: str, model: ModelSpec
         "target_ids": list(target_ids), "state": state,
     }
     if state == "start":
-        payload.update({"system_prompt": system, "user_prompt": user, "output_schema": schema})
+        payload.update({"system_prompt": system, "user_prompt": user, "output_schema": schema,
+                        "allow_tool": allow_tool})
     else:
-        payload.update({"text": text, "error": error})
+        payload.update({"text": text, "error": error, "call_count": call_count or 0,
+                        "failure": copy.deepcopy(failure)})
     if started_at is not None:
         payload["started_at"] = started_at
     if elapsed_sec is not None:
         payload["elapsed_sec"] = elapsed_sec
-    _append_jsonl(output_dir / "requests.jsonl", payload)
+    append_jsonl(output_dir / "requests.jsonl", payload)
 
 
 async def _request(request_fn: RequestFunction, model: ModelSpec, system: str, user: str,
                    schema: dict[str, Any], allow_tool: bool, *, stage: str,
                    ids: list[str], output_dir: Path, stage_calls: dict[str, list[CallRecord]],
-                   request_counts: dict[str, int], request_failures: list[dict[str, Any]]) -> DetailedResponse:
-    request_id = uuid.uuid4().hex
+                   request_counts: dict[str, int], request_failures: list[dict[str, Any]],
+                   journal: RunJournal | None = None,
+                    records: list[dict[str, Any]] | None = None,
+                    replayed_counter: list[int] | None = None) -> DetailedResponse:
+    descriptor = {
+        "stage": stage, "model": asdict(model), "target_ids": list(ids),
+        "system_prompt": system, "user_prompt": user, "output_schema": schema,
+        "allow_tool": allow_tool,
+    }
+    step = journal.next_request(descriptor) if journal is not None else None
+    if step is not None and step.replayed:
+        assert step.response is not None
+        if replayed_counter is not None:
+            replayed_counter[0] += 1
+        return step.response
+    if journal is not None:
+        journal.before_live(records if records is not None else [])
+    request_id = step.request_id if step is not None else uuid.uuid4().hex
     started_at = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()
     request_counts[stage] = request_counts.get(stage, 0) + 1
-    _request_log(output_dir, request_id, stage, model, ids, system, user, schema, "start",
+    _request_log(output_dir, request_id, stage, model, ids, system, user, schema, allow_tool, "start",
                  started_at=started_at, elapsed_sec=0.0)
-    caught_failure = False
+    failure: dict[str, Any] | None = None
     try:
         response = await request_fn(model, system, user, schema, allow_tool)
-    except (Exception, asyncio.CancelledError) as exc:
-        caught_failure = True
+    except Exception as exc:
         error = type(exc).__name__
-        request_failures.append({"request_id": request_id, "stage": stage, "target_ids": list(ids),
-                                 "model": asdict(model), "error": error, "started_at": started_at,
-                                 "accounting_incomplete": True})
         response = DetailedResponse(None, [], error)
-    if not caught_failure and (response.error is not None or response.text is None):
+    if response.error is not None or response.text is None:
         response_accounting_complete = bool(response.calls) and bool(
             summarize_costs(response.calls).get("accounting_complete", False)
         )
-        request_failures.append({"request_id": request_id, "stage": stage, "target_ids": list(ids),
-                                 "model": asdict(model), "error": _safe_error(response, "transport"),
-                                 "started_at": started_at,
-                                 "accounting_incomplete": not response_accounting_complete})
-    for call in response.calls:
-        _record_call(call, stage=stage, target_ids=ids, model=model, output_dir=output_dir, request_id=request_id)
+        failure = {"request_id": request_id, "stage": stage, "target_ids": list(ids),
+                   "model": asdict(model), "error": _safe_error(response, "transport"),
+                   "started_at": started_at,
+                   "accounting_incomplete": not response_accounting_complete}
+    for call_index, call in enumerate(response.calls):
+        _record_call(call, stage=stage, target_ids=ids, model=model, output_dir=output_dir,
+                     request_id=request_id, call_index=call_index)
         stage_calls.setdefault(stage, []).append(call)
     elapsed = time.monotonic() - started
-    if request_failures and request_failures[-1].get("request_id") == request_id:
-        request_failures[-1]["elapsed_sec"] = elapsed
-    _request_log(output_dir, request_id, stage, model, ids, system, user, schema, "complete",
-                 response.text if response.error is None else None, response.error,
-                 started_at=started_at, elapsed_sec=elapsed)
+    if failure is not None:
+        failure["elapsed_sec"] = elapsed
+        failure["physical_call_count"] = len(response.calls)
+        request_failures.append(failure)
+    _request_log(output_dir, request_id, stage, model, ids, system, user, schema, allow_tool, "complete",
+                  response.text if response.error is None else None, response.error,
+                  started_at=started_at, elapsed_sec=elapsed,
+                  call_count=len(response.calls), failure=failure)
     return response
 
 
@@ -290,8 +343,10 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
                   stage_calls: dict[str, list[CallRecord]], source_path: str | None,
                    source_hash: str, export_error: str | None = None, selected_initial: dict[str, Any] | None = None,
                     *, run_state: str = "running", request_counts: dict[str, int] | None = None,
-                    request_failures: list[dict[str, Any]] | None = None,
-                    report_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+                      request_failures: list[dict[str, Any]] | None = None,
+                      report_metadata: dict[str, Any] | None = None,
+                      journal: RunJournal | None = None,
+                      replayed_request_count: int = 0) -> dict[str, Any]:
     accepted = sum(record["status"] == "accepted" for record in records)
     actual_fits = sum(record["status"] == "actual_fits" for record in records)
     manual = len(records) - accepted - actual_fits
@@ -393,14 +448,23 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
         report["selection"] = selected_initial
     if report_metadata is not None:
         report["metadata"] = copy.deepcopy(report_metadata)
+    if journal is not None:
+        unknown = journal.unknown_requests
+        report["resume"] = {
+            "schema_version": 1,
+            "status": run_state,
+            "unknown_requests": copy.deepcopy(unknown),
+            "replayed_request_count": replayed_request_count,
+        }
+        report["summary"]["unknown_request_ids"] = [row["request_id"] for row in unknown]
     return report
 
 
 def _checkpoint(output_dir: Path, report: dict[str, Any], subtitles: list[dict[str, Any]]) -> None:
-    _atomic_json(output_dir / "report.json", report)
-    _atomic_json(output_dir / "subtitles.json", subtitles)
+    atomic_json(output_dir / "report.json", report)
+    atomic_json(output_dir / "subtitles.json", subtitles)
     report["summary"]["export_error"] = _export_srt(subtitles, output_dir)
-    _atomic_json(output_dir / "report.json", report)
+    atomic_json(output_dir / "report.json", report)
 
 
 def _prepare_checkpoint(source: list[dict[str, Any]], records: list[dict[str, Any]],
@@ -448,6 +512,120 @@ def _forecast_plan(plan: CuePlan) -> CuePlan:
         short_timing_risk=classification.short_timing_risk,
         reason=classification.reason,
     )
+
+
+def _restore_baseline(
+    baseline: dict[str, Any], items: list[dict[str, Any]],
+    target_ids: list[str], planner: PlannerConfig, expected_plans: list[CuePlan],
+) -> tuple[list[dict[str, Any]], list[CuePlan]]:
+    """Validate and restore the immutable post-preflight runner state."""
+    source_hash = baseline.get("source_hash")
+    if source_hash != _source_hash(items) or baseline.get("length_basis") != planner.length_basis:
+        raise ResumeError("resume baseline source or length basis mismatch")
+    expected_ids = [plan.cue_id for plan in expected_plans]
+    stored_source_ids = baseline.get("source_ids")
+    if stored_source_ids != expected_ids:
+        raise ResumeError("resume baseline source cue IDs differ")
+    stored_ids = baseline.get("selected_ids")
+    stored_plans = baseline.get("plans")
+    stored_records = baseline.get("records")
+    if (not isinstance(stored_ids, list) or any(not isinstance(cue_id, str) for cue_id in stored_ids)
+            or stored_ids != list(target_ids) or not isinstance(stored_plans, list)
+            or not isinstance(stored_records, list)):
+        raise ResumeError("resume baseline shape or selected ID order is invalid")
+    if len(stored_plans) != len(expected_plans) or len(stored_records) != len(stored_ids):
+        raise ResumeError("resume baseline plan or selected record lengths are invalid")
+    restored_plans: list[CuePlan] = []
+    expected_by_id = {plan.cue_id: plan for plan in expected_plans}
+    selected_set = set(target_ids)
+    for position, (plan_payload, expected) in enumerate(zip(stored_plans, expected_plans)):
+        if not isinstance(plan_payload, dict):
+            raise ResumeError("resume baseline plan or record is invalid")
+        try:
+            plan = CuePlan(**plan_payload)
+        except (TypeError, ValueError) as exc:
+            raise ResumeError(f"resume baseline plan is invalid: {exc}") from exc
+        if (not isinstance(plan.cue_id, str) or not isinstance(plan.position, int)
+                or isinstance(plan.position, bool) or plan.cue_id != expected.cue_id
+                or plan.position < 0 or plan.position >= len(items)):
+            raise ResumeError("resume baseline cue IDs or positions are inconsistent")
+        if plan.cue_id != expected.cue_id or plan.position != expected.position:
+            raise ResumeError("resume baseline cue IDs or positions are inconsistent")
+        if plan.length_basis != planner.length_basis or plan.length_basis != expected.length_basis:
+            raise ResumeError("resume baseline length basis differs")
+        expected_payload = _plan_payload(expected)
+        actual_payload = _plan_payload(plan)
+        if expected.cue_id in selected_set and expected.short_timing_risk:
+            allowed_variants = [expected_payload]
+            allowed_variants.append(_plan_payload(replace(
+                expected,
+                status="fits",
+                severity="fits",
+                reduction_fraction=0.0,
+                short_timing_risk=False,
+                reason="actual_fit",
+                estimate_source="vosk_measurement",
+            )))
+            if expected.repetition_candidate:
+                allowed_variants.append(_plan_payload(replace(expected, status="needs_shortening")))
+            if not any(canonical_hash(actual_payload) == canonical_hash(variant) for variant in allowed_variants):
+                raise ResumeError("resume baseline plan payload differs from preflight variants")
+        elif actual_payload != expected_payload:
+            raise ResumeError("resume baseline plan payload differs from supplied plans")
+        restored_plans.append(plan)
+    plan_by_id = {plan.cue_id: plan for plan in restored_plans}
+    record_by_id: dict[str, dict[str, Any]] = {}
+    for record_payload in stored_records:
+        if not isinstance(record_payload, dict):
+            raise ResumeError("resume baseline plan or record is invalid")
+        cue_id = record_payload.get("cue_id")
+        if not isinstance(cue_id, str) or cue_id not in selected_set or cue_id in record_by_id:
+            raise ResumeError("resume baseline record cue IDs are invalid")
+        record_by_id[cue_id] = copy.deepcopy(record_payload)
+    restored_records: list[dict[str, Any]] = []
+    for cue_id in target_ids:
+        record_payload = record_by_id.get(cue_id)
+        plan = plan_by_id.get(cue_id)
+        expected = expected_by_id.get(cue_id)
+        if record_payload is None or plan is None or expected is None:
+            raise ResumeError("resume baseline record cue IDs are incomplete")
+        if ("position" not in record_payload or "original" not in record_payload
+                or "source_index" not in record_payload
+                or record_payload.get("position") != plan.position):
+            raise ResumeError("resume baseline record order or position is invalid")
+        if (record_payload.get("original") != expected.text
+                or record_payload.get("source_index") != items[plan.position].get("index")):
+            raise ResumeError("resume baseline record source metadata differs")
+        required = ("candidate", "final_text", "status", "budget", "forecast", "history", "final_review", "initial_accepted")
+        if any(key not in record_payload for key in required):
+            raise ResumeError("resume baseline record shape is incomplete")
+        if (record_payload["candidate"] is not None and not isinstance(record_payload["candidate"], str)):
+            raise ResumeError("resume baseline candidate is invalid")
+        if (not isinstance(record_payload["final_text"], str)
+                or record_payload["final_text"] != record_payload["original"]
+                or record_payload["status"] not in {"pending", "short_timing", "actual_fits", "timing_unverified"}):
+            raise ResumeError("resume baseline final record fields are invalid")
+        if (not isinstance(record_payload["budget"], dict)
+                or canonical_hash(record_payload["budget"]) != canonical_hash(_plan_payload(plan))
+                or not isinstance(record_payload["forecast"], dict)
+                or canonical_hash(record_payload["forecast"]) != canonical_hash(_plan_payload(expected))):
+            raise ResumeError("resume baseline record budgets are invalid")
+        if not isinstance(record_payload["history"], list) or not isinstance(record_payload["initial_accepted"], bool):
+            raise ResumeError("resume baseline record history or acceptance flag is invalid")
+        if any(isinstance(event, dict) and event.get("stage") in {"generation", "review", "repair", "recheck"}
+               for event in record_payload["history"]):
+            raise ResumeError("resume baseline history contains LLM stages")
+        restored_records.append(record_payload)
+    return restored_records, restored_plans
+
+
+def _text_from_item(item: dict[str, Any]) -> str | None:
+    value = item.get("text")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(part, str) for part in value):
+        return " ".join(value)
+    return None
 
 
 def _preflight_error_record(record: dict[str, Any], error_type: str) -> None:
@@ -562,14 +740,14 @@ def _apply_preflight(
     return effective, risk_ids
 
 
-async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target_ids: list[str],
-                    planner_config: PlannerConfig, run_config: RunConfig, generator: ModelSpec,
-                    arbiter: ModelSpec, output_dir: Path, request_fn: RequestFunction,
-                     original_timing_verifier: OriginalTimingVerifier | None = None,
-                     report_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target_ids: list[str],
+                     planner_config: PlannerConfig, run_config: RunConfig, generator: ModelSpec,
+                     arbiter: ModelSpec, output_dir: Path, request_fn: RequestFunction,
+                      original_timing_verifier: OriginalTimingVerifier | None = None,
+                      report_metadata: dict[str, Any] | None = None,
+                      resume: bool = False,
+                      retry_unknown_ids: tuple[str, ...] = ()) -> dict[str, Any]:
     """Run one independent trial and write fail-closed checkpoints after each batch."""
-    if output_dir.exists():
-        raise FileExistsError(f"output directory already exists: {output_dir}")
     if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
         raise TypeError("items must be a list of objects")
     if not isinstance(plans, list) or not all(isinstance(plan, CuePlan) for plan in plans):
@@ -580,7 +758,9 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
         raise TypeError("report_metadata must be an object")
     if any(plan.length_basis != planner_config.length_basis for plan in plans):
         raise ValueError("all plans must match planner length_basis")
+    supplied_plans = list(plans)
     plans = [_forecast_plan(plan) for plan in plans]
+    expected_plans = list(plans)
     plan_by_id = {plan.cue_id: plan for plan in plans}
     if len(plan_by_id) != len(plans):
         raise ValueError("duplicate plan cue_id")
@@ -591,32 +771,71 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
     selected = [plan_by_id[target_id] for target_id in target_ids]
     if any(plan.status not in {"needs_shortening", "short_timing"} for plan in selected):
         raise ValueError("all selected targets must need shortening or have short timing")
-    output_dir.mkdir(parents=True)
-    records = [_new_record(items[plan.position], plan) for plan in selected]
-    record_by_id = {record["cue_id"]: record for record in records}
+    contract = _manifest_contract(
+        items, supplied_plans, target_ids, planner_config, run_config, generator, arbiter,
+        report_metadata, original_timing_verifier is not None,
+    )
+    ensure_manifest(output_dir, contract, resume=resume)
     source_copy = copy.deepcopy(items)
-    stage_calls: dict[str, list[CallRecord]] = {}
-    request_counts: dict[str, int] = {stage: 0 for stage in ("generation", "review", "repair", "recheck")}
-    request_failures: list[dict[str, Any]] = []
+    baseline = load_baseline(output_dir) if resume else None
+    journal_files = any((output_dir / name).exists() for name in ("requests.jsonl", "calls.jsonl", "resume_events.jsonl"))
+    if resume and baseline is None and journal_files:
+        raise ResumeError("resume baseline is missing while journal files exist; preserve the directory")
+    records: list[dict[str, Any]]
+    record_by_id: dict[str, dict[str, Any]]
+    if baseline is not None:
+        records, plans = _restore_baseline(
+            baseline, items, target_ids, planner_config, expected_plans,
+        )
+        selected = [next(plan for plan in plans if plan.cue_id == cue_id) for cue_id in target_ids]
+        record_by_id = {record["cue_id"]: record for record in records}
+    else:
+        records = [_new_record(items[plan.position], plan) for plan in selected]
+        record_by_id = {record["cue_id"]: record for record in records}
+    plan_by_id = {plan.cue_id: plan for plan in plans}
     source_path: str | None = None
+    journal = RunJournal(output_dir, resume=resume, retry_unknown_ids=retry_unknown_ids)
+    replayed_counter = [0]
 
     effective_selected = selected
-    if original_timing_verifier is not None:
-        effective_map, _ = _apply_preflight(selected, record_by_id, original_timing_verifier, output_dir)
+    if baseline is None and original_timing_verifier is not None:
+        preflight_dir = output_dir
+        if (output_dir / "preflight_audio").exists():
+            preflight_dir = output_dir / "preflight_attempts" / uuid.uuid4().hex
+            preflight_dir.mkdir(parents=True, exist_ok=True)
+        effective_map, _ = _apply_preflight(selected, record_by_id, original_timing_verifier, preflight_dir)
         effective_selected = [effective_map[plan.cue_id] for plan in selected]
         effective_by_id = {plan.cue_id: plan for plan in effective_selected}
         plans = [effective_by_id.get(plan.cue_id, plan) for plan in plans]
         plan_by_id = {plan.cue_id: plan for plan in plans}
 
+    if baseline is None:
+        baseline_payload = {
+            "source_hash": _source_hash(items), "selected_ids": list(target_ids),
+            "source_ids": [plan.cue_id for plan in plans],
+            "length_basis": planner_config.length_basis,
+            "plans": [_plan_payload(plan) for plan in plans],
+            "records": copy.deepcopy(records),
+        }
+        save_baseline(output_dir, baseline_payload)
+    calls_by_stage, journal_counts, journal_failures = journal.accounting()
+    stage_calls = {stage: list(calls_by_stage.get(stage, [])) for stage in ("generation", "review", "repair", "recheck")}
+    request_counts = dict(journal_counts)
+    for stage in ("generation", "review", "repair", "recheck"):
+        request_counts.setdefault(stage, 0)
+    request_failures = copy.deepcopy(journal_failures)
+
     def save(run_state: str) -> dict[str, Any]:
         report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter,
-                               output_dir, records, stage_calls, source_path, _source_hash(items),
-                                run_state=run_state, request_counts=request_counts,
-                                request_failures=request_failures, report_metadata=report_metadata)
+                                  output_dir, records, stage_calls, source_path, _source_hash(items),
+                                  run_state=run_state, request_counts=request_counts,
+                                  request_failures=request_failures, report_metadata=report_metadata, journal=journal,
+                                  replayed_request_count=replayed_counter[0])
         _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
         return report
 
-    save("running")
+    if journal.checkpoint_allowed(records):
+        save("running")
     eligible_ids = [
         plan.cue_id
         for plan in effective_selected
@@ -635,11 +854,14 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
             queue.append(cue_id)
 
     def checkpoint() -> None:
+        if not journal.checkpoint_allowed(records):
+            return
         report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter,
                                output_dir, records, stage_calls, source_path, _source_hash(items),
-                                run_state="incomplete" if request_failures else "running",
-                                request_counts=request_counts, request_failures=request_failures,
-                                report_metadata=report_metadata)
+                                  run_state="incomplete" if request_failures else "running",
+                                  request_counts=request_counts, request_failures=request_failures,
+                                  report_metadata=report_metadata, journal=journal,
+                                  replayed_request_count=replayed_counter[0])
         _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
 
     async def run_generation(
@@ -691,6 +913,7 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
                 request_fn, generator, GENERATOR_SYSTEM_PROMPT, build_generation_prompt(context, targets),
                 generation_schema(), run_config.length_tools, stage=stage, ids=batch, output_dir=output_dir,
                 stage_calls=stage_calls, request_counts=request_counts, request_failures=request_failures,
+                journal=journal, records=records, replayed_counter=replayed_counter,
             )
             parsed: PartialParseResult | None = None
             if response.error is None and response.text is not None:
@@ -818,6 +1041,7 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
                 request_fn, arbiter, ARBITER_SYSTEM_PROMPT, build_review_prompt(context, targets), review_schema(), False,
                 stage=stage, ids=batch, output_dir=output_dir, stage_calls=stage_calls,
                 request_counts=request_counts, request_failures=request_failures,
+                journal=journal, records=records, replayed_counter=replayed_counter,
             )
             parsed: PartialParseResult | None = (
                 parse_review_partial(response.text, batch)
@@ -884,10 +1108,52 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
             record["failure"] = _reason_for(plan_by_id[record["cue_id"]], candidate, local, verdict)
         if record["status"] != "accepted":
             record["final_text"] = record["original"]
+    journal.assert_consumed()
     final_report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
-                                 records, stage_calls, source_path, _source_hash(items),
-                                 run_state="incomplete" if request_failures else "completed",
-                                  request_counts=request_counts, request_failures=request_failures,
-                                  report_metadata=report_metadata)
-    _checkpoint(output_dir, final_report, _prepare_checkpoint(source_copy, records, plans, planner_config))
+                                  records, stage_calls, source_path, _source_hash(items),
+                                   run_state="incomplete" if request_failures else "completed",
+                                    request_counts=request_counts, request_failures=request_failures,
+                                    report_metadata=report_metadata, journal=journal,
+                                    replayed_request_count=replayed_counter[0])
+    if journal.checkpoint_allowed(records):
+        _checkpoint(output_dir, final_report, _prepare_checkpoint(source_copy, records, plans, planner_config))
+        atomic_json(output_dir / "resume_status.json", {
+            "schema_version": 1,
+            "status": "processed",
+            "run_state": final_report["run_state"],
+            "unknown_requests": final_report["resume"]["unknown_requests"],
+            "accounting_complete": final_report["summary"]["accounting_complete"],
+        })
     return final_report
+
+
+async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target_ids: list[str],
+                    planner_config: PlannerConfig, run_config: RunConfig, generator: ModelSpec,
+                    arbiter: ModelSpec, output_dir: Path, request_fn: RequestFunction,
+                    original_timing_verifier: OriginalTimingVerifier | None = None,
+                    report_metadata: dict[str, Any] | None = None, resume: bool = False,
+                    retry_unknown_ids: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Run a trial while holding its durable process lock for its full lifetime."""
+    output_dir = Path(output_dir)
+    if retry_unknown_ids and not resume:
+        raise ResumeError("retry_unknown_ids requires resume=True")
+    if not resume and output_dir.exists():
+        raise FileExistsError(f"output directory already exists: {output_dir}")
+    if resume and (not output_dir.exists() or not output_dir.is_dir()):
+        raise ResumeError(f"resume output directory does not exist: {output_dir}")
+    if not resume:
+        output_dir.mkdir(parents=True)
+    lock = FileLock(str(output_dir / ".run.lock"), timeout=0)
+    try:
+        lock.acquire()
+    except Timeout as exc:
+        raise ResumeError(f"run directory is locked by another process: {output_dir}") from exc
+    try:
+        return await _run_trial(
+            items=items, plans=plans, target_ids=target_ids, planner_config=planner_config,
+            run_config=run_config, generator=generator, arbiter=arbiter, output_dir=output_dir,
+            request_fn=request_fn, original_timing_verifier=original_timing_verifier,
+            report_metadata=report_metadata, resume=resume, retry_unknown_ids=retry_unknown_ids,
+        )
+    finally:
+        lock.release()

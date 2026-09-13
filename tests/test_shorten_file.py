@@ -353,3 +353,42 @@ def test_incomplete_run_keeps_checkpoint_and_returns_incomplete(tmp_path: Path, 
     assert report["run_state"] == "incomplete"
     assert (args.output_dir / "report.json").exists()
     assert (args.output_dir / "subtitles.json").exists()
+
+
+@pytest.mark.parametrize("flags", [["--retry-unknown", "id"], ["--resume", "--dry-run"], ["--resume"]])
+def test_resume_cli_invalid_flag_combinations_fail_offline(tmp_path: Path, flags: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    args, _, _ = _fixture(tmp_path)
+    monkeypatch.setattr("utils.shorten_file.LiveBackend", lambda *a, **k: pytest.fail("backend constructed"))
+    assert main([str(args.input), "--output-dir", str(args.output_dir), "--model", args.model,
+                 "--profile", str(args.profile), "--model-path", str(args.model_path), *flags]) != 0
+    assert not args.output_dir.exists()
+
+
+@pytest.mark.parametrize("change", ["unknown", "source_bytes", "profile"])
+def test_resume_cli_checks_real_prepared_contract_before_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], change: str,
+) -> None:
+    args, source, profile_path = _fixture(tmp_path)
+    async def cancel(*a: Any, **k: Any) -> DetailedResponse:
+        raise asyncio.CancelledError
+    monkeypatch.setattr(_LazyRequest, "__call__", cancel)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(execute_run(prepare_run(args)))
+    before = (args.output_dir / "requests.jsonl").read_bytes()
+    request_id = json.loads(before.splitlines()[0])["request_id"]
+    if change == "source_bytes":
+        source.write_bytes(source.read_bytes() + b"\n")
+    elif change == "profile":
+        profile = json.loads(profile_path.read_text())
+        profile["models"]["char_linear"]["coefficients"] = [0.0, 0.2]
+        profile_path.write_text(json.dumps(profile))
+    async def forbidden(*a: Any, **k: Any) -> DetailedResponse:
+        pytest.fail("resume sent a new request")
+    monkeypatch.setattr(_LazyRequest, "__call__", forbidden)
+    status = main([str(source), "--output-dir", str(args.output_dir), "--model", args.model,
+                   "--profile", str(profile_path), "--model-path", str(args.model_path), "--resume"])
+    assert status == (2 if change == "unknown" else 1)
+    error = capsys.readouterr().err
+    if change == "unknown":
+        assert request_id in error and "--retry-unknown" in error
+    assert (args.output_dir / "requests.jsonl").read_bytes() == before

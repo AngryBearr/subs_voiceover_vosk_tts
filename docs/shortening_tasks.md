@@ -1,9 +1,10 @@
 # Задачи: надёжное сокращение полного файла
 
-Статус на 12 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
+Статус на 13 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
 HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью проверена и
-зафиксирована коммитом `c5bf383`; SH-03 реализована и проверена, но ещё
-не закоммичена; SH-04 и все последующие задачи ожидают.
+зафиксирована коммитом `c5bf383`; SH-03 реализована, проверена и зафиксирована
+коммитом `9a1ddd9`; SH-04 реализована и проверена, но изменения рабочего
+дерева ещё не закоммичены; следующая задача — SH-05.
 
 ## Цель
 
@@ -11,7 +12,7 @@ HEAD `ec0cbaf` до этой задачи; SH-02 реализована и по�
 
 Цель ближайшей работы — три полных файла с воспроизводимым результатом, а не новый большой перебор моделей. Последняя проверка baseline: 175 тестов пройдено за 3.38 секунды, exit 0; также прошли compileall и две чистые metadata-проверки. Новых платных вызовов моделей не было.
 
-Уже есть сохранение промежуточных результатов, журналы запросов и расходов, контекстный аудит, построчная проверка вариантов в режиме C и проверка принадлежности профиля TTS. Возобновления запуска пока нет. Эти работающие части нужно использовать, а не переписывать.
+Уже есть сохранение промежуточных результатов, журналы запросов и расходов, контекстный аудит, построчная проверка вариантов в режиме C и проверка принадлежности профиля TTS. SH-04 добавляет безопасное возобновление запуска к этим работающим частям, а не переписывает их.
 
 ## Приоритетные задачи
 
@@ -105,7 +106,7 @@ generation and review. Planning, local checks, and the optional length tool use
 the normalized length basis, and the frozen Vosk profile must match the model,
 voice, rate, and text normalizer. Offline `--dry-run` uses a lazy backend and
 does not make LLM, network, Vosk, or synthesis calls; legacy experimental CLI
-behavior remains compatible. Resume is not implemented yet.
+behavior remains compatible.
 
 Final verification: `uv run --active --no-sync -m pytest -q` reported `316
 passed` and compileall for `utils tests pipeline.py ui/gradio_app.py` passed;
@@ -113,18 +114,42 @@ new and legacy CLI `--help` checks passed. A real existing Vosk model and frozen
 profile passed the offline BOM SRT/JSON smoke check, while invalid voice and
 rate values were rejected before output creation. No paid LLM or real synthesis
 calls were made. The temporary local log, not a durable artifact, is
-`/tmp/opencode/sh03-final-20260912/baseline.log`. SH-03 remains uncommitted; the
-next task is SH-04.
+`/tmp/opencode/sh03-final-20260912/baseline.log`. SH-03 was committed as
+`9a1ddd9`; the next task was SH-04.
 
-### [ ] SH-04. Возобновление без повторной оплаты — P0
+### [x] SH-04. Возобновление без повторной оплаты — P0
 
-Зависит от SH-03. Использовать уже существующие промежуточные сохранения.
+Зависит от SH-03. Использует существующие промежуточные сохранения.
 
 Продолжать запуск только при совпадении исходника, настроек, профиля и версии инструкций. Завершённые этапы не отправлять моделям заново. Журнал запросов дополнять, не переписывая историю.
 
 Если запрос был отправлен, но ответ не сохранился, его состояние неизвестно. Такой запрос нельзя автоматически считать бесплатным, завершённым или безопасным для повтора. Повтор требует явного решения. Ровно одну обработку на стороне внешнего API гарантировать нельзя.
 
 **Готово, когда:** тест прерывания и продолжения не меняет принятые строки и не повторяет завершённые запросы; изменённый исходник отклоняется; неизвестные запросы видны отдельно. Проверяется на имитации транспорта, без оплаты.
+
+**Implementation and verification note (SH-04):** Resume now validates the
+immutable source/configuration/profile/model/prompt contract and actual module
+hashes, replays saved receipts locally, and appends request/call history
+without resending completed work. Full-file and non-contiguous target plans,
+durable complete-before-checkpoint ordering for generation, review, repair, and
+recheck, saved calls before completion (unknown costs), explicit retry chains,
+source/config/profile/model/prompt mismatches, the nonblocking `filelock`, and
+preflight plus zero-target behavior are covered by tests. `BUG-01`
+`CancelledError` swallowing is fixed as part of SH-04; cancellation remains an
+unknown request requiring explicit retry authorization. Tests are in
+`tests/test_shortening_resume.py` and
+`tests/test_shortening_resume_integration.py`, including
+`test_cancelled_attempt_requires_explicit_retry_and_then_completes`.
+
+Independent final verification reported 407 tests passed. Compileall, the
+`shorten_file` CLI help, all three legacy CLI help checks, and `git diff HEAD
+--check` also passed. No live API, paid LLM, or TTS calls were made. The
+complete captured log is `/tmp/opencode/sh04-final-verification/checks.log`.
+
+The default unknown-request block returns exit 2 and requires an explicit
+`--retry-unknown REQUEST_ID` decision; completed receipt errors are replayed as
+errors, not resent. Exactly-once external API or billing behavior is not
+guaranteed, and known costs remain separate from unresolved billing unknowns.
 
 ### [ ] SH-05. Удобная очередь ручной проверки — P0
 
@@ -145,6 +170,15 @@ whose outcome is unresolved or needs attention.
 
 - **H2:** текущая схема с критикой против исправления только по замечанию о длине — тот же первый кандидат и ровно одна дополнительная попытка в обеих схемах.
 - **H3:** несколько вариантов только для сложных или отклонённых случаев, а не для всех реплик подряд.
+- **H4 (generator-input presentation experiment):** presenting coherent surrounding original text with an explicit target-only edit boundary may improve meaning preservation and context resolution compared with the current structured cue-list.
+  - Control A is the current structured local cue-list plus the target; treatment B uses the same cue texts in chronological continuous context plus an explicit `shorten_this` target, while retaining unambiguous boundaries and IDs.
+  - An optional separate follow-up C may use `context_before` / `shorten_this` / `context_after`; do not change other factors or require all three formats up front.
+  - Keep selected targets, neighbors/content/window/order, model and settings, character budget and `length_basis`, batching, tools, and retry policy identical. Context is already present today: compare presentation, not presence versus absence.
+  - Add no summaries, rewritten context, or new facts; do not switch between final and original context. Keep ID/limits/tool availability equivalent for safety; formatting is the only intended difference.
+  - The target text must be the exact full cue, not an accidentally illustrative truncation. Neighboring content is read-only and output is only the target: do not copy independent neighbor facts, guess positional mappings, or rely on repeated identical text. Coreference resolution is permitted without new claims; output need not be a substring of the original.
+  - First run offline prompt/schema/identity checks, then compare models only with separate paid authorization. Freeze cases with pronouns, negation/contrast/causality, split sentences, repeated identical targets, and ambiguous references.
+  - Use independent, blinded semantic checks (do not call the same model family truly independent) and measure meaning loss, neighbor-fact contamination, correct ID/target-only output, length fit, unresolved fraction, tool calls, tokens, and cost.
+  - Freeze criteria and evaluator beforehand, disclose uncertainty, and make no default format change unless evidence supports it. This generator hypothesis is separate from SH-10's final-evaluator original/final-context task.
 
 До запуска фиксировать данные, контрольную схему, модели, инструкции, метрики и правило остановки. Смысл оценивают модели; главный агент не выбирает хорошие формулировки вручную. Разделять критические смысловые замечания и предпочтения стиля. Результат «данных недостаточно» допустим.
 
@@ -250,16 +284,13 @@ while machine/TTS content remains unchanged; markers survive export through the
 sidecar; changed text, timing, profile, or context invalidates cached evidence;
 and analysis does not hide unresolved cues or remove them from the denominator.
 
-### Known bugs — fixes deferred by user
+### Known bugs — remaining fixes deferred by user
 
-**Audit note (12 September 2026; static code findings only):** the following
-issues are recorded for later triage. No fixes or tests are claimed here, and no
-automatic work has started.
+**Audit note (12 September 2026):** BUG-01 was fixed and tested as part of
+SH-04. The following remaining issue(s) are recorded for later triage; no
+automatic work has started on them.
 
-- **BUG-01 — P0:** `runner._request` catches `CancelledError`, so subsequent batch
-  calls may continue. A future fix must preserve unknown accounting and re-raise
-  cancellation. Add a fake-cancellation test proving that no later calls occur
-  and a checkpoint is not falsely marked complete.
+- **BUG-01 — P0, fixed in SH-04:** Previously, runner._request caught CancelledError and could continue later batches. Cancellation now propagates, leaves any sent request without a durable response unknown, and does not falsely complete the checkpoint. Covered by fake-cancellation and explicit-retry tests.
 - **BUG-02 — P1:** legacy `utils.shorten_subtitles._execute` can lose an
   incomplete child `run_state`, leaving the parent marked complete with exit 0.
   A future fix must propagate incomplete status and nonzero exit distinctly from
@@ -284,7 +315,7 @@ SH-00 → SH-01 → SH-02 → SH-03 → SH-04 → SH-05 → SH-08.
 SH-06 — по результатам первого пилота. SH-07 обязателен перед очисткой, но не должен оттеснять задачи качества. SH-09 отложен.
 
 SH-11 accompanies SH-05 and must be implemented before SH-08; the main order and
-the current next task, SH-04, remain unchanged.
+the current next task, SH-05, remain unchanged.
 
 ## Коммиты и гипотезы
 
@@ -319,8 +350,9 @@ the current next task, SH-04, remain unchanged.
 сжимались; baseline-коммита ещё не было. Последний на тот момент тестовый
 результат и измеренные объёмы не выдавались за новую проверку реализации.
 
-Текущее решение на 12 сентября 2026: SH-00 и SH-01 реализованы и уже
+Текущее решение на 13 сентября 2026: SH-00 и SH-01 реализованы и уже
 присутствовали в HEAD `ec0cbaf` до этой задачи; SH-02 зафиксирована коммитом
-`c5bf383`; SH-03 реализована, но ещё
-не закоммичена; следующая — SH-04, а все последующие задачи ожидают.
+`c5bf383`; SH-03 зафиксирована коммитом `9a1ddd9`; SH-04 реализована и
+проверена, но изменения рабочего дерева ещё не закоммичены; следующая — SH-05,
+а все последующие задачи ожидают.
 Автоматический коммит не выполняется.

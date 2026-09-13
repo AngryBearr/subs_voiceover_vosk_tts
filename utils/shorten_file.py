@@ -28,6 +28,7 @@ from utils.shortening_audio import verify_original_timing
 from utils.shortening_backends import DEEPSEEK_VARIANTS, OPENAI_MODELS, LiveBackend
 from utils.shortening_plan import CuePlan, PlannerConfig, plan_subtitles
 from utils.shortening_runner import ModelSpec, RunConfig, run_trial
+from utils.shortening_resume import ResumeError, UnknownRequestsError
 from utils.opencode_clean import CleanOpenCodeServer
 from utils.srt_to_json import SRTParseError, parse_srt_file
 from utils.vosk_calibration import (
@@ -252,6 +253,8 @@ class PreparedRun:
     run_config: RunConfig
     metadata: dict[str, Any]
     dry_run: bool
+    resume: bool = False
+    retry_unknown_ids: tuple[str, ...] = ()
 
 
 def prepare_run(args: argparse.Namespace) -> PreparedRun:
@@ -259,7 +262,16 @@ def prepare_run(args: argparse.Namespace) -> PreparedRun:
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)
     profile_path = Path(args.profile)
-    if output_dir.exists():
+    resume = bool(getattr(args, "resume", False))
+    retry_unknown_ids = tuple(getattr(args, "retry_unknown_ids", ()) or ())
+    if retry_unknown_ids and not resume:
+        raise ResumeError("--retry-unknown requires --resume")
+    if resume and bool(getattr(args, "dry_run", False)):
+        raise ResumeError("--resume cannot be combined with --dry-run")
+    if resume:
+        if not output_dir.exists() or not output_dir.is_dir():
+            raise ResumeError(f"resume output directory does not exist or is not a directory: {output_dir}")
+    elif output_dir.exists():
         raise FileExistsError(f"output directory already exists: {output_dir}")
     if output_dir.resolve() in {input_path.resolve(), profile_path.resolve()}:
         raise ValueError("output directory must not be the input or profile path")
@@ -343,6 +355,8 @@ def prepare_run(args: argparse.Namespace) -> PreparedRun:
         run_config=run_config,
         metadata=metadata,
         dry_run=bool(getattr(args, "dry_run", False)),
+        resume=resume,
+        retry_unknown_ids=retry_unknown_ids,
     )
 
 
@@ -358,7 +372,7 @@ def _dry_report(prepared: PreparedRun) -> dict[str, Any]:
         "selected_count": len(prepared.target_ids),
         "srt_renumbering": "SRT export uses canonical chronological numbering; JSON indexes remain unchanged.",
         "evidence_statement": "No LLM, acoustic, or final-audio evidence has been collected; this is offline planning only.",
-        "dry_run_note": "Use a separate new output directory for a live run; SH04 resume is not implemented.",
+        "dry_run_note": "Use a separate new output directory for a live run; resume requires a completed immutable manifest and baseline.",
     }
 
 
@@ -432,6 +446,8 @@ async def execute_run(prepared: PreparedRun) -> dict[str, Any]:
             request_fn=lazy,
             original_timing_verifier=verifier,
             report_metadata=prepared.metadata,
+            resume=prepared.resume,
+            retry_unknown_ids=prepared.retry_unknown_ids,
         )
     finally:
         lazy.close()
@@ -450,6 +466,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--variant")
     parser.add_argument("--length-tools", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--retry-unknown", dest="retry_unknown_ids", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--gen-batch-size", type=int, default=6)
@@ -472,6 +490,15 @@ def main(argv: list[str] | None = None) -> int:
         summary = report.get("summary", {})
         print(json.dumps({"run_state": report.get("run_state"), "output_dir": str(prepared.output_dir), "selected_count": summary.get("selected_count", len(prepared.target_ids)), "resolved_count": summary.get("resolved_count", 0), "manual_count": summary.get("manual_count", 0)}, ensure_ascii=False, sort_keys=True))
         return 0 if report.get("run_state") == "completed" else 1
+    except UnknownRequestsError as exc:
+        ids = ", ".join(exc.request_ids)
+        print(
+            f"shorten_file blocked: unknown request IDs: {ids}. "
+            "A provider may have billed an unfinished attempt; rerun with "
+            "--resume --retry-unknown REQUEST_ID only after reviewing the risk.",
+            file=sys.stderr,
+        )
+        return 2
     except SRTParseError as exc:
         message = re.sub(r"(?i)(bearer\s+|sk[-_])[A-Za-z0-9_.-]+", "[redacted]", str(exc))
         print(f"shorten_file failed: {type(exc).__name__}: {message[:2000]}", file=sys.stderr)
