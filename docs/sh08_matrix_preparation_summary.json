@@ -1,0 +1,86 @@
+{
+  "schema": "sh08_matrix_preparation_summary.v1",
+  "status": "PREPARATION_ONLY",
+  "model_run_authorized": false,
+  "selection_frozen": false,
+  "source_artifacts": {
+    "r2_report": {
+      "path": "output/sh08_matrix_inventory_20260914_r2/report.json",
+      "sha256": "ec231da712546367e5c5782965d2e5fd4544150a543cddb7e469ea19f6251b2b"
+    },
+    "r2_helper": {
+      "path": "output/sh08_matrix_inventory_20260914_r2/measurements.py",
+      "sha256": "b233e0c72a87b47f9ba34300e1128bc7e41d7db0b36f51aa19e9a7efa756d493"
+    },
+    "historical_expanded": {
+      "path": "output/shortening_verification_20260910/expanded_comparison_final.json",
+      "sha256": "ccdc655d82f6eef0e5e760f498bcf24b2644a4807df6290092972985a8ffd0c7"
+    },
+    "pilot_manifest": {
+      "path": "docs/sh08_pilot_manifest.json",
+      "sha256": "dc01852aff9032e713ab77da79babb6496057fdd97fdedd5323f93e5d9ade2f9"
+    },
+    "profile": {
+      "path": "output/vosk_calibration_20260910/profiles/profile_voice_8_rate_1.5.json",
+      "sha256": "eab509922c511ed0dbd2b3948d5a0cf55de78dc11ab6127e9c59443f4cabcb59"
+    }
+  },
+  "baseline": {
+    "path": "/tmp/opencode/sh08-continuation-baseline-20260914.log",
+    "tests": "471 passed, 5 skipped in 42.59s",
+    "tests_exit": 0,
+    "compileall_exit": 0,
+    "commands": [
+      "uv run --active --no-sync -m pytest -q",
+      "uv run --active --no-sync -m compileall -q utils tests pipeline.py ui/gradio_app.py"
+    ],
+    "warning": "uv --no-sync outside a project; warning only, no installation"
+  },
+  "inventory": {
+    "report_status": "INVENTORY_ONLY_NOT_EXECUTED",
+    "actual_model_requests": 0,
+    "new_synthesis_count": 0,
+    "all_48": {
+      "cases": 48,
+      "invalid": 0,
+      "zero": 19,
+      "positive": 29,
+      "status_counts": {"needs_shortening": 40, "short_timing": 8}
+    },
+    "after_pilot_exclusions": {
+      "cases": 48,
+      "invalid": 0,
+      "zero": 19,
+      "positive": 29,
+      "status_counts": {"needs_shortening": 40, "short_timing": 8}
+    },
+    "optional_no_s44e11": {
+      "cases": 42,
+      "invalid": 0,
+      "zero": 15,
+      "positive": 27,
+      "status_counts": {"needs_shortening": 35, "short_timing": 7}
+    },
+    "selection": "not frozen; 48 inventory cases are not a 24-case selection",
+    "exclusion_basis": "validated raw and canonical source hashes",
+    "pilot_overlap": "zero for these 48 only; not global training independence"
+  },
+  "historical_six_pair_evidence": [
+    {"pair": "Luna->Luna", "generator_variant": null, "arbiter_variant": null, "stageB_accepted_of_48": null},
+    {"pair": "Luna->DeepSeek", "generator_variant": null, "arbiter_variant": null, "stageB_accepted_of_48": null},
+    {"pair": "Luna->Sol", "generator_variant": "medium", "arbiter_variant": "medium", "stageB_accepted_of_48": [43, 45]},
+    {"pair": "DeepSeek->Luna", "generator_variant": null, "arbiter_variant": null, "stageB_accepted_of_48": null},
+    {"pair": "DeepSeek->DeepSeek", "generator_variant": null, "arbiter_variant": null, "stageB_accepted_of_48": null},
+    {"pair": "DeepSeek->Sol", "generator_variant": "off", "arbiter_variant": "medium", "stageB_accepted_of_48": [38, 31]}
+  ],
+  "boundaries": {
+    "no_models": true,
+    "no_new_audio": true,
+    "nonindependent_history": true,
+    "same_48_twice_not_96": true,
+    "historical_flash_low_stageB": [44, 43],
+    "historical_risk_9_fit_overflow": [5, 4],
+    "historical_predicted_fit_30_fit": [30, 30],
+    "historical_local_observations_not_138_independent": true
+  }
+}

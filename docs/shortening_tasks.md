@@ -1,12 +1,13 @@
 # Задачи: надёжное сокращение полного файла
 
-Статус на 13 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
+Статус на 14 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
 HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью проверена и
 зафиксирована коммитом `c5bf383`; SH-03 реализована, проверена и зафиксирована
 коммитом `9a1ddd9`; по запросу пользователя SH-04 зафиксирована коммитом
 `a958052`; SH-05 и SH-11 реализованы, покрыты модульными тестами и прошли
-завершённую техническую real offline acceptance в текущем незафиксированном
-рабочем дереве ([документальная запись](shortening_real_acceptance.md)).
+завершённую техническую real offline acceptance в commit `344880b`
+([документальная запись](shortening_real_acceptance.md)); continuation inventory
+is linked in [SH08 preparation](sh08_matrix_preparation.md).
 Следующая задача — SH-08, для неё требуется отдельное разрешение на платный
 технический пилот; её чекбокс здесь не отмечен.
 Историческая матрица фактических generator→arbiter запусков и неисполненное
@@ -339,12 +340,13 @@ outside spoken subtitle text, so SRT/JSON export remains machine/TTS-safe.
 [`shortening_review.md`](shortening_review.md) documents application, recovery,
 and resume boundaries. SH-10's final-context evaluator remains unimplemented.
 
-**Independent verification (13 September 2026):** From the activated
-`subs_env`, `uv run --active --no-sync -m pytest -q` reported `469 passed`, exit 0. `uv run --active --no-sync -m compileall -q utils tests
-pipeline.py ui/gradio_app.py`, all six requested CLI `--help` checks, and `git
-diff HEAD --check` each exited 0. The complete captured stdout/stderr log is
-`/tmp/opencode/sh05-final-verification/checks.log`. No network, TTS, LLM, or
-installation action was performed.
+**Historical verification (13 September 2026; superseded, past result retained):**
+From the activated `subs_env`, `uv run --active --no-sync -m pytest -q`
+reported `469 passed`, exit 0. Compileall, all six requested CLI `--help`
+checks, and `git diff HEAD --check` each exited 0. The complete captured
+stdout/stderr log is `/tmp/opencode/sh05-final-verification/checks.log`. No
+network, TTS, LLM, or installation action was performed. The current
+continuation baseline is `471 passed, 5 skipped`; see [SH08 preparation](sh08_matrix_preparation.md).
 
 ### Known bugs — remaining fixes deferred by user
 
@@ -412,10 +414,9 @@ SH-08, subject to separate paid authorization.
 сжимались; baseline-коммита ещё не было. Последний на тот момент тестовый
 результат и измеренные объёмы не выдавались за новую проверку реализации.
 
-Текущее решение на 13 сентября 2026: SH-00 и SH-01 реализованы и уже
+Историческое решение на 13 сентября 2026: SH-00 и SH-01 реализованы и уже
 присутствовали в HEAD `ec0cbaf` до этой задачи; SH-02 зафиксирована коммитом
 `c5bf383`; SH-03 зафиксирована коммитом `9a1ddd9`; по запросу пользователя SH-04
-зафиксирована коммитом `a958052`; SH-05 и SH-11 реализованы и проверены, но
-остаются незафиксированными в рабочем дереве; следующая — SH-08 и отдельное
-разрешение на платный технический пилот, а все последующие задачи ожидают.
-Автоматический коммит не выполняется.
+зафиксирована коммитом `a958052`; реализация SH-05 и SH-11 зафиксирована
+коммитом `344880b`, а SH-08 по-прежнему ожидает отдельного разрешения на
+платный технический пилот; все последующие задачи ожидают.

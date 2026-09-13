@@ -5,7 +5,7 @@ adds fail-closed resume for this command. It uses a frozen Vosk calibration
 profile and the resilient generation/review runner; it does not run an
 experiment matrix or repetitions. SH-05 and SH-11 add the offline outcome
 snapshot and human-review queue; they are implemented and independently
-verified in the current uncommitted source. This is an operational record, not
+verified in commit `344880b`. This is an operational record, not
 a semantic-quality guarantee or a completed live pilot.
 
 Activate the Linux project environment before running commands:

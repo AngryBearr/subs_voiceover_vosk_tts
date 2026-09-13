@@ -1,5 +1,11 @@
 # ПЕРЕДАЧА: продолжение SH08
 
+Continuation update (14 September 2026): SH05/SH11 work was committed as
+`344880b` (`feat(shorten): add review workflow and offline acceptance evidence`).
+The offline r2 inventory is recorded in
+[`sh08_matrix_preparation.md`](sh08_matrix_preparation.md); no model, network,
+subscription, or paid-run permission was granted.
+
 **Скопируй этот файл целиком и отправь принимающему агенту.** Текст самодостаточен:
 ему не нужен текущий чат. Отвечай и веди работу простым русским языком. Это
 передача состояния и план, а не сообщение о выполненном пилоте.
@@ -18,7 +24,7 @@
 ## 2. Рабочее место и безопасные границы
 
 - Корень проекта: `/home/vladimir-barbuta/Projects/subs_voiceover_vosk_tts`.
-- Фактическая среда Linux, несмотря на устаревшую строку про Windows в `AGENTS.md`.
+- Фактическая среда Linux.
 - Сначала прочитай текущий `AGENTS.md`. Перед скриптами активируй `subs_env`.
 - Запускай модули из корня проекта через `uv`.
 - Базовая команда:
@@ -36,18 +42,21 @@
 запрещены до отдельного согласования, включая использование подписки. Установка
 пакетов, изменение глобальных настроек и другие сетевые обращения тоже требуют
 отдельного разрешения.
-В этой передаче не требуется и не разрешается `git stage`, `commit` или `push`.
-Сохраняй все незакоммиченные изменения: не делай `reset`, `clean`, удаление,
-перезапись или `stash`, который может их потерять.
+The earlier blanket warning in this handoff against staging, committing, and
+pushing was superseded only for the user-approved SH05/SH11 commit, recorded as
+`344880b`. Push remains unauthorized, and do not stage or commit without
+separate user approval.
 
-Последний коммит — `a958052` (продолжение SH04); перед ним `9a1ddd9` (SH03) и
-`c5bf383` (SH02). Изменения SH05/SH11, приёмочная проверка, новые документы и
-правила простого общения в `AGENTS.md` не зафиксированы. Новый клон на последнем
-коммите их не содержит: передавай существующее рабочее дерево, включая новые
-файлы, ещё не добавленные в Git. Большинство файлов с результатами, моделями и
-исходными данными игнорируется Git. Проверяй их по точным путям и обеспечь доступ
-к ним; нулевой результат поиска с учётом правил игнорирования не означает, что
-файл отсутствует.
+Preserve all uncommitted changes: do not use `reset`, `clean`, deletion,
+overwrite, or `stash` in a way that could lose them.
+
+Earlier references to commit `a958052`, uncommitted SH05/SH11 work, and the
+prior working-tree state are historical. The SH05/SH11 work is recorded as
+`344880b`; later documentation commits may follow. Most result files, models,
+and source data remain Git-ignored. Check ignored artifacts by their exact
+paths and ensure access to them; zero search hits under Git ignore rules do not
+prove that a file is absent. The r2 raw artifacts and models must be transferred
+separately, and their presence does not mean that they are committed.
 
 ## 3. Порядок чтения
 
