@@ -3,7 +3,10 @@
 SH-03 adds a single-model command for a complete `.json` or `.srt` file. SH-04
 adds fail-closed resume for this command. It uses a frozen Vosk calibration
 profile and the resilient generation/review runner; it does not run an
-experiment matrix or repetitions.
+experiment matrix or repetitions. SH-05 and SH-11 add the offline outcome
+snapshot and human-review queue; they are implemented and independently
+verified in the current uncommitted source. This is an operational record, not
+a semantic-quality guarantee or a completed live pilot.
 
 Activate the Linux project environment before running commands:
 
@@ -131,3 +134,34 @@ resumable as a live run; `--dry-run` cannot be combined with `--resume`. Use a
 separate fresh directory for the live command. The command performs no API
 credential lookup, server or backend construction, network call, calibration
 training, or Vosk inference in dry-run mode.
+
+## Review outcomes and artifacts
+
+Every new live run publishes the following checkpoint artifacts alongside the
+ordinary runner outputs. `outcomes.json` and `outcomes.md` report every cue,
+with text change (`text_changed`) and outcome status as independent dimensions.
+`review.json` and `review.md` contain only unresolved or attention-needed cues;
+the Markdown report groups short-timing, timing, protocol, transport, and
+semantic-unverified cases and includes the original, current text, context,
+candidates, budget, actual length, reason, latest model critique, and proposed
+action. `review_state.json` is the checksummed full snapshot: source and current
+items, configuration, plans, records, fingerprints, contexts, evidence, and
+the queue-binding snapshot ID.
+
+The legacy per-record budget and forecast fields remain available for
+compatibility; they are not approval markers. Legacy `report.summary` stage and
+verdict counts are separate from `report.outcome_summary`, which is authoritative
+for the current per-cue outcome queue. The initial intervention denominator is
+fixed for the run. New regressions are reported separately and never hidden by
+changing that denominator.
+
+Outcome status and evidence must remain distinct: semantic model or human
+acceptance is not measured audio fit, and a changed cue is not automatically
+solved. `measured_duration_sec` and `measured_fit` are null unless a measurement
+is valid for the current source, text, timing, profile, and configuration. A
+fresh model verdict is based on the ORIGINAL neighbor context and has
+`final_context_checked: false`; SH-10's final-context evaluator is not
+implemented. A later neighbor-window change invalidates semantic skip/reuse, so
+the artifacts make no claim of final-context validation. Prediction fits are
+estimates only. For the complete workflow and safe offline commands, see
+[`shortening_review.md`](shortening_review.md).

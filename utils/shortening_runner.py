@@ -53,6 +53,7 @@ from utils.shortening_resume import (
     save_baseline,
     RUNNER_ALGORITHM_VERSION,
 )
+from utils.shortening_review import build_review_state
 
 # Compatibility aliases used by the pre-SH04 experiment runner.  The durable
 # implementations are shared so legacy consumers retain their public shape.
@@ -132,6 +133,7 @@ def _module_hashes() -> dict[str, str]:
         "shortening_runner.py", "shortening_resume.py", "shortening_plan.py",
         "shortening_prompts.py", "length_check.py", "text_metrics.py", "vosk_text.py",
         "shortening_costs.py",
+        "shortening_review.py", "shortening_review_io.py",
     )
     root = Path(__file__).parent
     return {
@@ -457,14 +459,46 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
             "replayed_request_count": replayed_request_count,
         }
         report["summary"]["unknown_request_ids"] = [row["request_id"] for row in unknown]
+    # Review state is derived from the exact checkpoint payload, not from the
+    # original source objects.  Keep the legacy report metadata and counters
+    # untouched; the review summary is the authoritative SH05/SH11 view.  A
+    # few pre-SH05 callers construct this private report helper with synthetic
+    # records and no source rows; retain their legacy report-only behavior.
+    if len(items) == len(plans) and all(isinstance(record, dict) and "position" in record for record in records):
+        review_metadata = copy.deepcopy(report_metadata) if report_metadata is not None else {}
+        review_metadata["review_runtime"] = {
+            "models": copy.deepcopy(report["model"]),
+            "prompt_version": report["prompt_version"],
+            "run_config": asdict(run_config),
+        }
+        review_current = _prepare_checkpoint(items, records, plans, planner)
+        review_state = build_review_state(
+            source_items=items,
+            current_items=review_current,
+            plans=plans,
+            records=records,
+            planner_config=planner,
+            metadata=review_metadata,
+            selected_ids=list(target_ids),
+        )
+        report["outcomes"] = copy.deepcopy(review_state["outcomes"])
+        report["outcome_summary"] = copy.deepcopy(review_state["summary"])
+        report["review_snapshot_id"] = review_state["snapshot_id"]
     return report
 
 
 def _checkpoint(output_dir: Path, report: dict[str, Any], subtitles: list[dict[str, Any]]) -> None:
+    # Check the editable sidecar before replacing any primary export.  This is
+    # intentionally performed on every checkpoint, including resume.
+    from utils.shortening_review_io import check_review_overwrite, state_from_run, write_review_artifacts
+
+    state = state_from_run(output_dir, report, subtitles)
+    check_review_overwrite(output_dir, replacement_state=state)
     atomic_json(output_dir / "report.json", report)
     atomic_json(output_dir / "subtitles.json", subtitles)
     report["summary"]["export_error"] = _export_srt(subtitles, output_dir)
     atomic_json(output_dir / "report.json", report)
+    write_review_artifacts(output_dir, state)
 
 
 def _prepare_checkpoint(source: list[dict[str, Any]], records: list[dict[str, Any]],

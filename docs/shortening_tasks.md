@@ -3,8 +3,17 @@
 Статус на 13 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
 HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью проверена и
 зафиксирована коммитом `c5bf383`; SH-03 реализована, проверена и зафиксирована
-коммитом `9a1ddd9`; SH-04 реализована и проверена, но изменения рабочего
-дерева ещё не закоммичены; следующая задача — SH-05.
+коммитом `9a1ddd9`; по запросу пользователя SH-04 зафиксирована коммитом
+`a958052`; SH-05 и SH-11 реализованы, покрыты модульными тестами и прошли
+завершённую техническую real offline acceptance в текущем незафиксированном
+рабочем дереве ([документальная запись](shortening_real_acceptance.md)).
+Следующая задача — SH-08, для неё требуется отдельное разрешение на платный
+технический пилот; её чекбокс здесь не отмечен.
+Историческая матрица фактических generator→arbiter запусков и неисполненное
+предложение новой матрицы вынесены в [короткую сводку](shortening_model_pairs.md)
+и [JSON-предложение](sh08_model_matrix_proposal.json); диагностика Vosk — в
+[отдельной записи](vosk_timing_diagnostics.md). Это не разрешение на платные
+запуски.
 
 ## Цель
 
@@ -151,7 +160,7 @@ The default unknown-request block returns exit 2 and requires an explicit
 errors, not resent. Exactly-once external API or billing behavior is not
 guaranteed, and known costs remain separate from unresolved billing unknowns.
 
-### [ ] SH-05. Удобная очередь ручной проверки — P0
+### [x] SH-05. Удобная очередь ручной проверки — P0
 
 Зависит от SH-02…SH-04. Планируемые результаты: редактируемый `review.json` и читаемый `review.md`.
 
@@ -163,6 +172,35 @@ whose outcome is unresolved or needs attention.
 Команда применения правок принимает только явно одобренные известные `cue_id`, проверяет хеш исходника, формат и бюджет. Устаревшие и превышающие лимит правки не применяются молча. Остальные строки и таймкоды не меняются.
 
 **Готово, когда:** любой нерешённый случай легко найти и исправить без поиска по большим журналам; правки применяются безопасно. Измеряем не только число правок, но и фактическое время пользователя, если оно записано. Новый интерфейс Gradio пока не требуется.
+
+**Implementation note (SH-05, completed alongside SH-11):** Every new run now
+writes the all-cue `outcomes.json`/`outcomes.md` snapshot and the unresolved-only
+`review.json`/`review.md` queue, bound to checksummed `review_state.json`.
+The queue carries original/current text, neighbor context, candidates, budget,
+actual length, reason, latest critique, and proposed action. Applying a copied
+and explicitly edited queue accepts only known, unique, current-context-bound
+`approved=true` `keep`/`replace` entries and writes a new derived export; stale,
+invalid, over-budget, immutable, or malformed input fails closed. Apply and
+reanalysis are offline and hold a nonblocking run lock. See the concise
+[`review and reanalysis guide`](shortening_review.md) and the
+[`shorten_file` user guide](shorten_file.md).
+
+Outcome status and `text_changed` are independent. Model or human acceptance is
+not measured audio fit; invalid or missing current measurement stays null. A
+fresh model verdict refers to original neighbor context and has
+`final_context_checked: false`; SH-10 is not implemented. Changed neighbor
+windows invalidate reuse and keep attention in the queue. Prediction fits are
+estimates only. Legacy budget fields remain compatibility data, while
+`report.outcome_summary` is authoritative over legacy stage/verdict counts; the
+initial intervention denominator is fixed and later regressions are reported
+separately. This records implementation and verification only, not a semantic
+guarantee or live pilot.
+
+**Real offline technical acceptance (13 September 2026):** The four-file,
+full-source SH-05/SH-11 gate passed without LLM, TTS, network, or paid calls.
+See [`shortening_real_acceptance.md`](shortening_real_acceptance.md) for the
+durable r12 evidence, frozen hashes, and explicit quality boundaries. This is
+technical acceptance, not SH-08 or a semantic-quality result.
 
 ### [ ] SH-06. Проверить пользу арбитра при равных условиях — P1
 
@@ -211,6 +249,11 @@ whose outcome is unresolved or needs attention.
 ### [ ] SH-08. Проверить три полных файла — P1
 
 Начинается после SH-00…SH-05; SH-06 не является обязательным предварительным условием.
+SH-05/SH-11 уже имеют отдельную real offline technical acceptance, но этот
+чекбокс остаётся незакрытым; платный пилот требует отдельного разрешения.
+Текущая подготовка также имеет отдельные [модельные факты и proposal]
+(shortening_model_pairs.md) и [Vosk timing diagnostics]
+(vosk_timing_diagnostics.md); ни одна из этих записей не закрывает SH-08.
 
 Заранее выбрать три файла разной длины и с разной долей коротких фраз, не использованные для настройки инструкций LLM. По возможности получить не менее 500 исходно проблемных реплик суммарно; если их меньше, указать фактическое число. Некоторые источники уже использовались для калибровки Vosk — такой пилот не является новой независимой проверкой TTS.
 
@@ -244,11 +287,11 @@ whose outcome is unresolved or needs attention.
 - Независимый контроль пока выборочный, полного финального допуска сейчас нет. Вердикт модели не даёт гарантии 100%; бесконечных повторов и автоматических правок текста не будет.
 - Приёмка будущего режима: все запрошенные ID покрыты в бюджете, границы контекста проверены, нет утечки идентичности или истории, неизвестные случаи попали в очередь, расходы отделены, ошибки пачек изолированы, а пробные тесты по возможности обходятся без модельных вызовов.
 
-### [ ] SH-11. Per-subtitle outcome markers for review and safe reanalysis — P1
+### [x] SH-11. Per-subtitle outcome markers for review and safe reanalysis — P1
 
 Depends on SH-03; coordinate with SH-05 and implement alongside it before SH-08.
-This is a plan for a new capability, not a claim that an implementation already
-exists.
+The original requirements are retained below; implementation and verification are
+recorded after the acceptance criteria.
 
 Track two independent dimensions for every subtitle: whether its text changed,
 and its outcome/evidence. The outcome vocabulary must distinguish `unchanged and
@@ -284,6 +327,25 @@ while machine/TTS content remains unchanged; markers survive export through the
 sidecar; changed text, timing, profile, or context invalidates cached evidence;
 and analysis does not hide unresolved cues or remove them from the denominator.
 
+**Implementation note (SH-11, completed alongside SH-05):** The canonical
+per-cue outcome state is checksummed and published as `review_state.json`, with
+all-cue JSON/Markdown outcomes and an unresolved-only review queue. It records
+independent text-change and evidence dimensions, source/current text and
+timings, profile/configuration/context fingerprints, reusable checks, and
+separate measured duration/fit fields. Forced offline reanalysis invalidates
+cached model, human, and measured evidence while retaining lightweight
+predictions; external edits never auto-approve. The generated sidecar is kept
+outside spoken subtitle text, so SRT/JSON export remains machine/TTS-safe.
+[`shortening_review.md`](shortening_review.md) documents application, recovery,
+and resume boundaries. SH-10's final-context evaluator remains unimplemented.
+
+**Independent verification (13 September 2026):** From the activated
+`subs_env`, `uv run --active --no-sync -m pytest -q` reported `469 passed`, exit 0. `uv run --active --no-sync -m compileall -q utils tests
+pipeline.py ui/gradio_app.py`, all six requested CLI `--help` checks, and `git
+diff HEAD --check` each exited 0. The complete captured stdout/stderr log is
+`/tmp/opencode/sh05-final-verification/checks.log`. No network, TTS, LLM, or
+installation action was performed.
+
 ### Known bugs — remaining fixes deferred by user
 
 **Audit note (12 September 2026):** BUG-01 was fixed and tested as part of
@@ -314,8 +376,8 @@ SH-00 → SH-01 → SH-02 → SH-03 → SH-04 → SH-05 → SH-08.
 
 SH-06 — по результатам первого пилота. SH-07 обязателен перед очисткой, но не должен оттеснять задачи качества. SH-09 отложен.
 
-SH-11 accompanies SH-05 and must be implemented before SH-08; the main order and
-the current next task, SH-05, remain unchanged.
+SH-11 accompanied SH-05 and was implemented before SH-08; the next task is now
+SH-08, subject to separate paid authorization.
 
 ## Коммиты и гипотезы
 
@@ -352,7 +414,8 @@ the current next task, SH-05, remain unchanged.
 
 Текущее решение на 13 сентября 2026: SH-00 и SH-01 реализованы и уже
 присутствовали в HEAD `ec0cbaf` до этой задачи; SH-02 зафиксирована коммитом
-`c5bf383`; SH-03 зафиксирована коммитом `9a1ddd9`; SH-04 реализована и
-проверена, но изменения рабочего дерева ещё не закоммичены; следующая — SH-05,
-а все последующие задачи ожидают.
+`c5bf383`; SH-03 зафиксирована коммитом `9a1ddd9`; по запросу пользователя SH-04
+зафиксирована коммитом `a958052`; SH-05 и SH-11 реализованы и проверены, но
+остаются незафиксированными в рабочем дереве; следующая — SH-08 и отдельное
+разрешение на платный технический пилот, а все последующие задачи ожидают.
 Автоматический коммит не выполняется.

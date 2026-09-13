@@ -1,0 +1,277 @@
+{
+  "schema": "sh08_pilot_manifest.compact.v1",
+  "status": "SH08_IN_PROGRESS/PREPARATION_ONLY",
+  "preparation_only": true,
+  "pilot_complete": false,
+  "paid_calls_authorized": false,
+  "audit_authorized": false,
+  "spend_cap": null,
+  "objective": "Track frozen SH08 preparation inputs and nine real local Vosk smoke WAVs; no funded execution.",
+  "local_tts_claim": {
+    "statement": "Exactly 9/9 selected cues produced real local Vosk WAVs; no LLM calls and no funded calls occurred.",
+    "selected": 9,
+    "synthesis_success": 9,
+    "fits": 5,
+    "overflow": 4,
+    "sample_scope": "Three cues per source only; not three whole processed files and not a 15% goal result."
+  },
+  "corpus_root": "/home/vladimir-barbuta/Downloads/subs_found_for_testing",
+  "sources": [
+    {
+      "source_id": "1a8bee086a0a",
+      "filename": "Australian Survivor S01E03_ru.srt",
+      "sha256": "1a8bee086a0afebb288095b618cf2d152ff96721bc26c77241baf606c9d984fa",
+      "cue_count": 1523,
+      "selected": 1219,
+      "initial_queue": 1219,
+      "invalid": 0,
+      "risk": {
+        "short_timing": {"all_plans": 425, "selected": 425},
+        "repetition": {"all_plans": 22, "selected": 20},
+        "zero_risk": 287,
+        "zero_nonrisk": 57,
+        "valid_zero": 344
+      }
+    },
+    {
+      "source_id": "c3985a859afa",
+      "filename": "S01E02.srt",
+      "sha256": "c3985a859afabd5691502f1281d145b6280b1a127ec4117a0cf9af576f9495b2",
+      "cue_count": 1007,
+      "selected": 773,
+      "initial_queue": 773,
+      "invalid": 0,
+      "risk": {
+        "short_timing": {"all_plans": 308, "selected": 308},
+        "repetition": {"all_plans": 13, "selected": 13},
+        "zero_risk": 212,
+        "zero_nonrisk": 36,
+        "valid_zero": 248
+      }
+    },
+    {
+      "source_id": "3360ef4620d7",
+      "filename": "Survivor.S44E07.srt",
+      "sha256": "3360ef4620d7e630df09e3d7f3a7e9b8d6273d1e2ade08a101eb07fb9e375fe1",
+      "cue_count": 995,
+      "selected": 859,
+      "initial_queue": 861,
+      "invalid": 2,
+      "risk": {
+        "short_timing": {"all_plans": 254, "selected": 254},
+        "repetition": {"all_plans": 2, "selected": 2},
+        "zero_risk": 147,
+        "zero_nonrisk": 31,
+        "valid_zero": 178
+      }
+    }
+  ],
+  "zero_budget_totals": {
+    "zero_risk": 646,
+    "zero_nonrisk": 124,
+    "valid_zero": 770,
+    "invalid": 2
+  },
+  "profile": {
+    "path": "output/vosk_calibration_20260910/profiles/profile_voice_8_rate_1.5.json",
+    "sha256": "eab509922c511ed0dbd2b3948d5a0cf55de78dc11ab6127e9c59443f4cabcb59",
+    "identity": {
+      "engine": "vosk",
+      "voice": 8,
+      "rate": 1.5,
+      "normalizer": "vosk_punctuation_v1_no_ruaccent",
+      "normalizer_sha256": "9c175a1e4b21833f94a745c83512c916a4cabfdb1ecf9a8e0b56d3321494fb41",
+      "model_config_sha256": "55ad317934ac2ec40b4a9f56ee0792b0f0a3718767e49934fe8d89aae8b37546",
+      "model_fingerprint": "33f6a27ea20774f5a6da4df910f9c3dd013187617238b972505642f0788da4ae"
+    }
+  },
+  "model": {
+    "path": "models/vosk-model-tts-ru-0.10-multi",
+    "fingerprint": "33f6a27ea20774f5a6da4df910f9c3dd013187617238b972505642f0788da4ae",
+    "config_sha256": "55ad317934ac2ec40b4a9f56ee0792b0f0a3718767e49934fe8d89aae8b37546"
+  },
+  "parameters": {
+    "speech_rate": 1.5,
+    "voice": 8,
+    "text_mode": "punctuation",
+    "generation_batch_size": 6,
+    "review_batch_size": 12,
+    "max_repairs": 1,
+    "max_context_chars": 20000,
+    "output_token_bound": "not chosen",
+    "config_label": "deepseek/deepseek-flash",
+    "config_label_authorized": false
+  },
+  "smoke": [
+    {
+      "source_id": "1a8bee086a0a",
+      "cue_id": "cue-1",
+      "selection_category": "positive_budget_risk",
+      "window_ms": 1533,
+      "duration_sec": 0.9171882086167801,
+      "fits": true,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/1a8bee086a0a/audio/preflight_audio/wav/1_cue-1_original.wav"
+    },
+    {
+      "source_id": "1a8bee086a0a",
+      "cue_id": "cue-9",
+      "selection_category": "zero_character_budget_risk",
+      "window_ms": 950,
+      "duration_sec": 1.3119274376417234,
+      "fits": false,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/1a8bee086a0a/audio/preflight_audio/wav/9_cue-9_original.wav"
+    },
+    {
+      "source_id": "1a8bee086a0a",
+      "cue_id": "cue-361",
+      "selection_category": "repetition_candidate_risk",
+      "window_ms": 599,
+      "duration_sec": 0.905578231292517,
+      "fits": false,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/1a8bee086a0a/audio/preflight_audio/wav/361_cue-361_original.wav"
+    },
+    {
+      "source_id": "c3985a859afa",
+      "cue_id": "cue-5",
+      "selection_category": "positive_budget_risk",
+      "window_ms": 1800,
+      "duration_sec": 1.6370068027210884,
+      "fits": true,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/c3985a859afa/audio/preflight_audio/wav/5_cue-5_original.wav"
+    },
+    {
+      "source_id": "c3985a859afa",
+      "cue_id": "cue-15",
+      "selection_category": "zero_character_budget_risk",
+      "window_ms": 1159,
+      "duration_sec": 0.9287981859410431,
+      "fits": true,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/c3985a859afa/audio/preflight_audio/wav/15_cue-15_original.wav"
+    },
+    {
+      "source_id": "c3985a859afa",
+      "cue_id": "cue-221",
+      "selection_category": "repetition_candidate_risk",
+      "window_ms": 1384,
+      "duration_sec": 1.1261678004535147,
+      "fits": true,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/c3985a859afa/audio/preflight_audio/wav/221_cue-221_original.wav"
+    },
+    {
+      "source_id": "3360ef4620d7",
+      "cue_id": "cue-2",
+      "selection_category": "positive_budget_risk",
+      "window_ms": 1300,
+      "duration_sec": 0.893968253968254,
+      "fits": true,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/3360ef4620d7/audio/preflight_audio/wav/2_cue-2_original.wav"
+    },
+    {
+      "source_id": "3360ef4620d7",
+      "cue_id": "cue-7",
+      "selection_category": "zero_character_budget_risk",
+      "window_ms": 360,
+      "duration_sec": 0.7198185941043084,
+      "fits": false,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/3360ef4620d7/audio/preflight_audio/wav/7_cue-7_original.wav"
+    },
+    {
+      "source_id": "3360ef4620d7",
+      "cue_id": "cue-455",
+      "selection_category": "repetition_candidate_risk",
+      "window_ms": 580,
+      "duration_sec": 0.905578231292517,
+      "fits": false,
+      "sample_rate": 22050,
+      "wav_relativepath": "smoke/3360ef4620d7/audio/preflight_audio/wav/455_cue-455_original.wav"
+    }
+  ],
+  "network": {
+    "paid_requests": 0,
+    "network_attempts": 0,
+    "forbidden_attempt_count": 0,
+    "offline_environment": {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
+    "network_attempt_log": {
+      "path": "/tmp/opencode/sh08-preparation/network_attempts.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "guard": {
+      "path": "/tmp/opencode/sh08-preparation/guard/sitecustomize.py",
+      "sha256": "ff5e6bec8151fe43f1094e3f7017cdc231caefcf4729a9e1d5d717853cd5464a"
+    },
+    "temporary_module": {
+      "path": "/tmp/opencode/sh08-preparation/module/sh08_preparation.py",
+      "sha256": "61d323ed83a1ce824c5278545bcf048c87761ae4afc3941ccbd16bff1eafaf2c"
+    }
+  },
+  "eligibility": {
+    "summary": "No selected LLM instruction-tuning cases found in audited artifacts; this is a bounded audit finding, not absolute proof; the global exclusion ledger is absent.",
+    "first3_sample_case_ids": [
+      "b2d1135c9143:cue-86",
+      "b2d1135c9143:cue-431",
+      "b2d1135c9143:cue-598"
+    ],
+    "audited_artifacts": [
+      {
+        "path": "output/shortening_expanded_pilot_20260910/experiment_manifest.json",
+        "sha256": "541661ff66e3f3af9007d55702cc46f8255f7119326d760caeae048a3c3e41a8"
+      },
+      {
+        "path": "output/shortening_verification_20260910/final_validation.json",
+        "sha256": "ebead6060f9b7d60e5cb22cea6c80c2a1a1cfa21e710be504da1c82e85898f75"
+      },
+      {
+        "path": "output/shortening_corpus_20260910/manifest.json",
+        "sha256": "1a41746a927c00b6a581360a4b2229ba618daeb2ac8a9642dd86d37e77ca58e6"
+      },
+      {
+        "path": "output/shortening_corpus_20260910_v2/manifest.json",
+        "sha256": "727dbf7e571519f9c6b16265fb14c693b4a090465f239269f81891ebfeff25f9"
+      },
+      {
+        "path": "output/shortening_corpus_20260910_v2/pilot_manifest.json",
+        "sha256": "743d02cd6487a7e364cc10d61c42498fd140f1900cc768fea0c6cfa0a57ab366"
+      }
+    ],
+    "historical_S44E11": {"source": "Survivor.S44E11.srt", "excluded": true}
+  },
+  "evidence_refs": [
+    {
+      "path": "output/sh08_preparation_20260913_r1/sh08_pilot_results.json",
+      "sha256": "9c4027d4d8501ae94ceb2e66da78e4b94b2ee654244df79424247fc5f91e42dc"
+    },
+    {
+      "path": "output/sh08_preparation_20260913_r1/offlinepreflight.json",
+      "sha256": "597d1f837e54e9244b193e20e2f0fbcb65ab776c57fc0ae5fa9c55eec6d37759"
+    },
+    {
+      "path": "output/sh08_preparation_20260913_r1/verification.log",
+      "sha256": "4bd688b70cc572d2e515fa8fddbefeb9c98c9432b7bf5fe0d391e68cb7944e4a"
+    }
+  ],
+  "audit_protocol": {
+    "seed": "sh08-independent-audit-v1",
+    "changed_per_file": 24,
+    "max_total": 72,
+    "selection": "First 24 text-changed cues per file by precommitted SHA256 rank; all if fewer, with insufficiency recorded.",
+    "confidence_filter": false,
+    "full_SH10_evaluator_claim": false,
+    "unchanged_not_checked": true
+  },
+  "readiness": {
+    "audit_cli_bridge": "missing",
+    "hard_spend_guard": "missing",
+    "model_decision": "pending",
+    "variant_decision": "pending",
+    "quota_cap": null,
+    "zero_budget_policy": "pending; preserve actual preflight fit, then retain unresolved zero cases rather than assuming impossible audio"
+  }
+}

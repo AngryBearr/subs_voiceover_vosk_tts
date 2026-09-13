@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "corpus_root_env": "SUBS_REAL_CORPUS_ROOT",
+  "corpus_root_default": "/home/vladimir-barbuta/Downloads/subs_found_for_testing",
+  "sources": [
+    {
+      "path": "Australian Survivor S01E03_ru.srt",
+      "sha256": "1a8bee086a0afebb288095b618cf2d152ff96721bc26c77241baf606c9d984fa",
+      "count": 1523,
+      "rationale": "large and diverse corpus member"
+    },
+    {
+      "path": "S01E02.srt",
+      "sha256": "c3985a859afabd5691502f1281d145b6280b1a127ec4117a0cf9af576f9495b2",
+      "count": 1007,
+      "rationale": "large and diverse corpus member"
+    },
+    {
+      "path": "Survivor.S44E07.srt",
+      "sha256": "3360ef4620d7e630df09e3d7f3a7e9b8d6273d1e2ade08a101eb07fb9e375fe1",
+      "count": 995,
+      "invalid_ids": ["cue-70", "cue-356"],
+      "rationale": "large and diverse corpus member with known invalid timings"
+    },
+    {
+      "path": "Survivor.S44E11.srt",
+      "sha256": "302a10d046d0162e40c85a355af0b80ac0e722ba6261711ce4c7343198b11e02",
+      "count": 894,
+      "historical_fixture_source_id": "302a10d046d0",
+      "rationale": "historical acceptance anchor"
+    }
+  ],
+  "profile": {
+    "path": "output/vosk_calibration_20260910/profiles/profile_voice_8_rate_1.5.json",
+    "sha256": "eab509922c511ed0dbd2b3948d5a0cf55de78dc11ab6127e9c59443f4cabcb59",
+    "voice": 8,
+    "rate": 1.5,
+    "text_mode": "punctuation",
+    "length_basis": "normalized_tts_text"
+  },
+  "model": {
+    "path": "models/vosk-model-tts-ru-0.10-multi",
+    "fingerprint": "33f6a27ea20774f5a6da4df910f9c3dd013187617238b972505642f0788da4ae",
+    "config_sha256": "55ad317934ac2ec40b4a9f56ee0792b0f0a3718767e49934fe8d89aae8b37546",
+    "config_label": "deepseek/deepseek-flash"
+  },
+  "historical_report": {
+    "path": "output/shortening_expanded_luna_medium_20260910_run2/r1/standard/302a10d046d0/report.json",
+    "sha256": "b3e783f795de23da7ca5a07f73c1822fca215b87ac76b62fd5d3fa7963b449c4"
+  },
+  "preflight_reference": {
+    "description": "Existing temporary preflight reference; it is evidence only and is never used as current state",
+    "path": "/tmp/opencode/sh05-real-preflight/summary.json",
+    "counts": [
+      {"source_count": 1523, "selected_count": 1219, "queue_count": 1219},
+      {"source_count": 1007, "selected_count": 773, "queue_count": 773},
+      {"source_count": 995, "selected_count": 859, "queue_count": 861}
+    ]
+  }
+}

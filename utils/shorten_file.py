@@ -488,7 +488,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         report = asyncio.run(execute_run(prepared))
         summary = report.get("summary", {})
-        print(json.dumps({"run_state": report.get("run_state"), "output_dir": str(prepared.output_dir), "selected_count": summary.get("selected_count", len(prepared.target_ids)), "resolved_count": summary.get("resolved_count", 0), "manual_count": summary.get("manual_count", 0)}, ensure_ascii=False, sort_keys=True))
+        outcome_summary = report.get("outcome_summary", {})
+        print(json.dumps({"run_state": report.get("run_state"), "output_dir": str(prepared.output_dir), "selected_count": summary.get("selected_count", len(prepared.target_ids)), "resolved_count": summary.get("resolved_count", 0), "manual_count": summary.get("manual_count", 0), "review_unresolved_count": outcome_summary.get("unresolved_count", 0), "intervention_count": outcome_summary.get("intervention_count", 0)}, ensure_ascii=False, sort_keys=True))
         return 0 if report.get("run_state") == "completed" else 1
     except UnknownRequestsError as exc:
         ids = ", ".join(exc.request_ids)

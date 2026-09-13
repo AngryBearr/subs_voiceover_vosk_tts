@@ -1,0 +1,188 @@
+{
+  "schema": "sh08_model_matrix_proposal.v1",
+  "status": "DRAFT_NOT_EXECUTED",
+  "purpose": "Compare two generators against three arbiters without claiming historical execution or authorizing spend.",
+  "authorizations": {
+    "paid_runs": false,
+    "network_calls": false,
+    "audit_authorized": false,
+    "model_selection_accepted": false,
+    "spend_cap_usd": null,
+    "model_quota_cap": null,
+    "run_targets": []
+  },
+  "proposed_defaults": {
+    "are_user_accepted": false,
+    "generator_luna": {
+      "provider": "opencode",
+      "model": "openai/gpt-5.6-luna",
+      "variant": "medium"
+    },
+    "generator_deepseek_flash": {
+      "provider": "deepseek",
+      "model": "deepseek/deepseek-flash",
+      "variant": "off"
+    },
+    "arbiters": [
+      {
+        "provider": "opencode",
+        "model": "openai/gpt-5.6-luna",
+        "variant": "medium"
+      },
+      {
+        "provider": "deepseek",
+        "model": "deepseek/deepseek-flash",
+        "variant": "off"
+      },
+      {
+        "provider": "opencode",
+        "model": "openai/gpt-5.6-sol",
+        "variant": "medium"
+      }
+    ]
+  },
+  "historical_pair_mapping": {
+    "found_actual_pair_ids": [
+      "luna_to_sol",
+      "deepseek_to_sol"
+    ],
+    "not_found_pair_ids": [
+      "luna_to_luna",
+      "luna_to_deepseek",
+      "deepseek_to_luna",
+      "deepseek_to_deepseek"
+    ],
+    "found_actual_paths": [
+      {
+        "generator_family": "Luna",
+        "arbiter": "Sol-medium",
+        "evidence": "benchmark none; expanded low and medium artifacts"
+      },
+      {
+        "generator_family": "DeepSeek Flash",
+        "arbiter": "Sol-medium",
+        "evidence": "six-target benchmark, expanded off/low artifacts, and deepseek_limits_v2 variants"
+      }
+    ],
+    "other_four_proposed_combinations": {
+      "status": "not_found_in_audited_artifacts",
+      "combinations": [
+        "Luna-generator × Luna-arbiter",
+        "Luna-generator × DeepSeek-arbiter",
+        "DeepSeek-generator × Luna-arbiter",
+        "DeepSeek-generator × DeepSeek-arbiter"
+      ],
+      "not_found_does_not_mean_never_existed": true
+    }
+  },
+  "required_pair_matrix": [
+    {
+      "id": "luna_to_luna",
+      "generator": "proposed_defaults.generator_luna",
+      "arbiter": "proposed_defaults.arbiters[0]",
+      "execution_status": "not_run",
+      "authorization": false,
+      "run_targets": []
+    },
+    {
+      "id": "luna_to_deepseek",
+      "generator": "proposed_defaults.generator_luna",
+      "arbiter": "proposed_defaults.arbiters[1]",
+      "execution_status": "not_run",
+      "authorization": false,
+      "run_targets": []
+    },
+    {
+      "id": "luna_to_sol",
+      "generator": "proposed_defaults.generator_luna",
+      "arbiter": "proposed_defaults.arbiters[2]",
+      "execution_status": "not_run",
+      "authorization": false,
+      "run_targets": []
+    },
+    {
+      "id": "deepseek_to_luna",
+      "generator": "proposed_defaults.generator_deepseek_flash",
+      "arbiter": "proposed_defaults.arbiters[0]",
+      "execution_status": "not_run",
+      "authorization": false,
+      "run_targets": []
+    },
+    {
+      "id": "deepseek_to_deepseek",
+      "generator": "proposed_defaults.generator_deepseek_flash",
+      "arbiter": "proposed_defaults.arbiters[1]",
+      "execution_status": "not_run",
+      "authorization": false,
+      "run_targets": []
+    },
+    {
+      "id": "deepseek_to_sol",
+      "generator": "proposed_defaults.generator_deepseek_flash",
+      "arbiter": "proposed_defaults.arbiters[2]",
+      "execution_status": "not_run",
+      "authorization": false,
+      "run_targets": []
+    }
+  ],
+  "fairness_protocol": {
+    "must_be_identical_across_pairs": [
+      "new current profile",
+      "source selection",
+      "windows",
+      "prompts and prompt versions",
+      "budgets",
+      "tools",
+      "repair limit",
+      "selected targets"
+    ],
+    "development_corpus": {
+      "required": true,
+      "must_not_be": "the three SH08 pilot files",
+      "proposed_case_count": 24,
+      "selection_status": "not_frozen",
+      "size_and_budget_status": "pending_user_choice"
+    },
+    "candidate_reuse": "Generate once per generator, then reuse the identical saved first candidate for all three arbiters.",
+    "repair": "At most one additional repair per branch, using the same generator; keep receipts separate.",
+    "compatibility": "Never edit models into an existing SH04 run or bypass manifest compatibility.",
+    "adapter_boundary": "The ordinary shorten_file CLI binds one model to both roles. Mixed generator/arbiter pairs require a separate experiment path and adapter; do not invent a public --arbiter flag. Generic run_trial supports distinct roles but is not itself evidence that the public CLI does."
+  },
+  "measurements": {
+    "coverage": "Every selected target and branch receipt, including unresolved and protocol failures.",
+    "protocol": "ID mapping, target-only output, schema validity, context boundary, and manifest compatibility.",
+    "budget": "Request, token, repair, unknown-state, and cost ledgers with unresolved denominator retained.",
+    "current_audio_fit": "Run the same original-audio preflight where selected; measured fit is separate from model acceptance.",
+    "model_audit": "Semantic audit meaning, model identity, cost, latency, and disagreement; raw accept count is not semantic ground truth.",
+    "blinding": "A checker receives no history or first-verdict identity; use blinded case and verdict IDs.",
+    "independent_checker": "Still pending. Two families across a generator/arbiter pair do not automatically provide a third independent family."
+  },
+  "optional_sh06_control": {
+    "status": "separate_protocol_required",
+    "description": "If the question is whether an arbiter helps, add an equally budgeted length-only-repair control with the same first candidate and one extra attempt.",
+    "do_not_confuse": "Raw accepted counts are not semantic correctness."
+  },
+  "cost_and_scope_boundary": {
+    "same_three_files_all_six_pairs": {
+      "paid_runs": 18,
+      "status": "not_authorized",
+      "recommendation": "not the first step"
+    },
+    "choose_protocol_before_pilot": true,
+    "no_cost_claim": "No new paid request or cost is authorized by this proposal."
+  },
+  "blocking_gaps": [
+    "missing mixed-role audit adapter",
+    "missing hard spend guard",
+    "zero-budget policy is pending and must be explicit before execution",
+    "development corpus selection, size, and budget are not frozen",
+    "independent checker family remains pending"
+  ],
+  "execution_readiness": {
+    "audit_adapter": "missing",
+    "spend_guard": "missing",
+    "zero_budget_policy": "pending_user_decision",
+    "selected_targets": []
+  },
+  "historical_scope_note": "The historical 48-target expanded artifacts repeat the same 48 targets twice; they are not 96 independent targets. Old protocol caps and the current normalized calibrated profile must not be combined for a new model rank."
+}
