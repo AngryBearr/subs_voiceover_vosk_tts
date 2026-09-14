@@ -1,0 +1,173 @@
+{
+  "schema": "sh08_live_protocol.v1",
+  "status": "APPROVED_NOT_EXECUTED",
+  "purpose": "Record explicit user approvals and notes on model suggestions, not executed results.",
+  "user_consent": {
+    "no_byok_confirmed": true,
+    "muse_data_approved": true,
+    "placeholder": false,
+    "approved_source": "Explicit user approvals in this conversation: 60-case plan, addition of Muse generator, Muse product-improvement condition, ordinary OpenRouter balance without BYOK",
+    "approved_scope": "60 unique development cases, two repetitions, eight pairs; no full pilots; $5 direct API, 300 subscription conservative attempt units, 600 total attempt units"
+  },
+  "execution": {
+    "model_requests_made": 0,
+    "network_calls_made": 0,
+    "paid_work_executed": false,
+    "local_preparation_status": "implemented local preparation is waiting for this document and requires verification before paid work",
+    "planned_output": "output/sh08_eightpair_20260914_r1",
+    "planned_output_created": false,
+    "all_results_status": "not_yet_executed"
+  },
+  "scope": {
+    "cases": 60,
+    "unique_cases": 60,
+    "repetitions": 2,
+    "eight_pairs": 8,
+    "pair_count": 8,
+    "pairs": [
+      "luna_to_luna",
+      "luna_to_deepseek",
+      "luna_to_sol",
+      "deepseek_to_luna",
+      "deepseek_to_deepseek",
+      "deepseek_to_sol",
+      "gemini_to_sol",
+      "muse_to_sol"
+    ],
+    "generators": ["luna", "deepseek", "gemini", "muse"],
+    "arbiters": ["luna", "deepseek", "sol"],
+    "core_shape": "Luna/DS -> Luna/DS/Sol, plus Gemini/Muse -> Sol",
+    "full_pilots": false
+  },
+  "limits": {
+    "direct_api_usd": 5,
+    "subscription_conservative_attempt_units": 300,
+    "total_attempt_units": 600,
+    "max_tokens": 16384,
+    "tools": false,
+    "extra_automatic_retries": false,
+    "opencode_internal_retries": 5,
+    "opencode_quota_note": "OpenCode internal retries are five retries after the initial attempt: six permanent quota units per prompt.",
+    "applies_to": "The entire experiment, including restarts.",
+    "automatic_limit_increase": false
+  },
+  "phases": {
+    "smoke": "First six frozen cases, repetition 1; no extra cases.",
+    "first_pass": "Complete all first-pass requests for both repetitions before any repair.",
+    "repair_and_recheck": "At most one branch repair and one recheck after first-pass coverage.",
+    "fixed_batches": [6, 27, 27],
+    "batch_rationale": "Chosen to fit quota, not to make random model changes."
+  },
+  "models": {
+    "source": "utils/sh08_matrix_models.py",
+    "source_is_pure_spec": true,
+    "luna": {
+      "provider": "opencode",
+      "model": "openai/gpt-5.6-luna",
+      "variant": "medium",
+      "pricing": "unpriced subscription",
+      "subscription": true,
+      "max_tokens": 16384
+    },
+    "deepseek": {
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "variant": "off",
+      "input_per_million": 0.3,
+      "output_per_million": 1.2,
+      "pricing_period": "peak",
+      "subscription": false,
+      "max_tokens": 16384
+    },
+    "sol": {
+      "provider": "opencode",
+      "model": "openai/gpt-5.6-sol",
+      "variant": "medium",
+      "pricing": "unpriced subscription",
+      "subscription": true,
+      "max_tokens": 16384
+    },
+    "gemini": {
+      "provider": "openrouter",
+      "model": "google/gemini-3.8-flash",
+      "variant": "low",
+      "model_generation_note": "Gemini 3.8 Flash, third generation.",
+      "selected_sync_endpoint": "google-ai-studio/flex",
+      "selected_sync_pricing_per_million": {"input": 0.375, "output": 1.875},
+      "standard_pricing_per_million": {"input": 0.75, "output": 3.75},
+      "batch_pricing_per_million": {"input": 0.375, "output": 1.875},
+      "fallbacks": false,
+      "async_batch_executed": false,
+      "subscription": false,
+      "max_tokens": 16384
+    },
+    "muse": {
+      "provider": "openrouter",
+      "model": "meta/muse-spark-1.3-contributor",
+      "variant": "low",
+      "endpoint_tag": "meta",
+      "model_generation_note": "Muse is treated as a cheap fourth-generation suggestion, not an independent annotator.",
+      "mandatory_reasoning": true,
+      "input_per_million": 0.1,
+      "output_per_million": 0.2,
+      "subscription": false,
+      "max_tokens": 16384
+    }
+  },
+  "muse_consent": {
+    "possible_product_improvement_use": true,
+    "condition": "User consent covers possible product improvement.",
+    "training_claim": "Do not claim confirmed training on every prompt.",
+    "source_file_policy": "Text context only; no keys or code.",
+    "ordinary_openrouter_balance": "User confirmed ordinary balance without BYOK.",
+    "subtitle_excerpts": "User may transfer subtitle excerpts under provider terms and has consented to that possibility."
+  },
+  "selection": {
+    "source": "Seven test files, excluding pilot raw and canonical files and S44E11.",
+    "rank": "SHA-256 of sh08-matrix-v1:20260914:<case_id>, sorted by digest and case_id.",
+    "all_intervention_cases": true,
+    "include_zero_capacity_cases": true,
+    "send_no_llm_requests_for_zeros": true,
+    "unknown_cases": "unresolved",
+    "selection_frozen": false,
+    "freeze_condition": "Not frozen until preparation."
+  },
+  "audio_and_profile": {
+    "engine": "voice 8",
+    "rate": 1.5,
+    "current_profile": {
+      "path": "output/vosk_calibration_20260910/profiles/profile_voice_8_rate_1.5.json",
+      "sha256": "eab509922c511ed0dbd2b3948d5a0cf55de78dc11ab6127e9c59443f4cabcb59"
+    },
+    "manifest_reference": {
+      "path": "docs/sh08_pilot_manifest.json",
+      "sha256": "dc01852aff9032e713ab77da79babb6496057fdd97fdedd5323f93e5d9ade2f9"
+    }
+  },
+  "accounting": {
+    "monetary_reservation": "Reserve full context plus max output multiplied by 1.10, compared with actual cost reported by OpenRouter and conservative no-cache DeepSeek cost.",
+    "reservation_is_not": ["an expectation", "an invoice"],
+    "subscription_counting": "Count logical prompts against the six-attempt upper bound; do not claim exact physical visibility.",
+    "coverage_reporting": "Primary first-pass coverage is separate from repairs, which may be budget-limited.",
+    "pricing_sources_as_of_session": true,
+    "online_fetch_needed": false,
+    "user_cards_main_verified": true,
+    "pricing_sources": {
+      "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
+      "gemini": "https://ai.google.dev/gemini-api/docs/pricing",
+      "muse": "https://openrouter.ai/meta/muse-spark-1.3-contributor",
+      "subscription": "https://opencode.ai/docs/"
+    },
+    "gemini_flex_note": "Chosen sync Flex price is the same as the listed batch price; no day wait is required."
+  },
+  "audit": {
+    "independent_audit_model_approved": false,
+    "muse_role": "generator only, not annotator",
+    "independent_truth_claim": false
+  },
+  "approvals": {
+    "commits": false,
+    "push": false,
+    "no_other_files_to_edit": true
+  }
+}
