@@ -1,5 +1,120 @@
 # SH08 model test notes
 
+## Current status (14 September 2026; authoritative)
+
+The SH08 small matrix first pass is **EXECUTED**: 60 unique cases, two
+repetitions, and eight pairs. Repairs are **PARTIAL** because the conservative
+subscription cap of 300 units was exhausted. All 88 r3 requests are complete;
+r3 contains no unknown request. The cumulative logical total is 89, including
+the one lost r1 request. The same 60 cases were used in both repetitions; this
+is not 120 independent cases.
+
+The full 60-case denominator is retained: 41 eligible cases, 18 valid
+zero-capacity cases, and 1 invalid source case. The 18 valid zero-capacity cases
+and the one invalid case are not discarded. The five invalid review rows are
+only the DeepSeek-arbiter-judging-Luna branch (4 in repetition 1 and 1 in
+repetition 2); the local parser rejected them, and no semantic verdict is
+assumed. First-pass coverage is complete and is reported separately from the
+non-uniform, budget-limited repairs.
+
+### First-pass comparison
+
+The following eight-row table reports first-pass accepts for each repetition;
+each repetition has 41 eligible observations. Repairs are not included in this
+table.
+
+| Pair | Repetition 1 accepts / 41 eligible | Repetition 2 accepts / 41 eligible |
+|---|---:|---:|
+| Luna → Luna | 23 / 41 | 21 / 41 |
+| Luna → DeepSeek | 17 / 41 | 15 / 41 |
+| Luna → Sol | 19 / 41 | 21 / 41 |
+| DeepSeek → Luna | 8 / 41 | 8 / 41 |
+| DeepSeek → DeepSeek | 8 / 41 | 8 / 41 |
+| DeepSeek → Sol | 7 / 41 | 8 / 41 |
+| Gemini → Sol | 19 / 41 | 16 / 41 |
+| Muse → Sol | 21 / 41 | 23 / 41 |
+
+Known priced total (reported OpenRouter cost plus conservative DeepSeek estimate) is `$0.1013308035`, consisting of OpenRouter
+`$0.0344566035` reported plus the conservative DeepSeek upper bound
+`$0.0668742`. Subscription usage is unpriced. There were 39 paid HTTP calls,
+50 subscription logical calls, and 89 logical calls in total; `50 × 6 = 300`
+subscription units plus 39 paid units = 339 total quota units. The subscription
+cap was 300 units, so no additional model calls are authorized by this record.
+
+### Interpretation and next decision
+
+Muse → Sol is a promising low-cost candidate for the next comparison with
+Luna → Sol under the **same arbiter**. It has 44 accepted observations versus
+40 for Luna → Sol out of 82 eligible observations (120 full-case observations,
+including structural skips); the difference of four is not a statistically
+established winner. Luna → Luna also has 44 accepts, but a self-pair is not
+independent validation.
+
+DeepSeek with `off` as generator is weak on current length compliance: it is
+overlength in 33/41 cases in each repetition. This is not a claim of global
+model inferiority, and changing only the arbiter will not fix generator length
+compliance. A future targeted low-thinking or local-length-repair experiment
+may help, but it is not authorized now and must not trigger automatic matrix
+expansion. Gemini Flex is fast and cheap, but it has more `cannot shorten`
+outcomes (13/20) than Muse (7/11) and Luna (9/9); this does not make Gemini a
+bad model by assumption, only records the observed raw quality pattern.
+
+The confirmed Gemini configuration is the OpenRouter `google/gemini-3.8-flash`
+base model pinned to `google-ai-studio/flex`, priced at `$0.375` / `$1.875` per
+million input/output tokens. This is the sync Flex endpoint at the same listed
+price as batch, not an asynchronous batch test. Muse is
+`meta/muse-spark-1.3-contributor` at `$0.10` / `$0.20`; the user approved Muse
+under the product-improvement condition. Muse and Luna are current preferred
+next candidates for a same-Sol comparison, not a final production selection.
+
+No audio, full pilot, or independent audit was performed. The safe next step
+is offline work on the 18 originals with zero predicted character capacity with local Vosk, followed by
+review of meaning, before three full pilots. Do not perform additional TTS now.
+Further model calls require new approval because the current 300-unit
+subscription subcap is spent; unused API cash does not authorize extra calls.
+Runtime/inference timings mix stages and batch sizes and are not a universal
+per-model benchmark.
+
+### Incident and artifact record
+
+- The r1 first Luna response was lost because of a visible/reasoning counter
+  bug. The user approved a retry, and six prior subscription units were
+  charged.
+- The r2 cached Sol response was preserved and reconciled offline as 55 cached
+  requests in the explicit derivative r3; no second paid replay was made.
+- The final raw status `blocked_unknown` was an exception-classification bug:
+  `BudgetLimited` inherits `MatrixError`; it was not an unknown receipt. The
+  corrected source now reports budget_limited, while the archived raw status is
+  unchanged. The analysis report derives `budget_exhausted`.
+- Historical pre-fix checks (14 September 2026; superseded) recorded `561
+  passed, 5 skips`; targeted verification after the fix reported `92 passed`.
+
+### Latest final verification
+
+The latest final verification is recorded in
+[`/tmp/opencode/sh08-final-verification.log`](/tmp/opencode/sh08-final-verification.log):
+`pytest` reported `563 passed, 5 skipped in 48.64s`, exit 0; compileall exited
+0; derived analysis validation matched existing outputs identically, exit 0;
+10 JSON files validated and no secrets were found.
+
+Authoritative readable results are in
+[`sh08_eightpair_results.md`](sh08_eightpair_results.md), with the machine
+record in [`sh08_eightpair_results.json`](sh08_eightpair_results.json). Raw r3
+artifacts and the analysis report are authoritative for r3; r1 and r2 remain
+historical preserved records and are not treated as missing transfer items.
+The live protocol and its hashes remain frozen: do not edit
+[`sh08_live_protocol.json`](sh08_live_protocol.json). The original r3 cannot
+resume normally after the code-hash fix; any future experiment needs a new
+approved contract and shared prior limits unless a new budget is explicitly
+approved.
+
+The prior planning and execution notes below are retained as a **HISTORICAL
+snapshot**. Statements there that say planned, not executed, or no model calls
+describe the state before the current r3 result and do not override this
+current-status block.
+
+## Historical prior planning record
+
 **Status: approved; r1 failed smoke, r2 retry not executed.** This note records
 the user's approvals and corrects earlier model-availability claims. It records
 no paid request; r1's one OpenCode subscription attempt is retained as unknown.

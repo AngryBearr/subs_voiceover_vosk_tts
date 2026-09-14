@@ -800,6 +800,57 @@ def test_full_replay_orders_first_passes_repairs_and_report_recovery(
     assert len(events) == call_count
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_status"),
+    [(matrix.BudgetLimited, "budget_limited"), (matrix.UnknownRequest, "blocked_unknown")],
+)
+def test_repair_stop_reason_distinguishes_budget_from_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[Exception],
+    expected_status: str,
+) -> None:
+    manifest = _manifest()
+    for case in manifest["selection"]["cases"][1:]:
+        case["max_chars"] = 0
+    output_dir = _new_run(tmp_path, manifest)
+    monkeypatch.setattr(matrix, "_read_manifest", lambda _: manifest)
+    original_admit = matrix._Admission.admit
+
+    def capped_admit(admission: matrix._Admission, descriptor: dict[str, Any], *, key: str) -> dict[str, Any] | None:
+        if descriptor.get("stage") == "repair":
+            raise failure("test repair stop")
+        return original_admit(admission, descriptor, key=key)
+
+    monkeypatch.setattr(matrix._Admission, "admit", capped_admit)
+    revised = False
+
+    async def fake_backend(model: str, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        nonlocal revised
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        targets = payload["targets"]
+        ids = [str(target["cue_id"]) for target in targets]
+        if schema == matrix.generation_schema():
+            results = [{"cue_id": case_id, "text": "short", "status": "ok"} for case_id in ids]
+        else:
+            revise = not revised
+            revised = True
+            results = [{"cue_id": case_id, "verdict": "revise" if revise else "accept", "issues": [], "advice": ""} for case_id in ids]
+        text = json.dumps({"results": results})
+        spec = matrix.MODEL_SPECS[model]
+        return _response(model, cost=0.0, physical=None if spec["subscription"] else 1) | {"text": text, "raw": text}
+
+    result = asyncio.run(matrix.run_matrix(output_dir, fake_backend))
+    assert result["status"] == expected_status
+    assert result["primary_complete"] is True
+    assert result["eligible_denominator"] == 1
+    assert all(counts["unresolved"] == 0 and counts["missing"] == 0 for counts in result["firstpass_counts"].values())
+    ledger = matrix._load_ledger(output_dir, manifest=manifest)
+    statuses = [row["status"] for row in ledger["requests"].values()]
+    assert statuses and all(status == "complete" for status in statuses)
+    assert statuses.count("unknown") == 0
+
+
 def test_report_keeps_invalid_zero_out_of_zero_count() -> None:
     manifest = _manifest()
     manifest["selection"]["cases"][0].update({"max_chars": 0, "status": "invalid"})

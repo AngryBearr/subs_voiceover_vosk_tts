@@ -1,5 +1,31 @@
 # Задачи: надёжное сокращение полного файла
 
+## Current dated update (14 September 2026)
+
+The SH08 small comparison first pass is complete: eight pairs over the same 60
+unique cases in two repetitions. This is 60×2, not 120 independent cases.
+First-pass results and the machine record are in
+[`sh08_eightpair_results.md`](sh08_eightpair_results.md) and
+[`sh08_eightpair_results.json`](sh08_eightpair_results.json). The 18 valid
+zero-capacity cases and 1 invalid source case remain in the full 60-case
+denominator. Repairs are partial and non-uniform because the 300-unit
+subscription cap was exhausted. This does not complete the SH08 full-pilot
+checkbox or SH10.
+
+The next safe work is offline: inspect the 18 originals with zero predicted character capacity with local
+Vosk and make the quality decision before any three full pilots. Do not make
+additional TTS or model calls now. New model calls require fresh approval;
+unused API cash is not permission to continue.
+
+**Latest final verification (14 September 2026):** The
+[`verification log`](/tmp/opencode/sh08-final-verification.log) records
+`pytest` with `563 passed, 5 skipped in 48.64s` and exit 0; compileall exited 0;
+derived analysis validation matched existing outputs identically, exit 0; 10
+JSON files validated and no secrets were found.
+
+The status prose below is retained as a historical snapshot where it describes
+the pre-execution plan.
+
 Статус на 14 сентября 2026: SH-00 и SH-01 реализованы и уже присутствовали в
 HEAD `ec0cbaf` до этой задачи; SH-02 реализована и полностью проверена и
 зафиксирована коммитом `c5bf383`; SH-03 реализована, проверена и зафиксирована
@@ -255,6 +281,17 @@ SH-05/SH-11 уже имеют отдельную real offline technical acceptan
 Текущая подготовка также имеет отдельные [модельные факты и proposal]
 (shortening_model_pairs.md) и [Vosk timing diagnostics]
 (vosk_timing_diagnostics.md); ни одна из этих записей не закрывает SH-08.
+
+#### Current first-pass note (14 September 2026)
+
+The eight-pair first pass is now executed and complete for its planned
+60-case/2-repetition small matrix. It is evidence for comparison, not the
+three full SH08 pilots. The SH08 checkbox remains unchecked until those full
+pilots and their per-file outputs, queues, and costs are completed. Repairs are
+reported separately and are partial/non-uniform because the subscription cap
+was exhausted. The following work is offline zero-budget analysis and quality
+decision-making; do not check SH10 or authorize more model/TTS calls from this
+note.
 
 Заранее выбрать три файла разной длины и с разной долей коротких фраз, не использованные для настройки инструкций LLM. По возможности получить не менее 500 исходно проблемных реплик суммарно; если их меньше, указать фактическое число. Некоторые источники уже использовались для калибровки Vosk — такой пилот не является новой независимой проверкой TTS.
 

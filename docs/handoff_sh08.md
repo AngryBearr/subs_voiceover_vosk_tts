@@ -1,5 +1,103 @@
 # ПЕРЕДАЧА: продолжение SH08
 
+## Current continuation block (14 September 2026; authoritative)
+
+The current SH08 status is a completed first pass of the small matrix: 60
+unique cases, two repetitions of the same 60 cases, and eight pairs. This is
+not 120 independent observations. The 60-case denominator remains intact:
+41 eligible cases, 18 valid zero-capacity cases, and 1 invalid source case;
+the 18 valid zeros and the invalid case are not discarded. All 88 r3 requests
+are complete and r3 has no unknown request. Repairs are only **PARTIAL** and
+not uniform because the 300-unit conservative subscription cap was exhausted.
+
+Detailed readable and machine results are
+[`sh08_eightpair_results.md`](sh08_eightpair_results.md) and
+[`sh08_eightpair_results.json`](sh08_eightpair_results.json). The first-pass
+accept counts per repetition (each over 41 eligible cases) are:
+
+| Pair | Rep 1 | Rep 2 |
+|---|---:|---:|
+| Luna → Luna | 23 | 21 |
+| Luna → DeepSeek | 17 | 15 |
+| Luna → Sol | 19 | 21 |
+| DeepSeek → Luna | 8 | 8 |
+| DeepSeek → DeepSeek | 8 | 8 |
+| DeepSeek → Sol | 7 | 8 |
+| Gemini → Sol | 19 | 16 |
+| Muse → Sol | 21 | 23 |
+
+The five invalid review rows are only the DeepSeek-arbiter-judging-Luna branch
+(4 in repetition 1 and 1 in repetition 2). The local parser rejected them;
+assume no semantic verdict. The known priced/actual total is `$0.1013308035`:
+OpenRouter reported `$0.0344566035` and the conservative DeepSeek upper bound
+is `$0.0668742`. Subscription usage is unpriced. Accounting is 39 paid HTTP
+calls, 50 subscription logical calls, and 89 logical calls cumulatively,
+with `50 × 6 = 300` subscription units plus 39 paid units = 339 total quota
+units.
+
+Main interpretation: Muse → Sol is a promising low-cost candidate for the next
+comparison with Luna → Sol under the same arbiter: 44 versus 40 accepted out of
+82 eligible observations (120 full-case observations including structural
+skips), but a four-result difference is not a statistically established
+winner. Luna → Luna also has 44 accepts, but a self-pair is not independent
+validation. DeepSeek `off` as generator is overlength in 33/41 cases in each
+repetition; this is a current length-compliance weakness, not global model
+inferiority, and changing only the arbiter cannot fix it. A future targeted
+low-thinking or local-length-repair experiment may help, but it is not
+authorized and must not auto-expand the matrix. Gemini Flex is fast and cheap,
+but it has more `cannot shorten` outcomes (13/20) than Muse (7/11) and Luna
+(9/9); this records an observed pattern, not an assumption that Gemini is bad.
+
+The confirmed Gemini configuration is the OpenRouter base model
+`google/gemini-3.8-flash`, pinned to `google-ai-studio/flex` at the low
+`$0.375` / `$1.875` per-million-token price (the same listed price as batch;
+this was not an async batch test). Muse is
+`meta/muse-spark-1.3-contributor` at `$0.10` / `$0.20`; its product-improvement
+condition is user-approved. Muse and Luna are preferred next same-Sol
+comparison candidates, not a final production selection.
+
+No audio, full pilot, or independent audit was performed. Continue safely
+offline with the 18 originals with zero predicted character capacity and local Vosk, then review meaning
+before three full pilots; do not do additional TTS now. Further model calls
+require new approval: the current 300-unit subscription subcap is spent, and
+unused API cash does not authorize extra calls. Runtime/inference timings mix
+stages and batch sizes and are not a universal benchmark per model.
+
+Historical incidents: the r1 first Luna response was lost by a
+visible/reasoning-counter bug; the user approved the retry and six prior units
+were charged. The r2 cached Sol response was preserved and reconciled offline
+as 55 cached requests into derivative r3, with no second paid replay. Raw final
+status `blocked_unknown` was an exception-classification bug because
+`BudgetLimited` inherits `MatrixError`, not unknown receipts. Corrected source
+classification is true, archived raw status is unchanged, and the analysis
+report derives `budget_exhausted`. Historical pre-fix checks (14 September
+2026; superseded) recorded `561 passed, 5 skips`; targeted post-fix verification
+was `92 passed`.
+
+Latest final verification is recorded in
+[`/tmp/opencode/sh08-final-verification.log`](/tmp/opencode/sh08-final-verification.log):
+`pytest` reported `563 passed, 5 skipped in 48.64s`, exit 0; compileall exited
+0; derived analysis validation matched existing outputs identically, exit 0;
+10 JSON files validated and no secrets were found.
+
+The latest relevant code commits are `4ca6997`, `c287848`, and `2b0c141`.
+There is also an uncommitted terminal-status fix and final report; MAIN will
+commit those, and no future commit ID should be guessed. Do not edit the
+frozen [`sh08_live_protocol.json`](sh08_live_protocol.json), source/raw/hash or
+approval files. Raw r3 and its analysis are authoritative; r1/r2 are preserved
+historical records and remain ignored artifacts that still require transfer.
+Selection, profile, and other frozen inputs are unchanged. Do not use the old
+CLI resume path: the original r3 cannot normally resume after the code-hash
+fix. Any future experiment requires a new approved contract and shared prior
+limits unless a new budget is explicitly approved.
+
+The continuation below is a **HISTORICAL snapshot**. Its earlier statements
+that the matrix was planned, not implemented, or not run describe the prior
+state and do not override this current block. SH08's full three-file pilots
+remain incomplete, and SH10 remains unchecked.
+
+## Historical prior continuation snapshot
+
 Continuation update (14 September 2026): SH05/SH11 work was committed as
 `344880b` (`feat(shorten): add review workflow and offline acceptance evidence`).
 The offline r2 inventory is recorded in

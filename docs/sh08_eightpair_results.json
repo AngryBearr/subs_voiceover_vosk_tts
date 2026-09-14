@@ -1,0 +1,327 @@
+{
+  "provenance": {
+    "analysis_report": "output/sh08_eightpair_20260914_r3/analysis/report.json",
+    "analysis_report_sha256": "f55bcf75e018905df65b7de64aa665ecaa9c886ef3ac65e3cdadfceaaa78583c",
+    "examples": "output/sh08_eightpair_20260914_r3/analysis/examples.json",
+    "examples_sha256": "bf7814425a2b47c670106d34e8831156944303910a4d82a53450b841ff0a999a",
+    "inputs": {
+      "case_results": {
+        "checksum": "10b42ad0c00bedba7a96ca30e99b2dd5ed12ff650bcacac127be7198adef8451",
+        "path": "output/sh08_eightpair_20260914_r3/case_results.json",
+        "sha256": "6f326d705d858d8f80ced49a2529f2acac9accd05ff899b3c8f8e7baddba7900"
+      },
+      "corpus_manifest": {
+        "path": "output/shortening_corpus_20260910_v2/manifest.json",
+        "sha256": "727dbf7e571519f9c6b16265fb14c693b4a090465f239269f81891ebfeff25f9"
+      },
+      "ledger": {
+        "checksum": "17f23e65a7aa41dfade0410e8c0d42a5550c1171766e4fb9642059750725d698",
+        "path": "output/sh08_eightpair_20260914_r3/ledger.json",
+        "sha256": "9e8b19640ca2b484f7a8fb4740460e707925c4bb8fc3d23b0fc427f96d629a8a"
+      },
+      "manifest": {
+        "checksum": "3e2bc3383d4914ca25474a566d0129724ff32d519e36a6bb227284fc3a6930dc",
+        "path": "output/sh08_eightpair_20260914_r3/manifest.json",
+        "sha256": "9b38f7077d9684d66d94b602b829a6da47ff02d90c5d660556c5cd73b0044760"
+      },
+      "report": {
+        "path": "output/sh08_eightpair_20260914_r3/report.json",
+        "sha256": "2b023f531aa38e99c7d2cba0228179920c92d5bb65a0a69b3ad28861165d7308"
+      },
+      "selection": {
+        "canonical_sha256": "9bae0e1a1956ad0029e43c684e6a507a38d3ee2aab873e731a25736a1a7915f2",
+        "path": "output/sh08_eightpair_20260914_r3/selection.json",
+        "sha256": "818a88a11946c54066c16258f78a6a9577ac3de634d30b715e8cd4980dfe5d0c"
+      },
+      "source_snapshots": {
+        "canonical_sha256": "f8b907d4ee709e9a11ef6c436b3464c2918bf2ea3a5f3725ca2b71614fcfd6d5",
+        "path": "output/sh08_eightpair_20260914_r3/source_snapshots.json",
+        "sha256": "094c2534e64a0210e872a1ed35137921ca9d6749ad268a3d5e96323935cc3c13"
+      }
+    },
+    "selected_case_ids": [
+      "16e2689c67a5:cue-1055",
+      "16e2689c67a5:cue-191",
+      "16e2689c67a5:cue-196",
+      "16e2689c67a5:cue-353",
+      "16e2689c67a5:cue-598",
+      "16e2689c67a5:cue-618",
+      "16e2689c67a5:cue-94",
+      "2c58c71203c3:cue-210",
+      "2c58c71203c3:cue-300",
+      "2c58c71203c3:cue-370",
+      "2c58c71203c3:cue-395",
+      "2c58c71203c3:cue-425",
+      "2c58c71203c3:cue-541",
+      "2c58c71203c3:cue-592",
+      "2c58c71203c3:cue-603",
+      "2c58c71203c3:cue-673",
+      "2c58c71203c3:cue-682",
+      "2c58c71203c3:cue-72",
+      "72d30816398c:cue-1021",
+      "72d30816398c:cue-195",
+      "72d30816398c:cue-219",
+      "72d30816398c:cue-253",
+      "72d30816398c:cue-457",
+      "72d30816398c:cue-493",
+      "72d30816398c:cue-81",
+      "72d30816398c:cue-890",
+      "72d30816398c:cue-997",
+      "b2d1135c9143:cue-1027",
+      "b2d1135c9143:cue-1038",
+      "b2d1135c9143:cue-1178",
+      "b2d1135c9143:cue-1285",
+      "b2d1135c9143:cue-1402",
+      "b2d1135c9143:cue-1474",
+      "b2d1135c9143:cue-264",
+      "b2d1135c9143:cue-369",
+      "b2d1135c9143:cue-370",
+      "b2d1135c9143:cue-607",
+      "b2d1135c9143:cue-657",
+      "b2d1135c9143:cue-937",
+      "b2d1135c9143:cue-965",
+      "b2d1135c9143:cue-996",
+      "bec0de4b2abc:cue-153",
+      "bec0de4b2abc:cue-463",
+      "bec0de4b2abc:cue-504",
+      "bec0de4b2abc:cue-642",
+      "bec0de4b2abc:cue-666",
+      "bec0de4b2abc:cue-679",
+      "bec0de4b2abc:cue-70",
+      "bec0de4b2abc:cue-847",
+      "bf1b097887c0:cue-126",
+      "bf1b097887c0:cue-138",
+      "bf1b097887c0:cue-170",
+      "bf1b097887c0:cue-212",
+      "bf1b097887c0:cue-30",
+      "bf1b097887c0:cue-435",
+      "bf1b097887c0:cue-490",
+      "bf1b097887c0:cue-637",
+      "bf1b097887c0:cue-808",
+      "bf1b097887c0:cue-918",
+      "f3d0c7d31ea7:cue-504"
+    ],
+    "source_hashes": {
+      "16e2689c67a5": {
+        "json_path": "sources/16e2689c67a5.json",
+        "parsed_sha256": "547504bdb9c27b6053adbda4b27e68bb4503be9686538cffe7434f60a9486c02",
+        "path": "Australian Survivor S01E04_ru.srt",
+        "raw_sha256": "16e2689c67a5ca6c44cb7c2598b15600ba8abff52bc91ba6dacb1899632eb6e5"
+      },
+      "2c58c71203c3": {
+        "json_path": "sources/2c58c71203c3.json",
+        "parsed_sha256": "7e35ba7b1a7020fa4ce9f23cb7652d18825070b267da272ef19b83acdbdabba3",
+        "path": "Survivor.S44E12.srt",
+        "raw_sha256": "2c58c71203c3fde80c2402dc9c9822320fa3c85facbfc49be7cc81368da0746e"
+      },
+      "72d30816398c": {
+        "json_path": "sources/72d30816398c.json",
+        "parsed_sha256": "b2b44a2653db09cf48d9816f935ba182133d87d95d0e8436f719b36e645901f9",
+        "path": "Survivor.S44E06.srt",
+        "raw_sha256": "72d30816398ce242f9545adb339047022bfefcf910fbefeb15974832dede402a"
+      },
+      "b2d1135c9143": {
+        "json_path": "sources/b2d1135c9143.json",
+        "parsed_sha256": "49204943c6e1f6db6de4e43b70139e9316ed5acca3862d43568fe1b42a413fe3",
+        "path": "S01E01.srt",
+        "raw_sha256": "b2d1135c91432a293d8edf59d1260088c1cafbd83aac052f6cd5862e990e664b"
+      },
+      "bec0de4b2abc": {
+        "json_path": "sources/bec0de4b2abc.json",
+        "parsed_sha256": "8f0becf4ec4582059dab5477630a4094cad7b5530dee412b6429a30f0368098d",
+        "path": "Survivor.S44E10.srt",
+        "raw_sha256": "bec0de4b2abc22764fa874704cb3b050eec128edf7a72fd56408f77e19371fc2"
+      },
+      "bf1b097887c0": {
+        "json_path": "sources/bf1b097887c0.json",
+        "parsed_sha256": "241731435527962ea6012031b90ff0c80f238a5c73a5de123673214b9829811e",
+        "path": "Survivor.S44E03.srt",
+        "raw_sha256": "bf1b097887c0d2b4b058965eabee4756aa2b912a4934214b127e298dde503dab"
+      },
+      "f3d0c7d31ea7": {
+        "json_path": "sources/f3d0c7d31ea7.json",
+        "parsed_sha256": "42e5f87be1418f4c7397b5fe0d09dec17addc077d32af921acf3be184827c6a9",
+        "path": "Survivor.S44E13.srt",
+        "raw_sha256": "f3d0c7d31ea74305122f9b63153af9faf3ef86f8acbaecc746523ae806d59dd1"
+      }
+    }
+  },
+  "schema": "sh08_eightpair_results.v1",
+  "summary": {
+    "cases": 60,
+    "firstpass": [
+      {
+        "counts": {
+          "accept": 23,
+          "cannot_shorten": 9,
+          "decline": 9,
+          "not_executed": 19
+        },
+        "pair": "luna->luna",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 21,
+          "cannot_shorten": 9,
+          "decline": 11,
+          "not_executed": 19
+        },
+        "pair": "luna->luna",
+        "rep": 2
+      },
+      {
+        "counts": {
+          "accept": 17,
+          "cannot_shorten": 9,
+          "decline": 11,
+          "invalid_model_rows": 4,
+          "not_executed": 19
+        },
+        "pair": "luna->deepseek",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 15,
+          "cannot_shorten": 9,
+          "decline": 16,
+          "invalid_model_rows": 1,
+          "not_executed": 19
+        },
+        "pair": "luna->deepseek",
+        "rep": 2
+      },
+      {
+        "counts": {
+          "accept": 19,
+          "cannot_shorten": 9,
+          "decline": 13,
+          "not_executed": 19
+        },
+        "pair": "luna->sol",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 21,
+          "cannot_shorten": 9,
+          "decline": 11,
+          "not_executed": 19
+        },
+        "pair": "luna->sol",
+        "rep": 2
+      },
+      {
+        "counts": {
+          "accept": 8,
+          "decline": 33,
+          "not_executed": 19
+        },
+        "pair": "deepseek->luna",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 8,
+          "decline": 33,
+          "not_executed": 19
+        },
+        "pair": "deepseek->luna",
+        "rep": 2
+      },
+      {
+        "counts": {
+          "accept": 8,
+          "decline": 33,
+          "not_executed": 19
+        },
+        "pair": "deepseek->deepseek",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 8,
+          "decline": 33,
+          "not_executed": 19
+        },
+        "pair": "deepseek->deepseek",
+        "rep": 2
+      },
+      {
+        "counts": {
+          "accept": 7,
+          "decline": 34,
+          "not_executed": 19
+        },
+        "pair": "deepseek->sol",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 8,
+          "decline": 33,
+          "not_executed": 19
+        },
+        "pair": "deepseek->sol",
+        "rep": 2
+      },
+      {
+        "counts": {
+          "accept": 19,
+          "cannot_shorten": 13,
+          "decline": 9,
+          "not_executed": 19
+        },
+        "pair": "gemini->sol",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 16,
+          "cannot_shorten": 20,
+          "decline": 5,
+          "not_executed": 19
+        },
+        "pair": "gemini->sol",
+        "rep": 2
+      },
+      {
+        "counts": {
+          "accept": 21,
+          "cannot_shorten": 7,
+          "decline": 13,
+          "not_executed": 19
+        },
+        "pair": "muse->sol",
+        "rep": 1
+      },
+      {
+        "counts": {
+          "accept": 23,
+          "cannot_shorten": 11,
+          "decline": 7,
+          "not_executed": 19
+        },
+        "pair": "muse->sol",
+        "rep": 2
+      }
+    ],
+    "known_or_actual_priced_usd": "0.1013308035",
+    "paid_calls": 39,
+    "pair_repetition_tables": 16,
+    "pairs": [
+      "luna->luna",
+      "luna->deepseek",
+      "luna->sol",
+      "deepseek->luna",
+      "deepseek->deepseek",
+      "deepseek->sol",
+      "gemini->sol",
+      "muse->sol"
+    ],
+    "repetitions": 2,
+    "status": "offline_evidence_analysis",
+    "subscription_quota_units": 300
+  }
+}

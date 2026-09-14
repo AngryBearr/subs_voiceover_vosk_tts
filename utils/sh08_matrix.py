@@ -1393,7 +1393,7 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                         response, error, replayed = await _request(admission, backend, descriptor=descriptor, system=GENERATOR_SYSTEM_PROMPT, user=prompt, schema=generation_schema())
                     except (BudgetLimited, UnknownRequest, MatrixError) as exc:
                         stopped = True
-                        stop_reason = "blocked_unknown" if isinstance(exc, (UnknownRequest, MatrixError)) else "budget_limited"
+                        stop_reason = "budget_limited" if isinstance(exc, BudgetLimited) else "blocked_unknown"
                         for case_id in batch_ids:
                             branches[f"{repetition}:generation:{generator}:{batch['batch_id']}:{case_id}"] = {"case_id": case_id, "rep": repetition, "stage": "generation", "generator": generator, "batch": batch["batch_id"], "status": "unresolved", "reason": type(exc).__name__}
                         break
@@ -1440,7 +1440,7 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                         response, error, replayed = await _request(admission, backend, descriptor=descriptor, system=ARBITER_SYSTEM_PROMPT, user=prompt, schema=review_schema())
                     except (BudgetLimited, UnknownRequest, MatrixError) as exc:
                         stopped = True
-                        stop_reason = "blocked_unknown" if isinstance(exc, (UnknownRequest, MatrixError)) else "budget_limited"
+                        stop_reason = "budget_limited" if isinstance(exc, BudgetLimited) else "blocked_unknown"
                         for case_id in target_rows:
                             branches[f"{repetition}:review:{generator}:{arbiter}:{batch['batch_id']}:{case_id}"] = {"case_id": case_id, "rep": repetition, "stage": "review", "generator": generator, "arbiter": arbiter, "batch": batch["batch_id"], "status": "unresolved", "reason": type(exc).__name__, "candidate": current[case_id]}
                         break
@@ -1491,7 +1491,7 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                     response, error, _ = await _request(admission, backend, descriptor=descriptor, system=GENERATOR_SYSTEM_PROMPT, user=prompt, schema=generation_schema())
                 except (BudgetLimited, UnknownRequest, MatrixError) as exc:
                     stopped = True
-                    stop_reason = "blocked_unknown" if isinstance(exc, (UnknownRequest, MatrixError)) else "budget_limited"
+                    stop_reason = "budget_limited" if isinstance(exc, BudgetLimited) else "blocked_unknown"
                     for branch in group:
                         branch["repair_status"] = "skipped_for_budget" if isinstance(exc, BudgetLimited) else "unresolved"
                         branch["repair_reason"] = type(exc).__name__
@@ -1537,7 +1537,7 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                             branch["repair"]["recheck"] = {"status": "complete" if value else "unresolved", "accepted": bool(value and value.get("verdict") == "accept" and branch["repair"]["local_fit"].get("fits")), "verdict": value.get("verdict") if value else None, "issues": value.get("issues", []) if value else [], "advice": value.get("advice", "") if value else review_parsed.errors.get(branch["case_id"], review_error), "receipt_id": recheck_receipt_id}
                     except (BudgetLimited, UnknownRequest, MatrixError) as exc:
                         stopped = True
-                        stop_reason = "blocked_unknown" if isinstance(exc, (UnknownRequest, MatrixError)) else "budget_limited"
+                        stop_reason = "budget_limited" if isinstance(exc, BudgetLimited) else "blocked_unknown"
                         for branch in eligible_rechecks:
                             branch["repair"]["recheck"] = {"status": "budget_limited" if isinstance(exc, BudgetLimited) else "unresolved", "reason": type(exc).__name__}
                         if isinstance(exc, BudgetLimited):
