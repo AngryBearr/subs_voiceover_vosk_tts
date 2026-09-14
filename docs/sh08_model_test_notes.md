@@ -1,8 +1,8 @@
 # SH08 model test notes
 
-**Status: approved, not executed.** This note records the user's approvals and
-corrects earlier model-availability claims. It records no model result, paid
-request, or subscription use; no inference has occurred yet.
+**Status: approved; r1 failed smoke, r2 retry not executed.** This note records
+the user's approvals and corrects earlier model-availability claims. It records
+no paid request; r1's one OpenCode subscription attempt is retained as unknown.
 
 ## Corrections and consent
 
@@ -89,13 +89,37 @@ required.
 
 ## Execution record
 
-Every result is **not yet executed**. Local preparation is implemented and
-requires verification before paid work. The planned output is
-`output/sh08_eightpair_20260914_r1`; it has not been created. The user's
-approval covers these limits for the entire experiment, including restarts.
+The r1 result is **unknown** and the r2 retry is **not yet executed**. Local
+preparation is implemented and requires verification before execution. The
+planned r2 output is `output/sh08_eightpair_20260914_r2`; it has not been
+created. The user's approval covers these limits for the entire experiment,
+including restarts.
 Latest local checks recorded 531 passed and 5 skipped before the zero-count
 regression, plus 61 targeted checks after it. The real offline record is 60
-cases: 41 eligible, 18 valid, 0 zero, and 1 invalid. No real model calls have
-occurred yet, and fresh live output has not been created. These test
+cases: 41 eligible, 18 valid, 0 zero, and 1 invalid. One real r1 model call
+occurred; fresh r2 live output has not been created. These test
 simulations do not measure model quality. The user previously explicitly
 approved commits and follow-up commits, but push is not approved.
+
+## Recovery revision
+
+- The r1 smoke call was an actual failed smoke: one Luna call returned
+  `usage_reasoning_exceeds_output`. The underlying call succeeded, but the
+  response text was not retained; the lost text is not recoverable. Local
+  recovery matched zero sessions.
+- The first model call consumed six subscription quota units. This was a
+  local OpenCode token-accounting failure, not a paid API request and not a
+  free-cost claim. All other model spending remains part of the approved
+  matrix pricing notes above; no other model calls occurred in r1.
+- The user explicitly approved one Luna retry in the question. The retry is
+  `new_revision_not_resume`, with the same source, case selection, variant,
+  profile, and `$5`/`300`/`600` limits. Carryover is six subscription units,
+  six total units, one logical prompt, and `$0` direct API cost. The new
+  revision is planned at `output/sh08_eightpair_20260914_r2` and has not been
+  created. The immutable r1 output remains at
+  `output/sh08_eightpair_20260914_r1`.
+- Preliminary quota forecast is base `252` plus six carried units = `258`,
+  leaving `42` total units and seven subscription prompts after the first
+  pass. The `42` figure uses the actual `542 passed, 5 skipped` smoke check;
+  the first model call itself consumed six units.
+- Latest carryover verification: `549 passed, 5 skipped`.

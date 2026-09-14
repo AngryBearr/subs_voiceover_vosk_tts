@@ -125,6 +125,114 @@ def _load_json(path: Path, label: str) -> Any:
         raise MatrixError(str(exc)) from exc
 
 
+def _zero_carryover() -> dict[str, Any]:
+    return {
+        "subscription_units": 0,
+        "total_units": 0,
+        "logical_prompts": 0,
+        "direct_api_usd": "0",
+        "prior_request_reference": None,
+        "user_retry_decision": None,
+    }
+
+
+def _carryover(approval: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the one approved unknown Luna attempt without resuming it."""
+    if "prior_attempt" not in approval:
+        return _zero_carryover()
+    prior = approval.get("prior_attempt")
+    if not isinstance(prior, Mapping):
+        raise MatrixError("approved prior attempt is invalid")
+    forbidden = {"source_case", "variant", "profile_changes"}
+    if forbidden.intersection(prior):
+        raise MatrixError("approved retry changes the frozen protocol")
+    if prior.get("explicit_retry_authorized") is not True or prior.get("action") != "new_revision_not_resume":
+        raise MatrixError("explicit new-revision retry authorization is required")
+    reason = prior.get("reason")
+    if reason != "local OpenCode token accounting bug discarded reply; local recovery matched sessions 0; user approved retry in question":
+        raise MatrixError("retry reason does not match the approved recovery")
+    request_id = prior.get("request_id")
+    if request_id != "3f006fcf7403b4a729473ae0622c535d78af16c94cc72dde889832acbaf66c66":
+        raise MatrixError("approved prior request ID is invalid")
+
+    root = Path(__file__).resolve().parents[1]
+    paths: dict[str, tuple[Path, str]] = {}
+    for name in ("ledger", "manifest"):
+        reference = prior.get(name)
+        if not isinstance(reference, Mapping) or not isinstance(reference.get("path"), str) or not isinstance(reference.get("sha256"), str):
+            raise MatrixError(f"approved prior {name} reference is incomplete")
+        path = Path(reference["path"])
+        if not path.is_absolute():
+            path = root / path
+        actual = _sha_file(path)
+        if actual != reference["sha256"]:
+            raise MatrixError(f"approved prior {name} hash mismatch")
+        paths[name] = (path, actual)
+
+    _load_json(paths["manifest"][0], "prior matrix manifest")
+    old_ledger = _load_json(paths["ledger"][0], "prior matrix ledger")
+    if not isinstance(old_ledger, dict) or not isinstance(old_ledger.get("checksum"), str):
+        raise MatrixError("prior ledger envelope is incomplete")
+    ledger_body = dict(old_ledger)
+    ledger_checksum = ledger_body.pop("checksum")
+    if canonical_hash(ledger_body) != ledger_checksum:
+        raise MatrixError("prior ledger checksum mismatch")
+    requests = ledger_body.get("requests")
+    if not isinstance(requests, dict) or len(requests) != 1 or request_id not in requests:
+        raise MatrixError("prior ledger must contain exactly the approved request")
+    _validate_ledger(ledger_body)
+    row = requests[request_id]
+    if (not isinstance(row, Mapping) or row.get("status") != "unknown" or row.get("quota_units") != 6
+            or row.get("subscription") is not True or _decimal(row.get("cost_usd"), "prior request cost") != 0
+            or _decimal(row.get("reservation_usd"), "prior request reservation") != 0):
+        raise MatrixError("prior request accounting is not the approved unknown Luna attempt")
+    descriptor = row.get("descriptor")
+    if not isinstance(descriptor, Mapping) or descriptor.get("model_key") != "luna" or descriptor.get("generator") != "luna" or descriptor.get("arbiter") is not None:
+        raise MatrixError("prior request is not a Luna generation request")
+    spec = descriptor.get("spec")
+    if not isinstance(spec, Mapping) or spec.get("provider") != "opencode" or spec.get("model") != "openai/gpt-5.6-luna" or spec.get("variant") != "medium" or spec.get("quota_units") != 6 or spec.get("subscription") is not True:
+        raise MatrixError("prior request model identity is invalid")
+    response = row.get("response")
+    if (not isinstance(response, Mapping) or response.get("text") is not None or response.get("provider") != "opencode"
+            or response.get("model") != "openai/gpt-5.6-luna" or response.get("cost_usd") is not None
+            or response.get("cost_known") is not False or response.get("error") != "usage_reasoning_exceeds_output"):
+        raise MatrixError("prior response accounting is not read-only and unpriced")
+    usage = response.get("usage")
+    if not isinstance(usage, Mapping) or {key: usage.get(key) for key in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")} != {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464}:
+        raise MatrixError("prior response usage does not match the observed call")
+    calls = response.get("calls")
+    if not isinstance(calls, list) or not calls:
+        raise MatrixError("prior underlying calls are not an unpriced OpenAI Luna success")
+    for call in calls:
+        call_usage = call.get("usage") if isinstance(call, Mapping) else None
+        if (not isinstance(call, Mapping) or call.get("provider") != "openai" or call.get("model") != "gpt-5.6-luna"
+                or call.get("status") != "success" or call.get("tool_calls") != 0
+                or ("model_id" in call and call.get("model_id") != "gpt-5.6-luna")
+                or ("requested_model" in call and call.get("requested_model") != "openai/gpt-5.6-luna")
+                or ("cost" in call and call.get("cost") != 0)
+                or not isinstance(call_usage, Mapping) or call_usage.get("cost") != 0
+                or {key: call_usage.get(key) for key in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")} != {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464}):
+            raise MatrixError("prior underlying calls are not an unpriced OpenAI Luna success")
+    return {
+        "subscription_units": 6,
+        "total_units": 6,
+        "logical_prompts": 1,
+        "direct_api_usd": "0",
+        "prior_request_reference": {
+            "request_id": request_id,
+            "ledger_path": prior["ledger"]["path"],
+            "ledger_sha256": paths["ledger"][1],
+            "manifest_path": prior["manifest"]["path"],
+            "manifest_sha256": paths["manifest"][1],
+        },
+        "user_retry_decision": {
+            "explicit_retry_authorized": True,
+            "action": prior["action"],
+            "reason": reason,
+        },
+    }
+
+
 def _model_fingerprint(model_path: Path) -> tuple[str, str, list[dict[str, str]]]:
     """Return the calibration metadata identity without importing Vosk."""
     from utils.vosk_calibration import model_metadata
@@ -219,6 +327,7 @@ def _prepare_manifest_unlocked(
     consent = approval.get('user_consent') if isinstance(approval, dict) else None
     if not isinstance(consent, dict) or consent.get("no_byok_confirmed") is not True or consent.get("muse_data_approved") is not True:
         raise MatrixError("explicit no-BYOK and Muse data consent is required")
+    carryover = _carryover(approval)
     pilot_sources = pilot.get("sources")
     if not isinstance(pilot_sources, list) or len(pilot_sources) != 3:
         raise MatrixError("pilot must declare exactly three sources")
@@ -382,6 +491,7 @@ def _prepare_manifest_unlocked(
         "baselines_snapshot_sha256": canonical_hash({"planner": asdict(planner), "sources": source_snapshots}),
         "user_consent": {"no_byok_confirmed": True, "muse_data_approved": True, "placeholder": False, "approved_source": deepcopy(consent.get("approved_source", "user conversation; docs/sh08_live_protocol.json")), "approved_scope": deepcopy(consent.get("approved_scope", "SH08 matrix"))},
         "tariffs": tariffs,
+        "carryover": carryover,
         "status": "prepared",
     }
     body["checksum"] = canonical_hash(body)
@@ -443,6 +553,9 @@ def _read_manifest(output_dir: Path) -> dict[str, Any]:
         raise MatrixError('matrix approval reference is missing')
     if _sha_file(Path(approval['path'])) != approval['sha256']:
         raise MatrixError('matrix approval changed')
+    current_approval = _load_json(Path(approval['path']), 'approved matrix protocol')
+    if not isinstance(current_approval, Mapping) or manifest.get("carryover") != _carryover(current_approval):
+        raise MatrixError("manifest carryover differs from current approved retry")
     source_info = manifest.get("source")
     if isinstance(source_info, Mapping) and isinstance(source_info.get("corpus_manifest"), str) and isinstance(source_info.get("corpus_manifest_sha256"), str):
         source_manifest_path = Path(source_info["corpus_manifest"])
@@ -579,20 +692,39 @@ def _usage_cost(response: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[D
         return Decimal(0), False
     inputs = usage.get("input_tokens")
     outputs = usage.get("output_tokens")
-    for usage_key in ('input_tokens', 'output_tokens', 'reasoning_tokens', 'total_tokens', 'cache_read_tokens', 'cache_write_tokens'):
+    if (isinstance(inputs, bool) or not isinstance(inputs, int) or inputs < 0
+            or isinstance(outputs, bool) or not isinstance(outputs, int) or outputs < 0):
+        return Decimal(0), False
+    reasoning = usage.get("reasoning_tokens")
+    if (reasoning is not None
+            and (isinstance(reasoning, bool) or not isinstance(reasoning, int) or reasoning < 0)):
+        return Decimal(0), False
+    for usage_key in ("cache_read_tokens", "cache_write_tokens"):
         usage_value = usage.get(usage_key)
         if usage_value is not None and (isinstance(usage_value, bool) or not isinstance(usage_value, int) or usage_value < 0):
             return Decimal(0), False
-    if isinstance(inputs, bool) or not isinstance(inputs, int) or inputs < 0 or isinstance(outputs, bool) or not isinstance(outputs, int) or outputs < 0:
+    if inputs > int(spec.get("context_limit", 0)):
         return Decimal(0), False
-    if inputs > int(spec.get("context_limit", 0)) or outputs > int(spec.get("max_tokens", 0)):
+    if spec.get("provider") == "opencode":
+        if outputs + (reasoning or 0) > int(spec.get("max_tokens", 0)):
+            return Decimal(0), False
+    elif outputs > int(spec.get("max_tokens", 0)) or (reasoning is not None and reasoning > outputs):
         return Decimal(0), False
+    total = usage.get("total_tokens")
+    if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
+        return Decimal(0), False
+    if total is not None:
+        expected_total = inputs + outputs + (reasoning or 0 if spec.get("provider") == "opencode" else 0)
+        if total != expected_total:
+            return Decimal(0), False
     reported = response.get("cost_usd")
     if reported is not None:
         try:
             return _decimal(reported, "reported cost"), True
         except MatrixError:
             return Decimal(0), False
+    if spec.get("subscription"):
+        return Decimal(0), False
     return (Decimal(inputs) * _decimal(spec.get("input_per_million", 0), "input tariff") + Decimal(outputs) * _decimal(spec.get("output_per_million", 0), "output tariff")) / Decimal(1_000_000), True
 
 
@@ -606,9 +738,15 @@ class _Admission:
         self.report_only = report_only
 
     def _totals(self) -> tuple[Decimal, int, int, int]:
-        known = Decimal(0)
+        carryover = self.manifest.get("carryover", _zero_carryover())
+        if not isinstance(carryover, Mapping):
+            raise MatrixError("manifest carryover is invalid")
+        known = _decimal(carryover.get("direct_api_usd", "0"), "carryover direct cost")
         pending = Decimal(0)
-        sub = total = 0
+        sub = carryover.get("subscription_units", 0)
+        total = carryover.get("total_units", 0)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (sub, total)):
+            raise MatrixError("manifest carryover quota is invalid")
         for row in self.ledger["requests"].values():
             if not isinstance(row, dict):
                 raise MatrixError("ledger request is invalid")
@@ -881,7 +1019,15 @@ def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequen
             skipped = [branch for branch in relevant if branch.get("repair_status") == "skipped_for_budget"]
             coverage[key] = {"eligible": len(relevant), "attempted": len(attempted), "rechecked": len(rechecked), "resolved": len(resolved), "skipped_for_budget": len(skipped), "pending": max(0, len(relevant) - len(attempted) - len(skipped)), "denominator": len(eligible_ids)}
 
-    known_sum = Decimal(0)
+    carryover = manifest.get("carryover", _zero_carryover())
+    if not isinstance(carryover, Mapping):
+        raise MatrixError("manifest carryover is invalid")
+    prior_logical = carryover.get("logical_prompts", 0)
+    prior_units = carryover.get("subscription_units")
+    prior_sublogical = prior_logical if prior_units == 6 else 0 if prior_units == 0 else -1
+    if isinstance(prior_logical, bool) or not isinstance(prior_logical, int) or prior_logical < 0 or prior_sublogical < 0:
+        raise MatrixError("manifest carryover prompt counts are invalid")
+    known_sum = _decimal(carryover.get("direct_api_usd", "0"), "carryover direct cost")
     pending_reserve = Decimal(0)
     quota_units = 0
     sub_units = 0
@@ -914,6 +1060,20 @@ def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequen
             key = f"{descriptor.get('stage', 'unknown')}:{response.get('provider')}"
             timing[key]["elapsed_sec"] += float(response["elapsed_sec"])
             timing[key]["requests"] += 1.0
+    revision_logical = len(requests)
+    prior_reference = carryover.get("prior_request_reference")
+    prior_attempt = None
+    if isinstance(prior_reference, Mapping):
+        prior_attempt = {
+            "request_id": prior_reference.get("request_id"),
+            "status": "unknown",
+            "text": None,
+            "result_used": False,
+            "ledger_path": prior_reference.get("ledger_path"),
+            "ledger_sha256": prior_reference.get("ledger_sha256"),
+            "manifest_path": prior_reference.get("manifest_path"),
+            "manifest_sha256": prior_reference.get("manifest_sha256"),
+        }
     return {
         "schema": VERSION, "status": status, "scope": manifest.get("approved_scope"),
         "firstpass": {"denominator_per_pair_rep": MAX_CASES, "verdicts": dict(firstpass_verdicts), "accepted_counts": accepted_counts, "firstpass_counts": pair_rep_counts}, "finalaccepted_counts": dict(finalaccepted_counts),
@@ -922,7 +1082,8 @@ def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequen
         "disagreements": {"luna_deepseek_three_judges": disagreements, "completeness_count": disagreement_completeness},
         "primary_complete": all(pair_rep_counts[key]["unresolved"] == 0 and pair_rep_counts[key]["missing"] == 0 for key in pair_rep_counts),
         "repairs_complete": all(value["pending"] == 0 and value["skipped_for_budget"] == 0 and value["attempted"] == value["rechecked"] for value in coverage.values()),
-        "costs": {"known_sum_usd": str(known_sum), "pending_reservation_usd": str(pending_reserve), "global_quota_units": quota_units, "subscription_quota_units": sub_units, "logical_prompts": len(requests), "sublogical_prompts": sum(1 for request in requests if request.get("subscription")), "observed_assistant_steps": observed_steps, "physical_calls_observed": physical_calls, "provider_actual_usd": {key: str(value) for key, value in provider_costs.items() if key == 'openrouter'}, "deepseek_conservative_upper_usd": str(deepseek_upper), "subscription_unpriced": True, "global_actual_qualifier": 'known_sum combines provider-reported OpenRouter cost and conservative no-cache DeepSeek token cost; subscription is unpriced'},
+        "costs": {"known_sum_usd": str(known_sum), "direct_api_usd": str(known_sum), "pending_reservation_usd": str(pending_reserve), "global_quota_units": quota_units + int(carryover.get("total_units", 0)), "subscription_quota_units": sub_units + int(carryover.get("subscription_units", 0)), "logical_prompts": prior_logical + revision_logical, "revision_logical_prompts": revision_logical, "sublogical_prompts": prior_sublogical + sum(1 for request in requests if request.get("subscription")), "observed_assistant_steps": observed_steps, "physical_calls_observed": physical_calls, "provider_actual_usd": {key: str(value) for key, value in provider_costs.items() if key == 'openrouter'}, "deepseek_conservative_upper_usd": str(deepseek_upper), "subscription_unpriced": True, "global_actual_qualifier": 'known_sum combines provider-reported OpenRouter cost and conservative no-cache DeepSeek token cost; subscription is unpriced'},
+        "prior_attempt": prior_attempt,
         "time_per_stage_provider": dict(timing), "repair_coverage": coverage, "audio_status": "not_measured", "claim_boundary": "No semantic truth or full-pilot claim.",
     }
 

@@ -114,6 +114,8 @@ def test_deepseek_usage_limit_error_keeps_observable_cost(monkeypatch: pytest.Mo
     result = asyncio.run(backend("deepseek", "s", "u", {}))
     assert result["error"] == "usage_output_exceeds_max_tokens"
     assert result["cost_known"] is True and result["cost_usd"] is not None
+    assert result["text"] == "{}"
+    assert result["raw"]["detailed_response_snapshot"]["text"] == "{}"
 
 
 def test_opencode_accepts_only_one_tool_free_step(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,6 +149,75 @@ def test_opencode_accepts_only_one_tool_free_step(monkeypatch: pytest.MonkeyPatc
     assert calls[0]["allow_length_tool"] is False
     assert calls[0]["native_structured_output"] is False
     assert result["cost_kind"] == "subscription_not_priced"
+
+
+def test_opencode_usage_counts_visible_and_reasoning_tokens_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_transport as opencode
+
+    async def send(*args: object, **kwargs: object) -> DetailedResponse:
+        return DetailedResponse(
+            "successful text", [CallRecord("openai", "gpt-5.6-luna", "medium", "now", 0.1,
+                                            OpenCodePromptUsage(input_tokens=2455, output_tokens=127,
+                                                                reasoning_tokens=882, total_tokens=3464), "success")],
+        )
+
+    monkeypatch.setattr(opencode, "create_session", lambda *args, **kwargs: _async_value("session"))
+    monkeypatch.setattr(opencode, "send_prompt_detailed", send)
+    monkeypatch.setattr(opencode, "delete_session", lambda *args, **kwargs: _async_value(None))
+    backend = transport.MatrixBackend()
+    backend._server = type("FakeServer", (), {"base_url": "http://fake", "auth_header": {}})()
+
+    result = asyncio.run(backend._call_opencode(transport.MODEL_SPECS["luna"], "s", "u", {}, 0.0))
+
+    assert result["error"] is None
+    assert result["text"] == "successful text"
+    snapshot = result["raw"]["detailed_response_snapshot"]
+    assert snapshot == {"text": "successful text", "error": None, "calls": result["calls"]}
+    assert result["usage"] == {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464}
+
+
+def test_opencode_combined_completion_cap_rejects_before_admission_can_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_transport as opencode
+
+    async def send(*args: object, **kwargs: object) -> DetailedResponse:
+        return DetailedResponse(
+            "text survives", [CallRecord("openai", "gpt-5.6-luna", "medium", "now", 0.1,
+                                          OpenCodePromptUsage(input_tokens=1, output_tokens=16384,
+                                                              reasoning_tokens=1, total_tokens=16386), "success")],
+        )
+
+    monkeypatch.setattr(opencode, "create_session", lambda *args, **kwargs: _async_value("session"))
+    monkeypatch.setattr(opencode, "send_prompt_detailed", send)
+    monkeypatch.setattr(opencode, "delete_session", lambda *args, **kwargs: _async_value(None))
+    backend = transport.MatrixBackend()
+    backend._server = type("FakeServer", (), {"base_url": "http://fake", "auth_header": {}})()
+
+    result = asyncio.run(backend._call_opencode(transport.MODEL_SPECS["luna"], "s", "u", {}, 0.0))
+
+    assert result["error"] == "usage_output_exceeds_max_tokens"
+    assert result["text"] == "text survives"
+    assert result["cost_known"] is False
+
+
+def test_deepseek_reasoning_must_fit_completion_but_text_is_retained(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def request_json_detailed(**kwargs: object) -> DetailedResponse:
+        return DetailedResponse(
+            "deepseek text", [CallRecord("deepseek", "deepseek-flash", None, "now", 0.1,
+                                          OpenCodePromptUsage(input_tokens=100, output_tokens=127,
+                                                              reasoning_tokens=882, total_tokens=227), "success")],
+            "usage_reasoning_exceeds_output",
+        )
+
+    import utils.deepseek_transport as deepseek
+    monkeypatch.setattr(deepseek, "request_json_detailed", request_json_detailed)
+    backend = transport.MatrixBackend()
+    backend._credentials = {"DEEPSEEK_API_KEY": "fake"}
+
+    result = asyncio.run(backend("deepseek", "s", "u", {}))
+
+    assert result["error"] == "usage_reasoning_exceeds_output"
+    assert result["text"] == "deepseek text"
+    assert result["raw"]["detailed_response_snapshot"]["text"] == "deepseek text"
 
 
 def test_openencode_config_isolated_and_version_refusal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -240,8 +311,21 @@ def test_openrouter_tools_are_blocked_even_when_finish_is_stop(monkeypatch: pyte
         "usage": _usage(0.004),
     })
     assert result["error"] == "unexpected_tool_calls"
-    assert result["text"] is None
+    assert result["text"] == "{}"
     assert result["cost_known"] is True
+
+
+def test_openrouter_error_retains_choice_text_as_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _openrouter_backend(monkeypatch, {
+        "model": "google/gemini-3.8-flash", "provider_name": "google-ai-studio/flex",
+        "choices": [{"finish_reason": "length", "message": {"content": "rejected text"}}],
+        "usage": _usage(0.004),
+        "error": {"message": "provider rejected request"},
+    }, status=402)
+
+    assert result["error"].startswith("http_402:")
+    assert result["text"] == "rejected text"
+    assert result["raw"]["choices"][0]["message"]["content"] == "rejected text"
 
 
 def test_openrouter_invalid_usage_and_missing_cost_are_not_free(monkeypatch: pytest.MonkeyPatch) -> None:

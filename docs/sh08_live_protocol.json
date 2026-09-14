@@ -1,6 +1,6 @@
 {
   "schema": "sh08_live_protocol.v1",
-  "status": "APPROVED_NOT_EXECUTED",
+  "status": "APPROVED_RETRY_NOT_EXECUTED",
   "purpose": "Record explicit user approvals and notes on model suggestions, not executed results.",
   "user_consent": {
     "no_byok_confirmed": true,
@@ -10,13 +10,27 @@
     "approved_scope": "60 unique development cases, two repetitions, eight pairs; no full pilots; $5 direct API, 300 subscription conservative attempt units, 600 total attempt units"
   },
   "execution": {
-    "model_requests_made": 0,
-    "network_calls_made": 0,
+    "model_requests_made": 1,
+    "network_calls_made": 1,
     "paid_work_executed": false,
-    "local_preparation_status": "implemented local preparation is waiting for this document and requires verification before paid work",
-    "planned_output": "output/sh08_eightpair_20260914_r1",
+    "local_preparation_status": "r1 had one unknown Luna result; local recovery found no session; approved retry is a new revision and requires verification before execution",
+    "planned_output": "output/sh08_eightpair_20260914_r2",
     "planned_output_created": false,
-    "all_results_status": "not_yet_executed"
+    "all_results_status": "r1 prior attempt unknown; r2 retry not yet executed"
+  },
+  "prior_attempt": {
+    "ledger": {
+      "path": "output/sh08_eightpair_20260914_r1/ledger.json",
+      "sha256": "0f045c39d39d8abc8c105ae51b424860ba14c32a8e1a04688a2ea9ec1f2e0040"
+    },
+    "manifest": {
+      "path": "output/sh08_eightpair_20260914_r1/manifest.json",
+      "sha256": "3fc60b63fabd5f6b70633cb46a04d63d27ea009b41dd876959ebc41dc726f41b"
+    },
+    "request_id": "3f006fcf7403b4a729473ae0622c535d78af16c94cc72dde889832acbaf66c66",
+    "explicit_retry_authorized": true,
+    "reason": "local OpenCode token accounting bug discarded reply; local recovery matched sessions 0; user approved retry in question",
+    "action": "new_revision_not_resume"
   },
   "scope": {
     "cases": 60,

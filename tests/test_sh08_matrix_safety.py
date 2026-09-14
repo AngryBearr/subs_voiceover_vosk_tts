@@ -85,7 +85,7 @@ def _response(
     return {
         "text": "{}",
         "raw": "{}",
-        "calls": [{"status": "success", "tool_calls": tool_calls}],
+        "calls": [{"provider": provider or spec["provider"], "model": model or spec["model"], "status": "success", "tool_calls": tool_calls}],
         "usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -99,6 +99,141 @@ def _response(
         "model": model or spec["model"],
         "provider": provider or spec["provider"],
         "elapsed_sec": 0.0,
+    }
+
+
+def _prior_attempt_fixture(tmp_path: Path) -> dict[str, Any]:
+    old_manifest = tmp_path / "old-manifest.json"
+    old_manifest.write_text("{}", encoding="utf-8")
+    request_id = "3f006fcf7403b4a729473ae0622c535d78af16c94cc72dde889832acbaf66c66"
+    r1_ledger_path = Path("output") / "sh08_eightpair_20260914_r1" / "ledger.json"
+    if not r1_ledger_path.is_file():
+        pytest.skip("requires local SH08 r1 evidence")
+    actual_old_ledger = json.loads(r1_ledger_path.read_text(encoding="utf-8"))
+    descriptor = deepcopy(actual_old_ledger["requests"][request_id]["descriptor"])
+    response = {
+        "text": None,
+        "raw": {},
+        "calls": [{
+            "provider": "openai",
+            "model": "gpt-5.6-luna",
+            "status": "success",
+            "tool_calls": 0,
+            "usage": {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464, "cost": 0},
+        }],
+        "usage": {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464},
+        "cost_usd": None,
+        "cost_known": False,
+        "error": "usage_reasoning_exceeds_output",
+        "physical_calls_observed": None,
+        "model": "openai/gpt-5.6-luna",
+        "provider": "opencode",
+    }
+    ledger_dir = tmp_path / "old-run"
+    ledger_dir.mkdir()
+    matrix._save_ledger(ledger_dir, {
+        "schema": "sh08_matrix_ledger.v1",
+        "manifest_checksum": "old-manifest-checksum",
+        "requests": {request_id: {
+            "key": request_id,
+            "status": "unknown",
+            "descriptor": descriptor,
+            "reservation_usd": "0",
+            "cost_usd": "0",
+            "quota_units": 6,
+            "subscription": True,
+            "response": response,
+        }},
+    })
+    return {
+        "ledger": {"path": str(ledger_dir / "ledger.json"), "sha256": matrix._sha_file(ledger_dir / "ledger.json")},
+        "manifest": {"path": str(old_manifest), "sha256": matrix._sha_file(old_manifest)},
+        "request_id": request_id,
+        "explicit_retry_authorized": True,
+        "reason": "local OpenCode token accounting bug discarded reply; local recovery matched sessions 0; user approved retry in question",
+        "action": "new_revision_not_resume",
+    }
+
+
+def test_carryover_validates_read_only_unknown_luna_and_returns_six_units(tmp_path: Path) -> None:
+    carryover = matrix._carryover({"prior_attempt": _prior_attempt_fixture(tmp_path)})
+    assert carryover["subscription_units"] == 6
+    assert carryover["total_units"] == 6
+    assert carryover["logical_prompts"] == 1
+    assert carryover["direct_api_usd"] == "0"
+
+
+@pytest.mark.parametrize("tamper", ["ledger", "manifest", "authorization", "provider"])
+def test_carryover_tampering_fails_closed_before_any_backend(tmp_path: Path, tamper: str) -> None:
+    prior = _prior_attempt_fixture(tmp_path)
+    if tamper == "ledger":
+        Path(prior["ledger"]["path"]).write_text("tampered", encoding="utf-8")
+    elif tamper == "manifest":
+        Path(prior["manifest"]["path"]).write_text("tampered", encoding="utf-8")
+    elif tamper == "authorization":
+        prior["explicit_retry_authorized"] = False
+    else:
+        ledger = json.loads(Path(prior["ledger"]["path"]).read_text(encoding="utf-8"))
+        request = next(iter(ledger["requests"].values()))
+        request["response"]["calls"][0]["provider"] = "openrouter"
+        body = dict(ledger)
+        body.pop("checksum")
+        ledger["checksum"] = matrix.canonical_hash(body)
+        Path(prior["ledger"]["path"]).write_text(json.dumps(ledger), encoding="utf-8")
+        prior["ledger"]["sha256"] = matrix._sha_file(Path(prior["ledger"]["path"]))
+    with pytest.raises(matrix.MatrixError) as error:
+        matrix._carryover({"prior_attempt": prior})
+    if tamper == "provider":
+        assert str(error.value) == "prior underlying calls are not an unpriced OpenAI Luna success"
+
+
+def test_admission_preserves_six_unit_carryover_and_leaves_294_subscription_units() -> None:
+    manifest = _manifest()
+    manifest["carryover"] = {
+        "subscription_units": 6,
+        "total_units": 6,
+        "logical_prompts": 1,
+        "direct_api_usd": "0",
+        "prior_request_reference": {"request_id": "old", "ledger_sha256": "l", "manifest_sha256": "m"},
+        "user_retry_decision": {"explicit_retry_authorized": True},
+    }
+    admission = matrix._Admission(Path("."), manifest, {"requests": {}}, matrix.DEFAULT_SPECS)
+    assert admission._totals() == (matrix.Decimal(0), matrix.Decimal(0), 6, 6)
+    assert matrix.SUBSCRIPTION_CAP_UNITS - admission._totals()[2] == 294
+    assert matrix.TOTAL_CAP_UNITS - admission._totals()[3] == 594
+
+
+def test_report_separates_prior_unknown_from_new_revision_prompt_counts() -> None:
+    manifest = _manifest()
+    manifest["carryover"] = {
+        "subscription_units": 6,
+        "total_units": 6,
+        "logical_prompts": 1,
+        "direct_api_usd": "0",
+        "prior_request_reference": {
+            "request_id": "old",
+            "ledger_path": "old-ledger",
+            "ledger_sha256": "l",
+            "manifest_path": "old-manifest",
+            "manifest_sha256": "m",
+        },
+        "user_retry_decision": {"explicit_retry_authorized": True},
+    }
+    report = matrix._report(manifest, {"requests": {}}, [], status="prepared")
+    assert report["costs"]["logical_prompts"] == 1
+    assert report["costs"]["revision_logical_prompts"] == 0
+    assert report["costs"]["sublogical_prompts"] == 1
+    assert report["costs"]["global_quota_units"] == 6
+    assert report["costs"]["subscription_quota_units"] == 6
+    assert report["prior_attempt"] == {
+        "request_id": "old",
+        "status": "unknown",
+        "text": None,
+        "result_used": False,
+        "ledger_path": "old-ledger",
+        "ledger_sha256": "l",
+        "manifest_path": "old-manifest",
+        "manifest_sha256": "m",
     }
 
 
@@ -152,7 +287,7 @@ def test_openrouter_receipt_finishes_admission_and_resumes(tmp_path: Path, monke
 
 
 @pytest.mark.parametrize("model_key", tuple(matrix.DEFAULT_SPECS))
-@pytest.mark.parametrize("failure", ["missing_cost", "error", "mismatch", "tool_call"])
+@pytest.mark.parametrize("failure", ["missing_cost", "malformed_usage", "error", "mismatch", "tool_call"])
 def test_unknown_accounting_is_durable_and_blocks_every_following_model(
     tmp_path: Path, model_key: str, failure: str
 ) -> None:
@@ -168,6 +303,8 @@ def test_unknown_accounting_is_durable_and_blocks_every_following_model(
     if failure == "missing_cost":
         invalid["cost_usd"] = None
         invalid["cost_known"] = False
+    elif failure == "malformed_usage":
+        invalid["usage"]["output_tokens"] = "not-a-count"
     elif failure == "error":
         invalid["error"] = "provider_error"
     elif failure == "mismatch":
@@ -181,6 +318,8 @@ def test_unknown_accounting_is_durable_and_blocks_every_following_model(
     assert durable["requests"][key]["status"] == "unknown"
     assert durable["requests"][key]["key"] == key
     assert durable["requests"][key]["descriptor"] == descriptor
+    assert durable["requests"][key]["response"]["text"] == "{}"
+    assert durable["requests"][key]["response"]["raw"] == "{}"
 
     next_model = "gemini" if model_key != "gemini" else "luna"
     next_descriptor = _descriptor(manifest, model_key=next_model, rep=2)
@@ -281,6 +420,26 @@ def test_pure_admit_blocks_five_dollar_direct_cap_before_ledger_write(tmp_path: 
     assert (admission.output_dir / "ledger.json").read_bytes() == before
 
 
+def test_usage_cost_applies_combined_opencode_completion_cap_without_pricing_subscription(tmp_path: Path) -> None:
+    luna = matrix.DEFAULT_SPECS["luna"]
+    valid = _response("luna", cost=0.0, input_tokens=2455, output_tokens=127) | {
+        "usage": {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464}
+    }
+    cost, known = matrix._usage_cost(valid, luna)
+    assert cost == matrix.Decimal(0) and known
+
+    over_cap = deepcopy(valid)
+    over_cap["usage"].update({"output_tokens": matrix.MAX_TOKENS, "reasoning_tokens": 1, "total_tokens": 2455 + matrix.MAX_TOKENS + 1})
+    cost, known = matrix._usage_cost(over_cap, luna)
+    assert cost == matrix.Decimal(0) and not known
+
+    deepseek = _response("deepseek", input_tokens=2455, output_tokens=127) | {
+        "usage": {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464}
+    }
+    cost, known = matrix._usage_cost(deepseek, matrix.DEFAULT_SPECS["deepseek"])
+    assert cost == matrix.Decimal(0) and not known
+
+
 @pytest.fixture
 def unit_read_manifest(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     """Build a frozen, local-only manifest shape without weakening read validation."""
@@ -346,6 +505,7 @@ def unit_read_manifest(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
             },
             "code_hashes": matrix._code_hashes(),
             "opencode_required_version": matrix.OPENCODE_REQUIRED_VERSION,
+            "carryover": matrix._zero_carryover(),
         }
     )
     manifest["checksum"] = matrix.canonical_hash({key: value for key, value in manifest.items() if key != "checksum"})

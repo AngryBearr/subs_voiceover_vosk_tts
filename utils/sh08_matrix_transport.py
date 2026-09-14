@@ -97,17 +97,29 @@ def _usage_error(spec: dict[str, Any], usage: dict[str, Any], *, require_tokens:
     output_tokens = usage.get("output_tokens")
     if require_tokens and (not _valid_token(input_tokens) or not _valid_token(output_tokens)):
         return "usage_tokens_missing"
+    for name in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens"):
+        value = usage.get(name)
+        if value is not None and not _valid_token(value):
+            return "usage_reasoning_exceeds_output" if name == "reasoning_tokens" else "usage_tokens_invalid"
     if _valid_token(input_tokens) and input_tokens > spec["context_limit"]:
         return "usage_input_exceeds_context_limit"
-    if _valid_token(output_tokens) and output_tokens > spec["max_tokens"]:
-        return "usage_output_exceeds_max_tokens"
     reasoning = usage.get("reasoning_tokens")
-    if reasoning is not None and (not _valid_token(reasoning) or
-                                  (_valid_token(output_tokens) and reasoning > output_tokens)):
-        return "usage_reasoning_exceeds_output"
+    if spec.get("provider") == "opencode":
+        completion = output_tokens + (reasoning or 0) if _valid_token(output_tokens) and _valid_token(reasoning or 0) else None
+        if completion is not None and completion > spec["max_tokens"]:
+            return "usage_output_exceeds_max_tokens"
+    else:
+        if _valid_token(output_tokens) and output_tokens > spec["max_tokens"]:
+            return "usage_output_exceeds_max_tokens"
+        if _valid_token(reasoning) and _valid_token(output_tokens) and reasoning > output_tokens:
+            return "usage_reasoning_exceeds_output"
     total = usage.get("total_tokens")
-    if total is not None and _valid_token(input_tokens) and _valid_token(output_tokens) and total != input_tokens + output_tokens:
-        return "usage_total_inconsistent"
+    if total is not None and _valid_token(input_tokens) and _valid_token(output_tokens):
+        expected_total = input_tokens + output_tokens
+        if spec.get("provider") == "opencode" and _valid_token(reasoning or 0):
+            expected_total += reasoning or 0
+        if total != expected_total:
+            return "usage_total_inconsistent"
     return None
 
 
@@ -227,12 +239,12 @@ class MatrixBackend:
                  cost: Optional[float] = None, cost_known: bool = False, cost_kind: Optional[str] = None,
                  error: Optional[str] = None, physical: Optional[int] = 0,
                  returned_model: Any = "unknown", returned_provider: Any = "unknown",
-                 observed_assistant_steps: Optional[int] = None) -> dict[str, Any]:
+                 observed_assistant_steps: Optional[int] = None, text: Optional[str] = None) -> dict[str, Any]:
         spec = MODEL_SPECS.get(key, {})
         safe_raw = _safe_raw(raw, self._secrets) if raw is not None else {}
         safe_calls = _safe_raw(calls or [], self._secrets)
         return {
-            "text": None, "raw": safe_raw, "calls": safe_calls, "usage": usage or {},
+            "text": text, "raw": safe_raw, "calls": safe_calls, "usage": usage or {},
             "cost_usd": cost, "cost_known": cost_known, "cost_kind": cost_kind,
             "error": _safe_error(error, self._secrets) if error else None,
             "physical_calls_observed": physical, "model": spec.get("model", "unknown"),
@@ -328,14 +340,14 @@ class MatrixBackend:
             elif not valid_usage:
                 structural_error = usage_error or "usage_invalid"
             receipt = self._receipt(
-                key, started=started, calls=calls, usage=usage, cost=cost,
+                key, started=started,
+                raw={"detailed_response_snapshot": {"text": response.text, "error": response.error, "calls": calls}},
+                calls=calls, usage=usage, cost=cost,
                 cost_known=cost is not None,
                 cost_kind="conservative_token_upper" if cost is not None else None,
                 error=structural_error, physical=len(calls), returned_model=actual_model,
-                returned_provider=actual_provider,
+                returned_provider=actual_provider, text=response.text,
             )
-            valid = structural_error is None
-            receipt["text"] = response.text if valid else None
             return receipt
         except Exception as exc:
             return self._receipt(key, started=started, error=type(exc).__name__, physical=1)
@@ -344,12 +356,15 @@ class MatrixBackend:
                              schema: dict[str, Any], started: float) -> dict[str, Any]:
         from utils import opencode_transport
         session = await opencode_transport.create_session(self._server.base_url, title="subtitle-review", auth_header=self._server.auth_header)  # type: ignore[union-attr]
+        response = None
         try:
             response = await opencode_transport.send_prompt_detailed(
                 self._server.base_url, session, system, user, spec["model"], spec["variant"],  # type: ignore[union-attr]
                 auth_header=self._server.auth_header, output_schema=schema, allow_length_tool=False,
                 timeout=self.timeout, native_structured_output=False,
             )
+            calls = [asdict(record) for record in response.calls]
+            raw_snapshot = {"text": response.text, "error": response.error, "calls": calls}
         finally:
             try:
                 await opencode_transport.delete_session(
@@ -357,7 +372,6 @@ class MatrixBackend:
                 )
             except Exception:
                 pass
-        calls = [asdict(record) for record in response.calls]
         usage = _usage_dict(calls)
         key = "luna" if spec["model"].endswith("luna") else "sol"
         actual_model = calls[0].get("model", "unknown") if calls else "unknown"
@@ -384,13 +398,14 @@ class MatrixBackend:
                 error = usage_error
         valid = error is None
         receipt = self._receipt(
-            key, started=started, calls=calls, usage=usage,
+            key, started=started,
+            raw={"detailed_response_snapshot": raw_snapshot},
+            calls=calls, usage=usage,
             cost=0.0 if valid else None, cost_known=valid,
             cost_kind="subscription_not_priced" if valid else None, error=error, physical=None,
             returned_model=actual_model, returned_provider=actual_provider,
-            observed_assistant_steps=len(calls),
+            observed_assistant_steps=len(calls), text=response.text,
         )
-        receipt["text"] = response.text if valid else None
         return receipt
 
     async def _post_openrouter(self, *, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, bytes]:
@@ -565,6 +580,6 @@ class MatrixBackend:
             key, started=started, raw=raw, usage=usage, cost=float(cost) if known else None,
             calls=[call], cost_known=known, cost_kind="provider_reported" if known else None,
             error=error, physical=1, returned_model=actual_model, returned_provider=returned_provider,
+            text=text if isinstance(text, str) else None,
         )
-        receipt["text"] = text if error is None and isinstance(text, str) else None
         return receipt
