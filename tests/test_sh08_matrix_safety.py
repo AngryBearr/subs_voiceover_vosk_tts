@@ -4,6 +4,7 @@ import asyncio
 import json
 from copy import deepcopy
 from pathlib import Path
+import shutil
 import socket
 from typing import Any
 
@@ -438,6 +439,104 @@ def test_usage_cost_applies_combined_opencode_completion_cap_without_pricing_sub
     }
     cost, known = matrix._usage_cost(deepseek, matrix.DEFAULT_SPECS["deepseek"])
     assert cost == matrix.Decimal(0) and not known
+
+
+def test_usage_cost_counts_opencode_cache_tokens_in_effective_input() -> None:
+    response = _response("sol", cost=0.0, input_tokens=10, output_tokens=2) | {
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "reasoning_tokens": 3,
+            "cache_read_tokens": 20,
+            "cache_write_tokens": 4,
+            "total_tokens": 39,
+        }
+    }
+    cost, known = matrix._usage_cost(response, matrix.DEFAULT_SPECS["sol"])
+    assert cost == matrix.Decimal(0) and known
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"cache_read_tokens": -1},
+        {"cache_write_tokens": "4"},
+        {"total_tokens": 38},
+    ],
+)
+def test_usage_cost_rejects_invalid_opencode_cache_tuple(change: dict[str, Any]) -> None:
+    response = _response("sol", cost=0.0, input_tokens=10, output_tokens=2) | {
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "reasoning_tokens": 3,
+            "cache_read_tokens": 20,
+            "cache_write_tokens": 4,
+            "total_tokens": 39,
+        }
+    }
+    response["usage"].update(change)
+    cost, known = matrix._usage_cost(response, matrix.DEFAULT_SPECS["sol"])
+    assert cost == matrix.Decimal(0) and not known
+
+
+def test_local_r2_receipt_import_replays_without_backend_and_blocks_ledger_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_dir = Path("output/sh08_eightpair_20260914_r2")
+    if not (source_dir / "manifest.json").is_file() or not (source_dir / "ledger.json").is_file():
+        pytest.skip("requires local SH08 r2 receipt artifact")
+    copied_source = tmp_path / "source-r2"
+    shutil.copytree(source_dir, copied_source)
+    approval = json.loads(Path("docs/sh08_live_protocol.json").read_text(encoding="utf-8"))
+    config = approval["receipt_import"]
+    config["source"]["manifest"].update({"path": str(copied_source / "manifest.json"), "sha256": matrix._sha_file(copied_source / "manifest.json")})
+    config["source"]["ledger"].update({"path": str(copied_source / "ledger.json"), "sha256": matrix._sha_file(copied_source / "ledger.json")})
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+    source_manifest = json.loads((copied_source / "manifest.json").read_text(encoding="utf-8"))
+    manifest = deepcopy(source_manifest)
+    manifest["approval"] = {"path": str(approval_path), "sha256": matrix._sha_file(approval_path)}
+    manifest["receipt_import"] = deepcopy(config)
+    manifest["checksum"] = matrix.canonical_hash({key: value for key, value in manifest.items() if key != "checksum"})
+    imported = matrix._import_receipts(approval, manifest)
+    assert len(imported["requests"]) == 55
+    assert sum(row["status"] == "complete" for row in imported["requests"].values()) == 55
+    reconciled = imported["requests"]["47abdbe1c9eb6e4435c1058fd611cfbcbeb467c4e25d8dc980be4f26cc1f999f"]
+    assert reconciled["reconciliation"]["paid_retry"] is False
+    assert reconciled["response"]["error"] is None
+    assert reconciled["response"]["raw"] == json.loads((copied_source / "ledger.json").read_text(encoding="utf-8"))["requests"][reconciled["key"]]["response"]["raw"]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    matrix._save_ledger(run_dir, imported)
+    ledger = matrix._load_ledger(run_dir, manifest=manifest)
+    admission = matrix._Admission(run_dir, manifest, ledger, matrix.DEFAULT_SPECS)
+    backend_calls: list[str] = []
+
+    async def forbidden_backend(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        backend_calls.append("backend")
+        raise AssertionError("durable receipt replay must not call a backend")
+
+    for key in config["request_ids"]:
+        descriptor = ledger["requests"][key]["descriptor"]
+        response, error, replayed = asyncio.run(
+            matrix._request(
+                admission,
+                forbidden_backend,
+                descriptor=descriptor,
+                system=descriptor["system_prompt"],
+                user=descriptor["user_prompt"],
+                schema=descriptor["schema"],
+            )
+        )
+        assert replayed is True and error is None and isinstance(response, dict)
+    assert backend_calls == []
+    assert matrix._load_ledger(run_dir, manifest=manifest)["requests"] == ledger["requests"]
+    tampered = matrix._load_ledger(run_dir, manifest=manifest)
+    tampered["requests"][config["request_ids"][0]]["response"]["text"] = "tampered"
+    matrix._save_ledger(run_dir, tampered)
+    with pytest.raises(matrix.MatrixError):
+        matrix._load_ledger(run_dir, manifest=manifest)
 
 
 @pytest.fixture

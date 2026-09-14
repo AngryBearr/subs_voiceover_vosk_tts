@@ -492,15 +492,18 @@ def _prepare_manifest_unlocked(
         "user_consent": {"no_byok_confirmed": True, "muse_data_approved": True, "placeholder": False, "approved_source": deepcopy(consent.get("approved_source", "user conversation; docs/sh08_live_protocol.json")), "approved_scope": deepcopy(consent.get("approved_scope", "SH08 matrix"))},
         "tariffs": tariffs,
         "carryover": carryover,
+        "receipt_import": _receipt_import_config(approval),
         "status": "prepared",
     }
     body["checksum"] = canonical_hash(body)
+    imported_ledger = _import_receipts(approval, body)
     output_dir.mkdir(parents=True)
     atomic_json(output_dir / "manifest.json", body)
     atomic_json(output_dir / "source_snapshots.json", source_snapshots)
     atomic_json(output_dir / "selection.json", selection)
     atomic_json(output_dir / "queue.json", {"status": "prepared", "pending": selected[0:MAX_CASES], "batches": batches})
-    _save_ledger(output_dir, {"schema": "sh08_matrix_ledger.v1", "manifest_checksum": body["checksum"], "requests": {}, "created_at": _now()})
+    imported_ledger["manifest_checksum"] = body["checksum"]
+    _save_ledger(output_dir, imported_ledger)
     return body
 
 
@@ -556,6 +559,11 @@ def _read_manifest(output_dir: Path) -> dict[str, Any]:
     current_approval = _load_json(Path(approval['path']), 'approved matrix protocol')
     if not isinstance(current_approval, Mapping) or manifest.get("carryover") != _carryover(current_approval):
         raise MatrixError("manifest carryover differs from current approved retry")
+    approved_import = _receipt_import_config(current_approval) if isinstance(current_approval, Mapping) else {"enabled": False}
+    if manifest.get("receipt_import", {"enabled": False}) != approved_import:
+        raise MatrixError("manifest receipt import differs from approved protocol")
+    if approved_import.get("enabled") is True:
+        _import_receipts(current_approval, manifest)
     source_info = manifest.get("source")
     if isinstance(source_info, Mapping) and isinstance(source_info.get("corpus_manifest"), str) and isinstance(source_info.get("corpus_manifest_sha256"), str):
         source_manifest_path = Path(source_info["corpus_manifest"])
@@ -619,6 +627,19 @@ def _validate_ledger(ledger: Mapping[str, Any], manifest: Mapping[str, Any] | No
     requests = ledger.get("requests")
     if not isinstance(requests, dict):
         raise MatrixError("ledger requests are invalid")
+    if manifest is not None and isinstance(manifest.get("receipt_import"), Mapping) and manifest["receipt_import"].get("enabled") is True:
+        approval = manifest.get("approval")
+        if not isinstance(approval, Mapping) or not isinstance(approval.get("path"), str):
+            raise MatrixError("imported ledger approval reference is missing")
+        expected = _import_receipts(_load_json(Path(approval["path"]), "approved matrix protocol"), manifest)
+        provenance = ledger.get("provenance")
+        expected_provenance = expected.get("provenance")
+        if not isinstance(provenance, Mapping) or provenance.get("receipt_import") != (expected_provenance or {}).get("receipt_import"):
+            raise MatrixError("imported ledger provenance is invalid")
+        expected_requests = expected["requests"]
+        imported_ids = expected_provenance["receipt_import"]["imported_request_ids"]
+        if any(requests.get(key) != expected_requests.get(key) for key in imported_ids):
+            raise MatrixError("imported ledger row differs from frozen source")
     specs = manifest.get("full_specs", MODEL_SPECS) if isinstance(manifest, Mapping) else MODEL_SPECS
     for key, row in requests.items():
         if not isinstance(key, str) or not isinstance(row, dict):
@@ -679,6 +700,11 @@ def _decimal(value: Any, label: str) -> Decimal:
     return result
 
 
+def _money_text(value: Decimal) -> str:
+    rounded = value.quantize(Decimal("0.00000000001"))
+    return format(rounded, "f").rstrip("0").rstrip(".") or "0"
+
+
 def _reservation(spec: Mapping[str, Any]) -> Decimal:
     input_rate = _decimal(spec.get("input_per_million", 0), "input tariff")
     output_rate = _decimal(spec.get("output_per_million", 0), "output tariff")
@@ -699,11 +725,17 @@ def _usage_cost(response: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[D
     if (reasoning is not None
             and (isinstance(reasoning, bool) or not isinstance(reasoning, int) or reasoning < 0)):
         return Decimal(0), False
-    for usage_key in ("cache_read_tokens", "cache_write_tokens"):
-        usage_value = usage.get(usage_key)
-        if usage_value is not None and (isinstance(usage_value, bool) or not isinstance(usage_value, int) or usage_value < 0):
+    cache_read = usage.get("cache_read_tokens", 0)
+    cache_write = usage.get("cache_write_tokens", 0)
+    for usage_value in (cache_read, cache_write):
+        if usage_value is None:
+            usage_value = 0
+        if isinstance(usage_value, bool) or not isinstance(usage_value, int) or usage_value < 0:
             return Decimal(0), False
-    if inputs > int(spec.get("context_limit", 0)):
+    cache_read = usage.get("cache_read_tokens") or 0
+    cache_write = usage.get("cache_write_tokens") or 0
+    effective_input = inputs + cache_read + cache_write if spec.get("provider") == "opencode" else inputs
+    if effective_input > int(spec.get("context_limit", 0)):
         return Decimal(0), False
     if spec.get("provider") == "opencode":
         if outputs + (reasoning or 0) > int(spec.get("max_tokens", 0)):
@@ -714,7 +746,7 @@ def _usage_cost(response: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[D
     if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
         return Decimal(0), False
     if total is not None:
-        expected_total = inputs + outputs + (reasoning or 0 if spec.get("provider") == "opencode" else 0)
+        expected_total = effective_input + outputs + (reasoning or 0 if spec.get("provider") == "opencode" else 0)
         if total != expected_total:
             return Decimal(0), False
     reported = response.get("cost_usd")
@@ -725,7 +757,218 @@ def _usage_cost(response: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[D
             return Decimal(0), False
     if spec.get("subscription"):
         return Decimal(0), False
-    return (Decimal(inputs) * _decimal(spec.get("input_per_million", 0), "input tariff") + Decimal(outputs) * _decimal(spec.get("output_per_million", 0), "output tariff")) / Decimal(1_000_000), True
+    return (Decimal(effective_input) * _decimal(spec.get("input_per_million", 0), "input tariff") + Decimal(outputs) * _decimal(spec.get("output_per_million", 0), "output tariff")) / Decimal(1_000_000), True
+
+
+_RECEIPT_SEMANTIC_FIELDS = (
+    "approved_scope", "selection", "selection_sha256", "source", "profile",
+    "batches", "full_specs", "limits", "prompts", "user_consent",
+    "carryover", "opencode_required_version",
+)
+_RECEIPT_REQUEST_ID = "47abdbe1c9eb6e4435c1058fd611cfbcbeb467c4e25d8dc980be4f26cc1f999f"
+
+
+def _receipt_import_config(approval: Mapping[str, Any]) -> dict[str, Any]:
+    value = approval.get("receipt_import")
+    if value is None:
+        return {"enabled": False}
+    if not isinstance(value, Mapping) or value.get("enabled") is not True:
+        raise MatrixError("approved receipt import is invalid")
+    config = deepcopy(dict(value))
+    if config.get("action") != "reuse_durable_responses_after_local_usage_reconciliation":
+        raise MatrixError("receipt import action is not approved")
+    if config.get("no_inference_retry") is not True or config.get("new_revision_not_legacy_resume") is not True:
+        raise MatrixError("receipt import retry flags are invalid")
+    if config.get("algorithm") != "opencode-disjoint-cache-v1":
+        raise MatrixError("receipt import algorithm is invalid")
+    return config
+
+
+def _receipt_reference(config: Mapping[str, Any], name: str) -> tuple[Path, str]:
+    source = config.get("source")
+    reference = source.get(name) if isinstance(source, Mapping) else config.get(name)
+    if not isinstance(reference, Mapping) or not isinstance(reference.get("path"), str) or not isinstance(reference.get("sha256"), str):
+        raise MatrixError(f"receipt import {name} reference is incomplete")
+    root = Path(__file__).resolve().parents[1]
+    path = Path(reference["path"])
+    if not path.is_absolute():
+        path = root / path
+    actual = _sha_file(path)
+    if actual != reference["sha256"]:
+        raise MatrixError(f"receipt import {name} hash mismatch")
+    return path, actual
+
+
+def _prompt_target_ids(descriptor: Mapping[str, Any]) -> list[str]:
+    prompt = descriptor.get("user_prompt")
+    if not isinstance(prompt, str) or "Input JSON:\n" not in prompt:
+        raise MatrixError("imported descriptor prompt is incomplete")
+    try:
+        payload = json.loads(prompt.split("Input JSON:\n", 1)[1])
+    except (TypeError, ValueError) as exc:
+        raise MatrixError("imported descriptor prompt JSON is invalid") from exc
+    targets = payload.get("targets") if isinstance(payload, Mapping) else None
+    if not isinstance(targets, list) or not targets or any(not isinstance(item, Mapping) or not isinstance(item.get("cue_id"), str) for item in targets):
+        raise MatrixError("imported descriptor targets are invalid")
+    ids = [str(item["cue_id"]) for item in targets]
+    if len(ids) != len(set(ids)):
+        raise MatrixError("imported descriptor has duplicate targets")
+    return ids
+
+
+def _validate_imported_response(row: Mapping[str, Any], descriptor: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
+    response = row.get("response")
+    if not isinstance(response, Mapping):
+        raise MatrixError("imported complete row has no response")
+    if response.get("model") != spec.get("model") or response.get("provider") != spec.get("provider") or response.get("error") is not None or response.get("cost_known") is not True:
+        raise MatrixError("imported response identity or accounting is invalid")
+    calls = response.get("calls")
+    if not isinstance(calls, list) or not calls or any(not isinstance(call, Mapping) or call.get("status") != "success" or call.get("tool_calls", 0) not in (0, None) or call.get("error") not in (None, "") for call in calls):
+        raise MatrixError("imported response calls are invalid")
+    physical = response.get("physical_calls_observed")
+    if physical != 1 and not (physical is None and spec.get("subscription") is True):
+        raise MatrixError("imported response physical call count is invalid")
+    target_ids = _prompt_target_ids(descriptor)
+    text = response.get("text")
+    if not isinstance(text, str) or not text:
+        raise MatrixError("imported response text is missing")
+    stage = descriptor.get("stage")
+    try:
+        envelope = json.loads(text)
+        result_rows = envelope.get("results") if isinstance(envelope, Mapping) else None
+        result_ids = [item.get("cue_id") for item in result_rows] if isinstance(result_rows, list) and all(isinstance(item, Mapping) for item in result_rows) else []
+        if len(result_ids) != len(target_ids) or any(not isinstance(item, str) for item in result_ids) or len(set(result_ids)) != len(result_ids) or set(result_ids) != set(target_ids):
+            raise MatrixError("saved response target IDs are incomplete, duplicated, or foreign")
+        parse_generation_partial(text, target_ids) if stage in {"generation", "repair"} else parse_review_partial(text, target_ids)
+    except Exception as exc:
+        raise MatrixError("imported response does not contain the complete saved target set") from exc
+    cost, known = _usage_cost(response, spec)
+    if not known or cost != _decimal(response.get("cost_usd"), "imported response cost"):
+        raise MatrixError("imported response usage accounting is invalid")
+
+
+def _reconcile_imported_unknown(row: Mapping[str, Any], source_ledger_sha256: str) -> dict[str, Any]:
+    if row.get("status") != "unknown" or row.get("key") != _RECEIPT_REQUEST_ID:
+        raise MatrixError("the pinned imported unknown is missing")
+    descriptor = row.get("descriptor")
+    if not isinstance(descriptor, Mapping) or descriptor.get("model_key") != "sol" or descriptor.get("rep") != 2 or descriptor.get("stage") != "review" or descriptor.get("generator") != "luna" or descriptor.get("arbiter") != "sol":
+        raise MatrixError("pinned imported unknown descriptor is invalid")
+    response = row.get("response")
+    if not isinstance(response, Mapping) or response.get("error") not in {"unknown or unexpected accounting", "usage_total_inconsistent"}:
+        raise MatrixError("pinned imported unknown error is invalid")
+    raw = response.get("raw")
+    snapshot = raw.get("detailed_response_snapshot") if isinstance(raw, Mapping) else None
+    if not isinstance(snapshot, Mapping) or snapshot.get("error") is not None:
+        raise MatrixError("pinned raw response proof is invalid")
+    text = response.get("text")
+    if not isinstance(text, str) or not text or snapshot.get("text") != text:
+        raise MatrixError("pinned raw response text is missing or changed")
+    calls = snapshot.get("calls")
+    if not isinstance(calls, list) or len(calls) != 1:
+        raise MatrixError("pinned raw response call proof is invalid")
+    call = calls[0]
+    if not isinstance(call, Mapping) or call.get("provider") != "openai" or call.get("model") != "gpt-5.6-sol" or call.get("status") != "success" or call.get("tool_calls") != 0 or call.get("error") is not None or call.get("requested_model") != "openai/gpt-5.6-sol":
+        raise MatrixError("pinned raw response model proof is invalid")
+    expected_usage = {"input_tokens": 186, "output_tokens": 681, "reasoning_tokens": 837, "total_tokens": 10152, "cache_read_tokens": 8448, "cache_write_tokens": 0}
+    for usage in (response.get("usage"), call.get("usage")):
+        if not isinstance(usage, Mapping) or {key: usage.get(key) for key in expected_usage} != expected_usage:
+            raise MatrixError("pinned raw response usage proof is invalid")
+    spec = MODEL_SPECS["sol"]
+    candidate = deepcopy(dict(row))
+    corrected = deepcopy(dict(response))
+    corrected.update({"error": None, "cost_known": True, "cost_usd": 0, "cost_kind": "subscription_not_priced"})
+    candidate.update({"status": "complete", "error": None, "cost_usd": "0", "cost_known": True, "reservation_usd": "0", "response": corrected, "text": corrected.get("text"), "raw": corrected.get("raw"), "calls": corrected.get("calls"), "usage": corrected.get("usage")})
+    candidate["reconciliation"] = {
+        "old_status": row.get("status"),
+        "old_error": row.get("error", response.get("error")),
+        "source_ledger_sha256": source_ledger_sha256,
+        "request_id": _RECEIPT_REQUEST_ID,
+        "algorithm": "opencode-disjoint-cache-v1",
+        "paid_retry": False,
+    }
+    _validate_imported_response(candidate, descriptor, spec)
+    return candidate
+
+
+def _import_receipts(approval: Mapping[str, Any], new_manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Import frozen local receipts and reconcile only the pinned accounting error."""
+    config = _receipt_import_config(approval)
+    ledger = {"schema": "sh08_matrix_ledger.v1", "manifest_checksum": new_manifest.get("checksum"), "requests": {}}
+    if config.get("enabled") is not True:
+        return ledger
+    manifest_path, manifest_file_sha = _receipt_reference(config, "manifest")
+    ledger_path, ledger_file_sha = _receipt_reference(config, "ledger")
+    source_manifest = _load_json(manifest_path, "receipt source manifest")
+    source_envelope = _load_json(ledger_path, "receipt source ledger")
+    if not isinstance(source_manifest, dict) or not isinstance(source_manifest.get("checksum"), str) or canonical_hash({key: value for key, value in source_manifest.items() if key != "checksum"}) != source_manifest["checksum"]:
+        raise MatrixError("receipt source manifest checksum mismatch")
+    if not isinstance(source_envelope, dict) or not isinstance(source_envelope.get("checksum"), str):
+        raise MatrixError("receipt source ledger envelope is incomplete")
+    source_ledger = dict(source_envelope)
+    source_checksum = source_ledger.pop("checksum")
+    if canonical_hash(source_ledger) != source_checksum or source_ledger.get("manifest_checksum") != source_manifest.get("checksum"):
+        raise MatrixError("receipt source ledger is not bound to source manifest")
+    if config.get("source_manifest_checksum") != source_manifest.get("checksum"):
+        raise MatrixError("receipt source manifest checksum pin is invalid")
+    for field in _RECEIPT_SEMANTIC_FIELDS:
+        if source_manifest.get(field) != new_manifest.get(field):
+            raise MatrixError(f"receipt source differs in frozen field: {field}")
+    _validate_ledger(source_ledger, source_manifest)
+    requests = source_ledger.get("requests")
+    if not isinstance(requests, dict):
+        raise MatrixError("receipt source requests are invalid")
+    request_ids = config.get("request_ids")
+    if not isinstance(request_ids, list) or len(request_ids) != 55 or len(set(request_ids)) != 55 or set(request_ids) != set(requests):
+        raise MatrixError("receipt source request ID pin is invalid")
+    if config.get("request_ids_sha256") != canonical_hash(request_ids):
+        raise MatrixError("receipt source request ID pin checksum mismatch")
+    expected_counts = config.get("expected_source_counts")
+    if expected_counts != {"requests": 55, "complete": 54, "unknown": 1}:
+        raise MatrixError("receipt source count pin is invalid")
+    unknown_ids = [key for key, row in requests.items() if isinstance(row, Mapping) and row.get("status") == "unknown"]
+    if unknown_ids != [_RECEIPT_REQUEST_ID] and set(unknown_ids) != {_RECEIPT_REQUEST_ID}:
+        raise MatrixError("receipt source must contain exactly the pinned unknown")
+    for key in request_ids:
+        row = requests.get(key)
+        if not isinstance(row, dict):
+            raise MatrixError("receipt source row is missing")
+        descriptor = row.get("descriptor")
+        if not isinstance(descriptor, dict) or canonical_hash(descriptor) != key:
+            raise MatrixError("receipt source descriptor key mismatch")
+        model_key = descriptor.get("model_key")
+        spec = MODEL_SPECS.get(model_key)
+        if not isinstance(spec, Mapping) or descriptor.get("spec") != spec:
+            raise MatrixError("receipt source descriptor model specification changed")
+        if descriptor.get("rep") not in (1, 2) or descriptor.get("stage") not in {"generation", "review", "repair", "recheck"} or descriptor.get("generator") not in MODEL_SPECS:
+            raise MatrixError("receipt source logical identity is invalid")
+        if descriptor.get("stage") in {"generation", "repair"} and descriptor.get("arbiter") is not None:
+            raise MatrixError("receipt source generation arbiter is invalid")
+        if descriptor.get("stage") in {"review", "recheck"} and descriptor.get("arbiter") not in {"luna", "deepseek", "sol"}:
+            raise MatrixError("receipt source review arbiter is invalid")
+        system_expected = GENERATOR_SYSTEM_PROMPT if descriptor.get("stage") in {"generation", "repair"} else ARBITER_SYSTEM_PROMPT
+        schema_expected = generation_schema() if descriptor.get("stage") in {"generation", "repair"} else review_schema()
+        if descriptor.get("system_prompt") != system_expected or descriptor.get("schema") != schema_expected or descriptor.get("payload_bytes") != _payload_size(system_expected, descriptor.get("user_prompt", ""), schema_expected):
+            raise MatrixError("receipt source context prompt changed")
+        if row.get("status") == "complete":
+            _validate_imported_response(row, descriptor, spec)
+        elif key != _RECEIPT_REQUEST_ID:
+            raise MatrixError("receipt source contains an unapproved unknown")
+    imported = {key: deepcopy(requests[key]) for key in request_ids}
+    imported[_RECEIPT_REQUEST_ID] = _reconcile_imported_unknown(imported[_RECEIPT_REQUEST_ID], ledger_file_sha)
+    ledger["requests"] = imported
+    ledger["provenance"] = {
+        "receipt_import": {
+            "action": config["action"],
+            "algorithm": config["algorithm"],
+            "source_manifest": {"path": config.get("source", {}).get("manifest", {}).get("path", config.get("manifest", {}).get("path")), "sha256": manifest_file_sha, "manifest_checksum": source_manifest["checksum"]},
+            "source_ledger": {"path": config.get("source", {}).get("ledger", {}).get("path", config.get("ledger", {}).get("path")), "sha256": ledger_file_sha},
+            "imported_request_ids": request_ids,
+            "imported_request_ids_sha256": canonical_hash(request_ids),
+            "reconciled_request_id": _RECEIPT_REQUEST_ID,
+            "paid_retry": False,
+        }
+    }
+    return ledger
 
 
 def _payload_size(system: str, user: str, schema: dict[str, Any]) -> int:
@@ -1074,6 +1317,17 @@ def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequen
             "manifest_path": prior_reference.get("manifest_path"),
             "manifest_sha256": prior_reference.get("manifest_sha256"),
         }
+    recovered_responses: dict[str, dict[str, Any]] = {}
+    for request in requests:
+        reconciliation = request.get("reconciliation")
+        descriptor = request.get("descriptor")
+        if isinstance(reconciliation, Mapping) and isinstance(descriptor, Mapping):
+            recovered_responses[str(descriptor.get("model_key"))] = {
+                "request_id": reconciliation.get("request_id"),
+                "status": request.get("status"),
+                "response_preserved": True,
+                "paid_retry": reconciliation.get("paid_retry"),
+            }
     return {
         "schema": VERSION, "status": status, "scope": manifest.get("approved_scope"),
         "firstpass": {"denominator_per_pair_rep": MAX_CASES, "verdicts": dict(firstpass_verdicts), "accepted_counts": accepted_counts, "firstpass_counts": pair_rep_counts}, "finalaccepted_counts": dict(finalaccepted_counts),
@@ -1082,8 +1336,8 @@ def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequen
         "disagreements": {"luna_deepseek_three_judges": disagreements, "completeness_count": disagreement_completeness},
         "primary_complete": all(pair_rep_counts[key]["unresolved"] == 0 and pair_rep_counts[key]["missing"] == 0 for key in pair_rep_counts),
         "repairs_complete": all(value["pending"] == 0 and value["skipped_for_budget"] == 0 and value["attempted"] == value["rechecked"] for value in coverage.values()),
-        "costs": {"known_sum_usd": str(known_sum), "direct_api_usd": str(known_sum), "pending_reservation_usd": str(pending_reserve), "global_quota_units": quota_units + int(carryover.get("total_units", 0)), "subscription_quota_units": sub_units + int(carryover.get("subscription_units", 0)), "logical_prompts": prior_logical + revision_logical, "revision_logical_prompts": revision_logical, "sublogical_prompts": prior_sublogical + sum(1 for request in requests if request.get("subscription")), "observed_assistant_steps": observed_steps, "physical_calls_observed": physical_calls, "provider_actual_usd": {key: str(value) for key, value in provider_costs.items() if key == 'openrouter'}, "deepseek_conservative_upper_usd": str(deepseek_upper), "subscription_unpriced": True, "global_actual_qualifier": 'known_sum combines provider-reported OpenRouter cost and conservative no-cache DeepSeek token cost; subscription is unpriced'},
-        "prior_attempt": prior_attempt,
+        "costs": {"known_sum_usd": _money_text(known_sum), "direct_api_usd": _money_text(known_sum), "pending_reservation_usd": _money_text(pending_reserve), "global_quota_units": quota_units + int(carryover.get("total_units", 0)), "subscription_quota_units": sub_units + int(carryover.get("subscription_units", 0)), "logical_prompts": prior_logical + revision_logical, "revision_logical_prompts": revision_logical, "sublogical_prompts": prior_sublogical + sum(1 for request in requests if request.get("subscription")), "observed_assistant_steps": observed_steps, "physical_calls_observed": physical_calls, "provider_actual_usd": {key: _money_text(value) for key, value in provider_costs.items() if key == 'openrouter'}, "deepseek_conservative_upper_usd": _money_text(deepseek_upper), "subscription_unpriced": True, "global_actual_qualifier": 'known_sum combines provider-reported OpenRouter cost and conservative no-cache DeepSeek token cost; subscription is unpriced'},
+        "prior_attempt": prior_attempt, "recovered_responses": recovered_responses,
         "time_per_stage_provider": dict(timing), "repair_coverage": coverage, "audio_status": "not_measured", "claim_boundary": "No semantic truth or full-pilot claim.",
     }
 

@@ -123,3 +123,20 @@ approved commits and follow-up commits, but push is not approved.
   pass. The `42` figure uses the actual `542 passed, 5 skipped` smoke check;
   the first model call itself consumed six units.
 - Latest carryover verification: `549 passed, 5 skipped`.
+
+## Durable r2 receipt import
+
+- The first repeat was done in the saved r2 artifact: 55 logical requests are
+  present, with 54 complete rows and one locally reconciled Sol row. The second
+  repeat was blocked only by local total/cache accounting; its response text and
+  raw response snapshot are preserved exactly.
+- No server retry or paid repeat was made. The planned r3 revision will import
+  the 55 saved responses as durable receipts; all r1 and r2 files remain
+  unchanged.
+- The definitive latest r2 accounting is 56 cumulative logical prompts, 55
+  revision prompts, 216 total quota units, and 192 subscription units. The
+  known monetary sum is `$0.06299181375`: OpenRouter `$0.02588961375` plus the
+  conservative DeepSeek upper bound `$0.0371022`; the reconciled Sol response
+  contributes `$0` because subscription use is not priced.
+- This record makes no final-winner claim and does not describe the imported
+  response as a second repetition complete result.

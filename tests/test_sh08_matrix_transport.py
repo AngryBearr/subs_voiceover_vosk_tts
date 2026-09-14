@@ -176,6 +176,65 @@ def test_opencode_usage_counts_visible_and_reasoning_tokens_once(monkeypatch: py
     assert result["usage"] == {"input_tokens": 2455, "output_tokens": 127, "reasoning_tokens": 882, "total_tokens": 3464}
 
 
+def test_opencode_usage_accepts_disjoint_cache_counters_and_cached_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_transport as opencode
+
+    async def send(*args: object, **kwargs: object) -> DetailedResponse:
+        return DetailedResponse(
+            "cached text", [CallRecord("openai", "gpt-5.6-sol", "medium", "now", 0.1,
+                                        OpenCodePromptUsage(input_tokens=186, output_tokens=681,
+                                                            reasoning_tokens=837, total_tokens=10152,
+                                                            cache_read_tokens=8448, cache_write_tokens=0),
+                                        "success", requested_model="openai/gpt-5.6-sol",
+                                        requested_variant="medium")],
+        )
+
+    monkeypatch.setattr(opencode, "create_session", lambda *args, **kwargs: _async_value("session"))
+    monkeypatch.setattr(opencode, "send_prompt_detailed", send)
+    monkeypatch.setattr(opencode, "delete_session", lambda *args, **kwargs: _async_value(None))
+    backend = transport.MatrixBackend()
+    backend._server = type("FakeServer", (), {"base_url": "http://fake", "auth_header": {}})()
+
+    result = asyncio.run(backend._call_opencode(transport.MODEL_SPECS["sol"], "s", "u", {}, 0.0))
+
+    assert result["error"] is None
+    assert result["text"] == "cached text"
+    assert result["usage"] == {
+        "input_tokens": 186, "output_tokens": 681, "reasoning_tokens": 837,
+        "total_tokens": 10152, "cache_read_tokens": 8448, "cache_write_tokens": 0,
+    }
+    assert result["raw"]["detailed_response_snapshot"]["calls"] == result["calls"]
+
+
+def test_opencode_inconsistent_total_is_rejected_with_cached_input() -> None:
+    usage = {
+        "input_tokens": 186, "output_tokens": 681, "reasoning_tokens": 837,
+        "total_tokens": 3464, "cache_read_tokens": 8448, "cache_write_tokens": 0,
+    }
+    assert transport._usage_error(transport.MODEL_SPECS["sol"], usage) == "usage_total_inconsistent"
+
+
+@pytest.mark.parametrize("field", ["cache_read_tokens", "cache_write_tokens"])
+def test_opencode_cache_tokens_count_toward_context_limit(field: str) -> None:
+    usage = {"input_tokens": transport.MODEL_SPECS["sol"]["context_limit"], "output_tokens": 1, field: 1}
+    assert transport._usage_error(transport.MODEL_SPECS["sol"], usage) == "usage_input_exceeds_context_limit"
+
+
+@pytest.mark.parametrize("field_value", [("cache_read_tokens", True), ("cache_write_tokens", -1)])
+def test_opencode_invalid_cache_tokens_are_rejected(field_value: tuple[str, object]) -> None:
+    field, value = field_value
+    usage = {"input_tokens": 1, "output_tokens": 1, field: value}
+    assert transport._usage_error(transport.MODEL_SPECS["sol"], usage) == "usage_tokens_invalid"
+
+
+def test_nonopencode_cached_tokens_are_not_double_counted() -> None:
+    usage = {
+        "input_tokens": 186, "output_tokens": 681, "reasoning_tokens": 0,
+        "total_tokens": 867, "cache_read_tokens": 8448, "cache_write_tokens": 0,
+    }
+    assert transport._usage_error(transport.MODEL_SPECS["gemini"], usage) is None
+
+
 def test_opencode_combined_completion_cap_rejects_before_admission_can_replay(monkeypatch: pytest.MonkeyPatch) -> None:
     import utils.opencode_transport as opencode
 

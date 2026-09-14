@@ -95,20 +95,26 @@ def _usage_error(spec: dict[str, Any], usage: dict[str, Any], *, require_tokens:
     """Validate billing usage without counting reasoning tokens twice."""
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
-    if require_tokens and (not _valid_token(input_tokens) or not _valid_token(output_tokens)):
-        return "usage_tokens_missing"
     for name in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens"):
         value = usage.get(name)
         if value is not None and not _valid_token(value):
-            return "usage_reasoning_exceeds_output" if name == "reasoning_tokens" else "usage_tokens_invalid"
-    if _valid_token(input_tokens) and input_tokens > spec["context_limit"]:
-        return "usage_input_exceeds_context_limit"
+            return "usage_tokens_invalid"
+    if require_tokens and (not _valid_token(input_tokens) or not _valid_token(output_tokens)):
+        return "usage_tokens_missing"
     reasoning = usage.get("reasoning_tokens")
+    effective_input: Optional[int] = None
+    completion: Optional[int] = None
     if spec.get("provider") == "opencode":
-        completion = output_tokens + (reasoning or 0) if _valid_token(output_tokens) and _valid_token(reasoning or 0) else None
+        if _valid_token(input_tokens) and _valid_token(output_tokens):
+            effective_input = input_tokens + (usage.get("cache_read_tokens") or 0) + (usage.get("cache_write_tokens") or 0)
+            completion = output_tokens + (reasoning or 0)
+        if effective_input is not None and effective_input > spec["context_limit"]:
+            return "usage_input_exceeds_context_limit"
         if completion is not None and completion > spec["max_tokens"]:
             return "usage_output_exceeds_max_tokens"
     else:
+        if _valid_token(input_tokens) and input_tokens > spec["context_limit"]:
+            return "usage_input_exceeds_context_limit"
         if _valid_token(output_tokens) and output_tokens > spec["max_tokens"]:
             return "usage_output_exceeds_max_tokens"
         if _valid_token(reasoning) and _valid_token(output_tokens) and reasoning > output_tokens:
@@ -116,8 +122,8 @@ def _usage_error(spec: dict[str, Any], usage: dict[str, Any], *, require_tokens:
     total = usage.get("total_tokens")
     if total is not None and _valid_token(input_tokens) and _valid_token(output_tokens):
         expected_total = input_tokens + output_tokens
-        if spec.get("provider") == "opencode" and _valid_token(reasoning or 0):
-            expected_total += reasoning or 0
+        if spec.get("provider") == "opencode" and effective_input is not None and completion is not None:
+            expected_total = effective_input + completion
         if total != expected_total:
             return "usage_total_inconsistent"
     return None
