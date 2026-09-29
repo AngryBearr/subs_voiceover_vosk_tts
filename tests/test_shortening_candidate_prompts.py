@@ -5,12 +5,18 @@ import json
 import pytest
 
 from utils.shortening_candidate_prompts import (
+    AUDIT_PROMPT_VERSION,
+    AUDIT_SYSTEM_PROMPT,
     CANDIDATE_PROMPT_VERSION,
+    CANDIDATE_SYSTEM_PROMPT,
+    SELECTION_PROMPT_VERSION,
+    SELECTION_SYSTEM_PROMPT,
     build_candidate_prompt,
     build_selection_prompt,
     parse_candidates,
     parse_selection,
 )
+from utils.shortening_prompts import GENERATOR_SYSTEM_PROMPT
 from utils.shortening_experiment import _run_candidates
 from utils.shortening_plan import PlannerConfig, plan_subtitles
 from utils.shortening_runner import ModelSpec
@@ -27,6 +33,19 @@ def test_candidate_prompt_is_versioned_and_masks_history() -> None:
     assert payload["version"] == CANDIDATE_PROMPT_VERSION
     assert "history" not in prompt
     assert payload["schema"]["additionalProperties"] is False
+
+
+def test_candidate_system_prompts_require_numeric_representation_rule() -> None:
+    numeric_rule = "'двадцать пять' -> '25' is prohibited"
+    assert numeric_rule in GENERATOR_SYSTEM_PROMPT
+    assert numeric_rule in CANDIDATE_SYSTEM_PROMPT
+    assert numeric_rule in SELECTION_SYSTEM_PROMPT
+    assert numeric_rule in AUDIT_SYSTEM_PROMPT
+    assert "choose another valid option or null" in SELECTION_SYSTEM_PROMPT
+    assert "Reject any option that violates this rule" in AUDIT_SYSTEM_PROMPT
+    assert CANDIDATE_PROMPT_VERSION == "shortening-candidates-v4"
+    assert SELECTION_PROMPT_VERSION == "shortening-selection-v3-context"
+    assert AUDIT_PROMPT_VERSION == "shortening-audit-v3-context"
 
 
 def test_candidates_require_complete_unique_ids_and_preserve_text() -> None:

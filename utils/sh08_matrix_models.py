@@ -7,10 +7,11 @@ work.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
-OPENCODE_REQUIRED_VERSION = "1.18.29"
+OPENCODE_REQUIRED_VERSION = "1.18.31"
 MAX_TOKENS = 16384
 
 
@@ -42,3 +43,15 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
         "context_limit": 1048576, "max_tokens": MAX_TOKENS, "quota_units": 1, "subscription": False,
     },
 }
+
+
+def effective_specs(muse_effort: str = "low") -> dict[str, dict[str, Any]]:
+    """Return an isolated model-spec snapshot with the requested Muse effort."""
+    if not isinstance(muse_effort, str) or muse_effort not in {"low", "high"}:
+        raise ValueError("muse_effort must be low or high")
+    specs = deepcopy(MODEL_SPECS)
+    muse = specs.get("muse")
+    if not isinstance(muse, dict) or muse.get("reasoning_mandatory") is not True:
+        raise ValueError("Muse specification is invalid")
+    muse["variant"] = muse_effort
+    return specs

@@ -958,9 +958,11 @@ def main() -> None:
                 pass
         server, backend = _live_backend(generator, args.audit, args.timeout, length_tools=args.length_tools)
         try:
-            result = asyncio.run(run_experiment(manifest, args.manifest.parent, args.output_dir, generator=generator,
-                                                repetitions=args.repetitions, best_of=args.best_of, audit=args.audit,
-                                                request_fn=backend, length_tools=args.length_tools))
+            from utils.shortening_html import live_html_report
+            with live_html_report(args.output_dir):
+                result = asyncio.run(run_experiment(manifest, args.manifest.parent, args.output_dir, generator=generator,
+                                                    repetitions=args.repetitions, best_of=args.best_of, audit=args.audit,
+                                                    request_fn=backend, length_tools=args.length_tools))
         finally:
             server.stop()
         print(json.dumps({"status": result["status"], "output": str(args.output_dir)}))

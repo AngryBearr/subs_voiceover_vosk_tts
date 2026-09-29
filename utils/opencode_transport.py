@@ -276,6 +276,10 @@ def _extract_prompt_result(data: Dict[str, Any]) -> OpenCodePromptResult:
 async def _http_post(base_url: str, path: str, body: Dict[str, Any], timeout: float = 120.0, auth_header: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     import aiohttp
     async with aiohttp.ClientSession() as session:
+        session_id = path[len("/session/"):-len("/message")] if path.startswith("/session/") and path.endswith("/message") else ""
+        if session_id and "/" not in session_id:
+            from utils.shortening_html import note_model_request
+            note_model_request()
         async with session.post(f"{base_url}{path}", json=body, headers=auth_header or {}, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
             if resp.status >= 400:
                 raise RuntimeError(f"HTTP {resp.status} from {path}: {(await resp.text())[:500]}")

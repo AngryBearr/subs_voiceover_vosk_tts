@@ -1,6 +1,178 @@
 # Задачи: надёжное сокращение полного файла
 
-## Current dated update (14 September 2026)
+## Resume here — 30 September 2026
+
+**Objective:** finish and assess the Australian Survivor S01E03 Russian episode
+before the other two SH-08 full-file pilots. The single-file Muse-low generator /
+Sol-6-high arbiter path, private HTML, ledger, guarded budget and resume, and
+review queue are implemented and covered by offline tests. The *episode* is not
+finished or live-verified with the newer windowed scheduler; neither semantic
+accuracy nor audio fit has been established. SH-10 final-context semantic
+evaluation, separate audio verification, and the three full pilots remain
+incomplete.
+
+**Preserve this checkpoint:**
+[`output/openrouter_episode_20260929_sol6_fresh/`](../output/openrouter_episode_20260929_sol6_fresh/)
+contains the real [partial HTML](../output/openrouter_episode_20260929_sol6_fresh/shortening.html),
+manifest, requests, calls, exports and **500 generated proposals**. Of 1,523
+source cues, 1,219 were selected, 124 measured originals fit; 1,095 are in the
+review queue, with **zero arbiter-accepted corrections** in this snapshot.
+The journal has 121 starts, 120 completions and one unresolved start
+`c966047a268147149ab9976bd511589a`. Accounting from the read-only journal
+is $0.073219707 known reported USD and $0.319488 retained unknown-cost
+reservation. The older HTML checkpoint shows only 120 attempts and $0.212992
+unknown reservation; it is **stale**, not the current accounting. These are
+reservations, not confirmed charges. The older recovery run has separate,
+potentially overlapping receipts: never sum its spend into this run.
+
+**Next engineering step (not done):** implement an *explicit* migration/reuse
+path from this frozen stage-major snapshot into the new windowed processing,
+with an auditable request ledger. Reuse the 500 saved proposals without
+duplicating completed requests; reconcile the unresolved start without dropping
+its unknown-cost reservation or sending a duplicate request. Fail closed on
+the old three-unknown limit and frozen runtime module-hash mismatch; do not
+edit the old manifest or silently reinterpret it as a new contract. Verify
+offline against saved state first. Do **not** auto-resume, auto-retry, or start
+a replacement live run; any future live continuation requires a separate
+decision and authorization. The [command and offline status guide](shorten_file.md#inspect-saved-status-offline)
+describes inspection, not permission to execute.
+
+**Implemented for future fresh runs only:** up-to-12-cue generation/review
+windows, graceful signal/deadline stop before the next request, at most one
+explicit unknown-start replacement per logical request, retained unknown
+reservation, and a finite physical attempt cap (default 1,000) with the same
+$10 monetary guard. These changes have not been tested by another live episode.
+Offline saved-state review building changed from 9.01 s to 0.67 s with an
+identical canonical state; that does not prove a live speedup. Existing offline
+verification logs record 798 passed / 5 skipped (full suite), 110 passed /
+5 skipped (review performance group), and 143 passed (cancellation guards).
+No paid model, network, or TTS calls are needed to resume engineering work.
+
+**Keep this the one active plan:** after meaningful work, update this checkpoint
+and append one short dated history entry with what changed, what was actually
+checked, what remains blocked, and links to the relevant command guide or real
+artifact. Leave older dated evidence intact; do not create a parallel active
+plan. The historical experiment memory is [separate](shortening_memory.md).
+
+### Compact dated history
+
+- **15 Sep:** bounded Muse-low/high comparison and zero-capacity Vosk checks
+  recorded in [SH-08 evidence](sh08_muse_reasoning_20260915.md) and
+  [timing notes](sh08_zero_timing_20260915.md); three full pilots not closed.
+- **20 Sep recovery:** older real [partial report](../output/openrouter_episode_20260920_recovery/shortening.html)
+  has 397 accepted and 698 unresolved of 1,219 selected; costs and frozen
+  contract are separate from the fresh Sol-6 run.
+- **29 Sep:** fresh episode interrupted during generation; saved 500 proposals,
+  no review verdicts, one outstanding request start. Offline work added
+  windowing, bounded stop/retry policy and faster identical review-state build;
+  no second live run verified these changes. See [the run guide](shorten_file.md)
+  and the real [partial report](../output/openrouter_episode_20260929_sol6_fresh/shortening.html).
+- **30 Sep:** refreshed this checkpoint for a safe handoff and corrected the
+  [experiment memory](shortening_memory.md) pointer to Sol 6 high. Documentation
+  and commit-candidate inspection only; no new live run, TTS or inference.
+
+## Current production direction
+
+The primary objective is user-facing score stability and a simple CLI with
+complete cost and result reporting. Optional experiments are parked in the
+single [`future experiments backlog`](future_experiments.md), not kept in the
+active task list. Existing code, real artifacts, history, and module paths
+remain in place; this documentation change does not move or remove anything.
+
+The single-file OpenRouter CLI is implemented with Muse
+`meta/muse-spark-1.3-contributor` at low mode as generator and Sol
+`openai/gpt-6-sol` at high mode as arbiter. It has a guarded budget, reported
+USD and unknown reservations, guarded resume, private HTML, SRT, and a review
+queue. This is implementation and offline test evidence, not proof of semantic
+or audio quality. SH-10 remains unchecked and unimplemented.
+
+**Fresh Sol 6 episode run (29 September 2026):** The single authorized $10
+run was interrupted before generation finished. The launcher had a
+6,720-second SIGINT watchdog. The runtime snapshot was recorded at 19:54:23
++03:00 and the log's `KeyboardInterrupt` at 21:46:24 +03:00 (about 6,720
+seconds later). The process was still running after the parent tool had been
+interrupted: this timing is consistent with the watchdog, not the earlier tool
+interruption, although the traceback alone cannot identify the SIGINT sender.
+Its [private partial HTML report](../output/openrouter_episode_20260929_sol6_fresh/shortening.html)
+and [SRT](../output/openrouter_episode_20260929_sol6_fresh/subtitles.srt)
+are saved. All 1,523 source cues retain their IDs and timestamps; of 1,219
+selected cues, 124 measured originals fit, 500 have generated proposals, and
+1,095 remain in the review queue. Snapshot statuses: 800 pending, 282
+short-timing, 12 error, 1 manual.
+The runner schedules the **entire generation pass before any review**: the
+500 saved proposals therefore have no arbiter verdict or accepted correction.
+There are 120 completed generation requests and one started request without a
+completion. The read-only journal accounts for $0.073219707 reported USD,
+$0.319488 reserved against three unknown-cost attempts (including the
+interrupted start), and 121 physical attempts. These are **not** a known final
+invoice. The HTML/report checkpoint predates the last start and shows 120
+instead of 121 attempts; its budget is stale. The existing offline publisher
+has no journal-accounting notice option, so saved artifacts were not rewritten
+to disguise the distinction. Do not automatically retry the unknown request,
+resume, alter its frozen contract, or start a replacement run. The user
+authorized finite retries in general, but the frozen primary CLI cannot retry
+an unknown journal start. Reconcile it before separately approved recovery.
+The SH-08 three-pilot requirement and SH-10 remain open.
+
+The cap for the **new fresh whole-episode run is $10**; no paid preflight has
+been performed for it. Prior recovery spend is separate, and overlapping
+predecessor/recovery receipts must not be counted twice. The earlier approved
+cap was **$10 total** for preflight model calls plus one
+`Australian Survivor S01E03_ru.srt` episode (1,523 cues, approximately
+75 minutes); it is distinct from the Jev trial and old subscriptions. A real
+episode run and a separate recovery directory now exist, but the pilot is
+incomplete. The preparation source is the exact
+[`sh08_pilot_manifest.json`](sh08_pilot_manifest.json) file, whose SHA-256 is
+`dc01852aff9032e713ab77da79babb6496057fdd97fdedd5323f93e5d9ade2f9`.
+That manifest remains a preparation-only historical record, not a ledger of
+the later live execution. Costs for the recovery directory must not be added
+to those of its predecessor: receipts can overlap.
+
+**Verified saved state (29 September 2026):**
+[`output/openrouter_episode_20260920_recovery/shortening.html`](../output/openrouter_episode_20260920_recovery/shortening.html)
+is the existing real partial report. The recovery snapshot has 397 accepted
+corrections and 698 unresolved of 1,219 selected targets. Its frozen budget
+reports $1.74572717418 known USD and $4.85576 unknown reservation after a
+completed transport-error request; there are no outstanding journal starts.
+It remains incomplete, not a completed SH-08 pilot or a project-wide spend
+total. The offline read-only `utils.shortening_status` diagnostic confirms the
+unknown cost and also flags a changed frozen module hash. Reconcile billing
+and review the immutable resume contract before any explicitly authorized
+continuation; do not rewrite saved manifests or auto-retry failed calls.
+
+The updated policy applies to **future fresh** output directories, not the
+historical run. Sol 6 high / Muse low now schedules windows of up to 12 cues:
+generation, review, one bounded repair/recheck, then the next window. The
+first SIGINT/SIGTERM or an optional run deadline stops before another request;
+an in-flight request has its existing 300-second client timeout and 16,384
+output-token cap. Explicit new-contract unknown-start retry is limited to one
+replacement, and its old unknown reservation remains under the frozen budget.
+The new default permits unknown attempts up to the finite physical request
+limit (1,000), subject to the same $10 monetary guard; the old run retains its
+three-unknown contract. No new live run or quality result has tested this
+updated scheduling. The interrupted run above establishes neither live
+semantic quality nor a final invoice.
+
+Saved real request timing (120 completed generation requests): median 26.04 s,
+nearest-rank p90 48.58 s, maximum 70.02 s, total 3,439.39 s; 118 successes
+and two HTTP errors. Gaps between completed requests have median 23.45 s,
+p90 23.96 s and total 2,789.3 s. The manifest-to-first-request interval was
+411.27 s. The journal does not attribute these gaps to Vosk, metadata lookups,
+or checkpointing. An offline profile of `build_review_state` on the saved
+1,523-cue state found 3,046 per-cue `_context` calls taking 42.64 s of a
+44.72 s profiled pass. Indexing chronological neighbors once per source and
+current snapshot reduced an unprofiled state build from 9.01 s to 0.67 s
+on this saved input; the complete canonical state (including fingerprints,
+snapshot ID and queue) stayed identical. This local build improvement does
+not measure a live request-gap or end-to-end speedup; the old episode and its
+stale report remain unchanged.
+
+The SH07 snapshot is partial and verified, with no data deletion; it remains
+open rather than closed. The existing SH06 checks and SH08 artifacts remain
+historical evidence and are not replaced by this plan. README is absent; no
+new mass documentation is planned beyond this required backlog.
+
+## Current dated update (15 September 2026)
 
 The SH08 small comparison first pass is complete: eight pairs over the same 60
 unique cases in two repetitions. This is 60×2, not 120 independent cases.
@@ -12,12 +184,22 @@ denominator. Repairs are partial and non-uniform because the 300-unit
 subscription cap was exhausted. This does not complete the SH08 full-pilot
 checkbox or SH10.
 
-The next safe work is offline: inspect the 18 originals with zero predicted character capacity with local
-Vosk and make the quality decision before any three full pilots. Do not make
-additional TTS or model calls now. New model calls require fresh approval;
-unused API cash is not permission to continue.
+The bounded actual Muse low/high comparison is now complete over the same 60
+cases in two repetitions. Its independent per-case accepted-and-fit summary,
+costs, receipt latency, and current duplicate denominators are in
+[`sh08_muse_reasoning_20260915.md`](sh08_muse_reasoning_20260915.md) and
+[`comparison summary`](../output/sh08_muse_reasoning_comparison_20260915/summary.json).
+This does not close SH08: three full-file pilots, the full-file Muse adapter, and
+a hard budget guard remain blocked. No further model, network, or TTS calls are
+authorized by this record.
 
-**Latest final verification (14 September 2026):** The
+The offline local-Vosk check of the 18 originals with zero predicted character
+capacity is complete: 1 measured fit and 17 overruns. The next safe work is the
+offline quality decision before any three full pilots. Do not make additional TTS
+or model calls now. New model calls require fresh approval; unused API cash is
+not permission to continue.
+
+**Prior final verification (14 September 2026):** The
 [`verification log`](/tmp/opencode/sh08-final-verification.log) records
 `pytest` with `563 passed, 5 skipped in 48.64s` and exit 0; compileall exited 0;
 derived analysis validation matched existing outputs identically, exit 0; 10
@@ -231,23 +413,15 @@ technical acceptance, not SH-08 or a semantic-quality result.
 
 ### [ ] SH-06. Проверить пользу арбитра при равных условиях — P1
 
-Не блокирует первый технический пилот. Проверять одну гипотезу за раз:
-
-- **H2:** текущая схема с критикой против исправления только по замечанию о длине — тот же первый кандидат и ровно одна дополнительная попытка в обеих схемах.
-- **H3:** несколько вариантов только для сложных или отклонённых случаев, а не для всех реплик подряд.
-- **H4 (generator-input presentation experiment):** presenting coherent surrounding original text with an explicit target-only edit boundary may improve meaning preservation and context resolution compared with the current structured cue-list.
-  - Control A is the current structured local cue-list plus the target; treatment B uses the same cue texts in chronological continuous context plus an explicit `shorten_this` target, while retaining unambiguous boundaries and IDs.
-  - An optional separate follow-up C may use `context_before` / `shorten_this` / `context_after`; do not change other factors or require all three formats up front.
-  - Keep selected targets, neighbors/content/window/order, model and settings, character budget and `length_basis`, batching, tools, and retry policy identical. Context is already present today: compare presentation, not presence versus absence.
-  - Add no summaries, rewritten context, or new facts; do not switch between final and original context. Keep ID/limits/tool availability equivalent for safety; formatting is the only intended difference.
-  - The target text must be the exact full cue, not an accidentally illustrative truncation. Neighboring content is read-only and output is only the target: do not copy independent neighbor facts, guess positional mappings, or rely on repeated identical text. Coreference resolution is permitted without new claims; output need not be a substring of the original.
-  - First run offline prompt/schema/identity checks, then compare models only with separate paid authorization. Freeze cases with pronouns, negation/contrast/causality, split sentences, repeated identical targets, and ambiguous references.
-  - Use independent, blinded semantic checks (do not call the same model family truly independent) and measure meaning loss, neighbor-fact contamination, correct ID/target-only output, length fit, unresolved fraction, tool calls, tokens, and cost.
-  - Freeze criteria and evaluator beforehand, disclose uncertainty, and make no default format change unless evidence supports it. This generator hypothesis is separate from SH-10's final-evaluator original/final-context task.
-
-До запуска фиксировать данные, контрольную схему, модели, инструкции, метрики и правило остановки. Смысл оценивают модели; главный агент не выбирает хорошие формулировки вручную. Разделять критические смысловые замечания и предпочтения стиля. Результат «данных недостаточно» допустим.
-
-**Готово, когда:** польза и расход сравниваются на одинаковых случаях, разногласия видны, критерии не менялись после получения результатов. Платный опыт отдельно согласуется. Точность сохранения смысла нельзя гарантировать одними вердиктами LLM.
+SH-06 remains unchecked and deferred; it does not block the first technical
+pilot. The complete H2–H6 branch proposals, historical checks, and evidence
+links are consolidated in the [future experiments backlog](future_experiments.md).
+Known findings are limited: Jev is not promoted to the main arbiter, Muse high
+is not the default, and no full best-of-five run is the default. The recorded
+Jev replay/follow-up and the two H6 examples (`cue-618` and `cue-210`) remain
+historical or proposal-only evidence; no automatic new tests or calls are
+authorized. This short active entry does not discard the unchecked SH-06
+status or historical checks.
 
 ### [ ] SH-07. Архивирование и безопасная очистка — P1
 
@@ -262,6 +436,10 @@ technical acceptance, not SH-08 or a semantic-quality result.
 начинается с dry-run, затем требует отдельного подтверждения и проверенного
 архива. Правило TTL в 30 дней пока только предложение и не является одобренной
 политикой. Git хранит код и документацию; исходные субтитры, ответы моделей и большие результаты хранятся отдельно, откат Git не восстановит удалённые игнорируемые файлы.
+
+Частичный снимок и проверка отдельных артефактов записаны в
+[`sh08_archive_20260915.md`](sh08_archive_20260915.md); это не миграция и не
+разрешение на удаление. Плановые миграция, очистка и перенос не выполнялись.
 
 При реализации большие артефакты исключить из Git. Сначала достаточно сжатия JSON/JSONL без потерь и устранения повторного хранения исходников; сложная база данных не нужна.
 
@@ -289,9 +467,71 @@ The eight-pair first pass is now executed and complete for its planned
 three full SH08 pilots. The SH08 checkbox remains unchecked until those full
 pilots and their per-file outputs, queues, and costs are completed. Repairs are
 reported separately and are partial/non-uniform because the subscription cap
-was exhausted. The following work is offline zero-budget analysis and quality
-decision-making; do not check SH10 or authorize more model/TTS calls from this
-note.
+was exhausted. That note predates the bounded low/high comparison recorded
+below. Remaining work is offline zero-budget analysis and quality decision-making;
+do not check SH10 or authorize more model/TTS calls from this note.
+
+The subsequent actual Muse low/high comparison is recorded in
+[`sh08_muse_reasoning_20260915.md`](sh08_muse_reasoning_20260915.md), with its
+machine-readable summary in
+[`output/.../summary.json`](../output/sh08_muse_reasoning_comparison_20260915/summary.json).
+It is a completed bounded comparison, not three full pilots and not a semantic
+or audio-quality result. The current saved-response analysis is detailed in
+[`sh08_duplicate_analysis_20260915.md`](sh08_duplicate_analysis_20260915.md),
+and the local Vosk timing follow-up in
+[`sh08_zero_timing_20260915.md`](sh08_zero_timing_20260915.md) records 18
+measured originals, 1 fit, and 17 overruns. Those measurements provide no sound
+or meaning guarantee.
+
+The three full-file dry-runs counted 2,081 positive-budget plans, including
+`short_timing` cases that are not all sent to the runner. After filtering to
+1,751 `needs_shortening` review candidates, the planner derives 147 review
+batches / 882 conservative subscription units. This is the **planned initial
+review estimate before repairs, without further measured-audio pruning**, not a
+guaranteed actual minimum: errors, `cannot_shorten` outcomes, and local timing
+may change the actual calls. The current comparison has 168 overall units
+remaining, with 150 units protected for the pilot allocation.
+
+#### Numeric representation prompt rule and recorded follow-ups (15 September 2026)
+
+The shortening prompts now preserve numeric value and source numeric representation:
+spelled-out numbers must remain words, so converting `двадцать пять` to `25` is
+prohibited as a shortening shortcut. Numbers already written in digits may remain
+digits. The guard is recorded in both actual comparison ledgers. No explicit
+arbiter-reported representation violation was found, but a zero-violation rate was
+not independently verified; historical runs were not rescored.
+
+- [x] Analyze duplicate proposals on saved real outputs first. The scoped
+  read-only analysis ran the existing `utils.sh08_duplicate_analysis` CLI once
+  against each actual low/high run and wrote fresh reports under
+  `output/sh08_muse_reasoning_comparison_20260915/{low_duplicates,high_duplicates}`.
+  All 24 low-arm and 20 high-arm requests completed successfully; the high-arm
+  model-unresolved result is not infrastructure partiality.
+  Current parsed-ok intersection denominators and exact/whitespace duplicate
+  counts are low 32/5/5 and high 31/8/8; duplicate repair targets and proven
+  avoidable rechecks are zero in both. The historical 59/121 duplicate result is
+  retained as historical independent-repetition evidence, not substituted for
+  these current counts. This completes saved-output analysis only; a general
+  runtime detector remains outside this follow-up. Preserve the `cannot_shorten`
+  and unresolved fallbacks; never add endless retries. Existing best-of-5 requests
+  1–5 distinct proposals per cue in one request and then performs selection, not
+  five requests. Compare against sequential repair only in a separately
+  authorized, controlled experiment, not as a default change.
+- [x] Verify and compare Muse reasoning modes on the same 60 cases with the Sol
+  arbiter and updated prompt version. The manifests requested `low` and `high`,
+  and receipt `requested_variant` fields corroborate those modes; this is request
+  evidence, not proof of hidden provider reasoning behavior. Independently derived
+  accepted-and-fit counts are low 20/41, 22/41 initially and 28/41, 28/41 finally;
+  high 27/41, 25/41 initially and 29/41, 28/41 finally. High is +10/82 initial
+  and +1/82 final versus low, with higher known cost and serialized receipt time.
+  Repairs attempted/rechecked are operational counts, not semantic resolution;
+  the high rep1 `cannot_shorten` case is model-unresolved, not infrastructure
+  partiality. No separate blinded semantic audit or old-vs-new control was run.
+  Muse low remains the default because this sample is insufficient for a universal
+  ranking. Per-provider token counters are reported separately; reasoning is not
+  summed into output tokens blindly. Both actual runs have standalone HTML reports
+  linked in [the comparison record](sh08_muse_reasoning_20260915.md); no offline
+  comparison HTML was generated.
 
 Заранее выбрать три файла разной длины и с разной долей коротких фраз, не использованные для настройки инструкций LLM. По возможности получить не менее 500 исходно проблемных реплик суммарно; если их меньше, указать фактическое число. Некоторые источники уже использовались для калибровки Vosk — такой пилот не является новой независимой проверкой TTS.
 
@@ -309,11 +549,20 @@ note.
 
 ### [ ] SH-09. Отложенные задачи — P2
 
-Объединение короткой реплики со следующей с допустимой задержкой, несколько движков TTS, профили TeraTTSv2/xVibePocketTTS и графический интерфейс остаются в [дорожной карте](tts_roadmap.md). Они не блокируют первый пилот. Edge-TTS не используется; установки и изменения требуют отдельного решения.
+SH-09 remains deferred and does not block the core pilot. Its alternative TTS,
+short-cue audio, and UI backlog is consolidated in the [future experiments
+backlog](future_experiments.md), with the existing [roadmap](tts_roadmap.md)
+retained as evidence. Edge-TTS, installations, and changes still require
+separate authorization.
 
 ### [ ] SH-10. Финальный смысловой оценщик — P1 (будущая задача)
 
 Это предложение, не реализация. Зависит от SH-03 и SH-05. Не блокирует первый технический пилот; может использоваться в SH-06 и SH-08 после выбора режима.
+
+**Current status (15 September 2026):** SH-10 remains unchecked and
+unimplemented. A full final-context audit was not performed; it is blocked until
+full-pilot input is available and a separate evaluator is implemented. The Muse
+low/high comparison does not close this task, and no false closure is recorded.
 
 - Выбирается одна логическая роль сильного оценщика, но не обязательно один HTTP-запрос: большие файлы обрабатываются пачками с перекрытием.
 - На входе: оригинал и сокращённая цель, исходный контекст соседей и финальный контекст соседей, чтобы проверять смысл через границы изменений.
@@ -409,14 +658,26 @@ do not reopen SH-03, which is now implemented with frozen calibration identity
 checking in the new command. The legacy diagnostic interface is separate; the
 new `shorten_file` command does validate identity.
 
-## Порядок работы
+## Active order of work
 
-SH-00 → SH-01 → SH-02 → SH-03 → SH-04 → SH-05 → SH-08.
+1. Preserve the fresh Muse-low/Sol-6-high partial episode, its frozen runtime
+   and journal. Inspect the unknown start and accounting offline with
+   [`shortening_status`](shorten_file.md#inspect-saved-status-offline). Keep the
+   older Sol-medium recovery run as separate historical evidence.
+2. Future fresh runs have bounded generation/review windows, graceful stops,
+   and at most one explicit unknown-start replacement. **The old episode is
+   not migrated.** Reusing its 500 proposals and reconciling its interrupted
+   request against the old frozen contract remains a separate engineering and
+   authorization step; do not run or bypass its old CLI now.
+3. After reconciliation and separate execution authorization, finish and
+   assess this episode before the other two full pilots and separately
+   planned semantic/audio verification.
 
-SH-06 — по результатам первого пилота. SH-07 обязателен перед очисткой, но не должен оттеснять задачи качества. SH-09 отложен.
-
-SH-11 accompanied SH-05 and was implemented before SH-08; the next task is now
-SH-08, subject to separate paid authorization.
+SH-06, SH-07, SH-09, and other optional work stay deferred in their linked
+backlogs. SH-07's partial verified snapshot remains open; no data deletion,
+migration, or mass documentation is implied. SH-10 remains unchecked and
+unimplemented until final-context semantic work is actually completed.
+This documentation update itself makes no inference calls.
 
 ## Коммиты и гипотезы
 

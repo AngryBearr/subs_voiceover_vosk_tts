@@ -12,7 +12,7 @@ from utils.llm_types import CallRecord, DetailedResponse
 from utils.opencode_transport import OpenCodePromptUsage
 from utils.shortening_plan import PlannerConfig, plan_subtitles
 from utils.shortening_costs import summarize_costs
-from utils.shortening_runner import ModelSpec, RunConfig, _record_call, run_trial
+from utils.shortening_runner import ModelSpec, RunConfig, _record_call, _rejected_candidates, run_trial
 
 
 def _items(count: int = 7) -> list[dict[str, Any]]:
@@ -166,6 +166,104 @@ def test_repair_batches_only_pending_latest_judgment(tmp_path: Path) -> None:
     assert set(downstream) == {ids[0]}
     assert report["records"][0]["status"] == "manual"
     assert all(report["records"][index]["status"] == "accepted" for index in range(1, len(ids)))
+
+
+@pytest.mark.parametrize(
+    ("length_basis", "repair_candidate", "expected_recheck", "expected_status"),
+    [
+        ("normalized_tts_text", "short", False, "manual"),
+        ("normalized_tts_text", "a  b", False, "manual"),
+        ("normalized_tts_text", "other", True, "accepted"),
+        ("display_text", "a  b", True, "accepted"),
+    ],
+)
+def test_recheck_skips_only_identical_successful_repair(
+    tmp_path: Path, length_basis: str, repair_candidate: str,
+    expected_recheck: bool, expected_status: str,
+) -> None:
+    items = [{"start": 0, "end": 1000, "text": "long original text here"}]
+    planner = PlannerConfig(cps=5, max_speed=1.0, length_basis=length_basis)  # type: ignore[arg-type]
+    plans = plan_subtitles(items, planner)
+    calls: list[str] = []
+    generation_count = 0
+
+    async def fake(_: ModelSpec, __: str, user: str, schema: dict[str, Any], ___: bool) -> DetailedResponse:
+        nonlocal generation_count
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        ids_in_batch = [row["cue_id"] for row in payload["targets"]]
+        if "verdict" in json.dumps(schema):
+            stage = "recheck" if calls and calls[-1] == "repair" else "review"
+            calls.append(stage)
+            verdict = "accept" if stage == "recheck" else "revise"
+            result = [{"cue_id": cue_id, "verdict": verdict,
+                       "issues": [] if verdict == "accept" else ["meaning"],
+                       "advice": "try again"} for cue_id in ids_in_batch]
+        else:
+            generation_count += 1
+            stage = "repair" if "prior_candidate" in user else "generation"
+            calls.append(stage)
+            initial_candidate = "a b" if repair_candidate == "a  b" else "short"
+            candidate = repair_candidate if stage == "repair" else initial_candidate
+            result = [{"cue_id": cue_id, "text": candidate, "status": "ok"} for cue_id in ids_in_batch]
+        return DetailedResponse(json.dumps({"results": result}), [])
+
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=[plans[0].cue_id], planner_config=planner,
+        run_config=RunConfig(max_repairs=1), generator=ModelSpec("deepseek", "m", "off"),
+        arbiter=ModelSpec("opencode", "a", "medium"), output_dir=tmp_path / "recheck-case",
+        request_fn=fake,
+    ))
+    assert ("recheck" in calls) is expected_recheck
+    assert report["records"][0]["status"] == expected_status
+    if not expected_recheck:
+        assert report["records"][0]["failure"] == "repair_unchanged"
+        assert report["records"][0]["final_review"] is None
+
+
+def test_rejected_candidates_are_bounded_and_ignore_protocol_events() -> None:
+    record = {"history": [
+        {"stage": "generation", "generator_status": "ok", "candidate": "old"},
+        {"stage": "repair", "generator_status": "ok", "candidate": "old  "},
+        {"stage": "repair", "generator_status": "ok", "candidate": "second"},
+        {"stage": "repair", "generator_status": "ok", "candidate": "third"},
+        {"stage": "repair", "generator_status": "ok", "candidate": "fourth"},
+        {"stage": "repair", "generator_status": "cannot_shorten", "candidate": "original"},
+        {"stage": "repair", "generator_status": "ok", "candidate": "protocol", "error": "protocol_misuse"},
+    ]}
+    assert _rejected_candidates(record) == ["second", "third", "fourth"]
+
+
+def test_schema_review_retry_without_judgment_is_not_reused(tmp_path: Path) -> None:
+    items = [{"start": 0, "end": 1000, "text": "long original text here"}]
+    planner = PlannerConfig(cps=5, max_speed=1.0)
+    plans = plan_subtitles(items, planner)
+    stages: list[str] = []
+    review_count = 0
+
+    async def fake(_: ModelSpec, __: str, user: str, schema: dict[str, Any], ___: bool) -> DetailedResponse:
+        nonlocal review_count
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        ids_in_batch = [row["cue_id"] for row in payload["targets"]]
+        if "verdict" in json.dumps(schema):
+            review_count += 1
+            stages.append("review" if review_count == 1 else "recheck")
+            if review_count == 1:
+                return DetailedResponse('{"results": []}', [])
+            result = [{"cue_id": cue_id, "verdict": "accept", "issues": [], "advice": ""}
+                      for cue_id in ids_in_batch]
+        else:
+            stages.append("generation")
+            result = [{"cue_id": cue_id, "text": "short", "status": "ok"} for cue_id in ids_in_batch]
+        return DetailedResponse(json.dumps({"results": result}), [])
+
+    report = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=[plans[0].cue_id], planner_config=planner,
+        run_config=RunConfig(max_repairs=1), generator=ModelSpec("deepseek", "m", "off"),
+        arbiter=ModelSpec("opencode", "a", "medium"), output_dir=tmp_path / "schema-retry",
+        request_fn=fake,
+    ))
+    assert stages == ["generation", "review", "recheck"]
+    assert report["records"][0]["status"] == "accepted"
 
 
 def test_invalid_generation_and_whitespace_fail_closed(tmp_path: Path) -> None:

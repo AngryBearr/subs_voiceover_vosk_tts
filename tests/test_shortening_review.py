@@ -275,6 +275,39 @@ def test_current_context_uses_displayed_neighbors_and_exact_fingerprint() -> Non
     assert adjacent["outcomes"][0]["reason"] == "context_changed"
 
 
+def test_context_index_keeps_chronological_ties_invalid_times_and_snapshot_isolation() -> None:
+    source = _items(["zero", ["one", "fragment"], "two", "three", "invalid"],
+                    starts=[2000, 1000, 1000, 4000, -1])
+    current = copy.deepcopy(source)
+    current[0]["start"] = 500
+    current[2]["start"] = 3000
+    current[2]["end"] = 4000
+    current[1]["text"] = ["changed", "fragment"]
+    config = PlannerConfig(cps=5, max_speed=1.0, context_before=1, context_after=1)
+    state = _snapshot(source, current, records=[], planner_config=config)
+    row = state["outcomes"][2]
+    assert [neighbor["cue_id"] for neighbor in row["original_context_before"]] == ["cue-1"]
+    assert [neighbor["cue_id"] for neighbor in row["original_context_after"]] == ["cue-0"]
+    assert [neighbor["cue_id"] for neighbor in row["context_before"]] == ["cue-1"]
+    assert [neighbor["cue_id"] for neighbor in row["context_after"]] == ["cue-3"]
+    assert row["original_context_before"][0]["text"] == "one fragment"
+    assert row["context_before"][0]["text"] == "changed fragment"
+    assert row["original_context_fingerprint"] == canonical_hash({
+        "before": row["original_context_before"], "after": row["original_context_after"]})
+    assert row["current_context_fingerprint"] == canonical_hash({
+        "before": row["context_before"], "after": row["context_after"]})
+    invalid = state["outcomes"][4]
+    assert invalid["original_context_before"] == invalid["original_context_after"] == []
+    assert invalid["context_before"] == invalid["context_after"] == []
+    current[1]["text"] = "another neighbor"
+    changed = _snapshot(source, current, records=[], planner_config=config)
+    assert changed["outcomes"][2]["current_context_fingerprint"] != row["current_context_fingerprint"]
+    assert changed["outcomes"][2]["original_context_fingerprint"] == row["original_context_fingerprint"]
+    no_context = _snapshot(source, current, records=[], planner_config=replace(config, context_before=0, context_after=0))
+    assert all(outcome["context_before"] == outcome["context_after"] == [] for outcome in no_context["outcomes"])
+    validate_review_state(state)
+
+
 def test_duration_is_preserved_and_measurements_are_fail_closed() -> None:
     source = _items(["long source cue"])
     source[0]["duration"] = 1.0

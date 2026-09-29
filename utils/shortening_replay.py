@@ -870,8 +870,10 @@ def main() -> None:
             pass
         server, backend = _build_live_backend(args.timeout)
         try:
-            result = asyncio.run(replay_experiment(args.experiment_root, corpus, args.corpus_manifest.parent,
-                                                   args.output_dir, request_fn=backend))
+            from utils.shortening_html import live_html_report
+            with live_html_report(args.output_dir):
+                result = asyncio.run(replay_experiment(args.experiment_root, corpus, args.corpus_manifest.parent,
+                                                       args.output_dir, request_fn=backend))
         finally:
             server.stop()
         print(json.dumps({"status": result["status"], "output": str(args.output_dir)}))

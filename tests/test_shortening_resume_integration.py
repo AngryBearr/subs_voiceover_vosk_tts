@@ -99,6 +99,64 @@ def test_completed_resume_replays_without_backend(tmp_path: Path) -> None:
     assert replayed["summary"]["accepted_count"] == 1
 
 
+def test_completed_resume_preserves_identical_repair_skip_without_backend(tmp_path: Path) -> None:
+    items, planner, plans, ids = _run_inputs()
+    output = tmp_path / "identical-repair"
+    calls = 0
+    review_calls = 0
+
+    async def live(*args: Any) -> DetailedResponse:
+        nonlocal calls, review_calls
+        calls += 1
+        payload = json.loads(args[2].split("Input JSON:\n", 1)[1])
+        target_ids = [row["cue_id"] for row in payload["targets"]]
+        if "verdict" in json.dumps(args[3]):
+            verdict = "revise" if review_calls == 0 else "accept"
+            review_calls += 1
+            value = {"results": [{"cue_id": cue_id, "verdict": verdict, "issues": [], "advice": "retry"}
+                                  for cue_id in target_ids]}
+        else:
+            value = {"results": [{"cue_id": cue_id, "text": "short", "status": "ok"}
+                                  for cue_id in target_ids]}
+        return DetailedResponse(json.dumps(value), [])
+
+    first = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=ids, planner_config=planner,
+        run_config=RunConfig(max_repairs=1), generator=ModelSpec("fixture", "g", "v"),
+        arbiter=ModelSpec("fixture", "a", "v"), output_dir=output, request_fn=live,
+    ))
+    assert first["run_state"] == "completed"
+    assert calls == 3
+    first_record = first["records"][0]
+    assert first_record["status"] == "manual"
+    assert first_record["final_text"] == first_record["original"]
+    assert first_record["failure"] == "repair_unchanged"
+    assert [event["stage"] for event in first_record["history"]] == [
+        "generation", "review", "repair", "recheck",
+    ]
+    assert first_record["history"][-1]["status"] == "skipped_identical_proposal"
+    assert first["summary"]["repairs"] == 1
+    assert first["summary"]["request_counts"] == {
+        "generation": 1, "review": 1, "repair": 1, "recheck": 0,
+    }
+
+    async def forbidden(*_: Any) -> DetailedResponse:
+        raise AssertionError("completed resume should only replay")
+
+    replayed = asyncio.run(run_trial(
+        items=items, plans=plans, target_ids=ids, planner_config=planner,
+        run_config=RunConfig(max_repairs=1), generator=ModelSpec("fixture", "g", "v"),
+        arbiter=ModelSpec("fixture", "a", "v"), output_dir=output, request_fn=forbidden,
+        resume=True,
+    ))
+    assert calls == 3
+    assert replayed["records"] == first["records"]
+    assert replayed["summary"]["manual_count"] == 1
+    assert replayed["records"][0]["final_text"] == replayed["records"][0]["original"]
+    assert sum(event.get("status") == "skipped_identical_proposal"
+               for event in replayed["records"][0]["history"]) == 1
+
+
 def test_completed_resume_restores_full_file_plans_and_noncontiguous_targets(tmp_path: Path) -> None:
     items = [
         {"index": 10, "start": 0, "end": 1000, "text": "fit"},
@@ -176,7 +234,9 @@ def test_resume_replays_durable_complete_before_checkpoint_for_every_llm_stage(
                     "results": [{"cue_id": cue_id, "verdict": verdict, "issues": [], "advice": ""}]
                 }
             else:
-                value = {"results": [{"cue_id": cue_id, "text": "short", "status": "ok"} for cue_id in request_ids]}
+                is_repair = any("prior_candidate" in row for row in payload["targets"])
+                text = "new short" if is_repair else "short"
+                value = {"results": [{"cue_id": cue_id, "text": text, "status": "ok"} for cue_id in request_ids]}
             usage = OpenCodePromptUsage(input_tokens=10, output_tokens=5, total_tokens=15, cost=0.01)
             call = CallRecord("fixture", "g", "v", "2026-01-01T00:00:00Z", 0.1, usage, "ok")
             return DetailedResponse(json.dumps(value), [call])
@@ -309,7 +369,12 @@ def test_acceptance_changed_contract_never_appends_or_sends(
     elif change == "prompt":
         monkeypatch.setattr(runner, "PROMPT_VERSION", "changed")
     else:
-        monkeypatch.setattr(runner, "_module_hashes", lambda: {"shortening_costs.py": "changed"})
+        original_module_hashes = runner._module_hashes
+        def tampered_module_hashes(*, primary: bool = False) -> dict[str, str]:
+            hashes = original_module_hashes(primary=primary)
+            hashes["shortening_costs.py"] = "changed"
+            return hashes
+        monkeypatch.setattr(runner, "_module_hashes", tampered_module_hashes)
     with pytest.raises(ResumeError):
         asyncio.run(run_trial(**altered, request_fn=_must_not_send, resume=True))
     after = {p.name: p.read_bytes() for p in kwargs["output_dir"].iterdir() if p.is_file() and p.name != ".run.lock"}

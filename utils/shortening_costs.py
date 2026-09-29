@@ -11,6 +11,7 @@ from utils.llm_types import CallRecord
 
 
 PRICE_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing"
+OPENROUTER_USAGE_SOURCE = "https://openrouter.ai/docs/api/api-reference/generations/get-request-&-usage-metadata-for-a-generation"
 LEGACY_PRICE_SNAPSHOT_ID = "deepseek-v4-2026-09-09"
 CURRENT_PRICE_SNAPSHOT_ID = "deepseek-flash-2026-09-10"
 PRICE_SNAPSHOT_DATE = "2026-09-10"
@@ -92,8 +93,27 @@ def _snapshot(snapshot_id: str) -> dict[str, Any] | None:
 
 
 def estimate_call_cost(usage: Any, *, at: datetime | None = None,
-                       snapshot_id: str = CURRENT_PRICE_SNAPSHOT_ID) -> CostEstimate:
-    """Estimate DeepSeek usage; missing fields remain unknown instead of zero."""
+                       snapshot_id: str = CURRENT_PRICE_SNAPSHOT_ID,
+                       provider: str | None = None) -> CostEstimate:
+    """Estimate usage for a known tariff; OpenRouter uses its reported USD cost."""
+    if provider == "openrouter" or getattr(usage, "provider_id", None) == "openrouter":
+        input_tokens, output_tokens, hit = _usage_values(usage)
+        reported = getattr(usage, "cost", None)
+        valid_reported = (
+            isinstance(reported, (int, float)) and not isinstance(reported, bool)
+            and math.isfinite(float(reported)) and reported >= 0
+        )
+        if not valid_reported:
+            return CostEstimate(
+                None, None, True, "missing_or_invalid_reported_cost", input_tokens, output_tokens, hit, None,
+                tariff_date=None, tariff_source=OPENROUTER_USAGE_SOURCE,
+                pricing_snapshot_id=None, accounting_complete=False,
+            )
+        return CostEstimate(
+            float(reported), None, False, None, input_tokens, output_tokens, hit, None,
+            tariff_date=None, tariff_source=OPENROUTER_USAGE_SOURCE,
+            pricing_snapshot_id=None, direct_cost_usd=float(reported), accounting_complete=True,
+        )
     snapshot = _snapshot(snapshot_id)
     if snapshot is None:
         input_tokens, output_tokens, hit = _usage_values(usage)
@@ -160,6 +180,8 @@ def _parse_utc(value: Any) -> datetime | None:
 
 def _is_openai_subscription(record: Any) -> bool:
     provider = str(getattr(record, "provider", "") or "").lower()
+    if provider == "openrouter":
+        return False
     requested = str(getattr(record, "requested_model", "") or "").lower()
     model = str(getattr(record, "model", "") or "").lower()
     return provider == "openai" or requested.startswith("openai/") or model.startswith("openai/")
@@ -177,17 +199,24 @@ def _record_estimate(record: Any) -> CostEstimate:
 
     started = _parse_utc(getattr(record, "started_at", None))
     provider = str(getattr(record, "provider", "unknown") or "unknown")
-    record_snapshot_id = getattr(record, "pricing_snapshot_id", None) or LEGACY_PRICE_SNAPSHOT_ID
+    record_snapshot_id = getattr(record, "pricing_snapshot_id", None)
+    if provider == "deepseek":
+        record_snapshot_id = record_snapshot_id or LEGACY_PRICE_SNAPSHOT_ID
     record_snapshot = _snapshot(record_snapshot_id)
     record_date = str(record_snapshot["date"]) if record_snapshot is not None else None
     record_source = str(record_snapshot["source"]) if record_snapshot is not None else None
     accounting_snapshot_id = record_snapshot_id if provider == "deepseek" else None
     accounting_date = record_date if accounting_snapshot_id is not None else None
     accounting_source = record_source if accounting_snapshot_id is not None else None
+    if provider == "openrouter":
+        accounting_snapshot_id = record_snapshot_id
+        accounting_source = OPENROUTER_USAGE_SOURCE
+    fallback_date = None if provider == "openrouter" else PRICE_SNAPSHOT_DATE
+    fallback_source = OPENROUTER_USAGE_SOURCE if provider == "openrouter" else PRICE_SOURCE
     if started is None:
         return CostEstimate(
             None, None, True, "invalid_started_at", None, None, None, None,
-            tariff_date=accounting_date or PRICE_SNAPSHOT_DATE, tariff_source=accounting_source or PRICE_SOURCE,
+            tariff_date=accounting_date or fallback_date, tariff_source=accounting_source or fallback_source,
             pricing_snapshot_id=accounting_snapshot_id,
             informational_api_equivalent_cost_usd=float(informational) if informational is not None else None,
             accounting_complete=False,
@@ -197,10 +226,22 @@ def _record_estimate(record: Any) -> CostEstimate:
             None, None, True, "missing_usage", None, None, None, None,
             tariff_started_at=started.isoformat().replace("+00:00", "Z"),
             tariff_period="peak" if is_peak_utc(started) else "offpeak",
-            tariff_date=accounting_date or PRICE_SNAPSHOT_DATE, tariff_source=accounting_source or PRICE_SOURCE,
+            tariff_date=accounting_date or fallback_date, tariff_source=accounting_source or fallback_source,
             pricing_snapshot_id=accounting_snapshot_id,
             informational_api_equivalent_cost_usd=float(informational) if informational is not None else None,
             accounting_complete=False,
+        )
+    if provider == "openrouter":
+        estimate = estimate_call_cost(usage, provider="openrouter")
+        return CostEstimate(
+            estimate.cost_usd, estimate.peak_upper_cost_usd, estimate.unknown, estimate.reason,
+            estimate.input_tokens, estimate.output_tokens, estimate.cache_hit_tokens, estimate.cache_miss_tokens,
+            tariff_started_at=started.isoformat().replace("+00:00", "Z"),
+            tariff_period="peak" if is_peak_utc(started) else "offpeak",
+            tariff_date=None, tariff_source=OPENROUTER_USAGE_SOURCE,
+            pricing_snapshot_id=getattr(record, "pricing_snapshot_id", None),
+            direct_cost_usd=estimate.cost_usd,
+            accounting_complete=estimate.accounting_complete,
         )
     if is_openai:
         input_tokens, output_tokens, hit = _usage_values(usage)
@@ -220,7 +261,7 @@ def _record_estimate(record: Any) -> CostEstimate:
             None, None, True, "unknown_direct_provider", *_usage_values(usage), None,
             tariff_started_at=started.isoformat().replace("+00:00", "Z"),
             tariff_period="peak" if is_peak_utc(started) else "offpeak",
-            tariff_date=accounting_date or PRICE_SNAPSHOT_DATE, tariff_source=accounting_source or PRICE_SOURCE,
+            tariff_date=accounting_date or fallback_date, tariff_source=accounting_source or fallback_source,
             pricing_snapshot_id=accounting_snapshot_id,
             informational_api_equivalent_cost_usd=float(informational) if informational is not None else None,
             accounting_complete=False,
@@ -256,6 +297,12 @@ def estimate_record_cost(record: CallRecord) -> dict[str, Any]:
         "price_source": estimate.tariff_source,
         "known_cost_usd": estimate.cost_usd,
     })
+    cost_source = getattr(record, "cost_source", None)
+    if cost_source is None:
+        cost_source = getattr(getattr(record, "usage", None), "cost_source", None)
+    if cost_source is not None:
+        result["provider_reported_cost_source"] = cost_source
+        result["cost_source"] = cost_source
     return result
 
 
@@ -294,6 +341,20 @@ def summarize_costs(records: Iterable[Any], *, provider: str | None = None) -> d
         item.informational_api_equivalent_cost_usd or 0.0
         for item in estimates
     )
+    openrouter_reported_cost = sum(
+        item.cost_usd or 0.0
+        for record, item in zip(selected, estimates)
+        if str(getattr(record, "provider", "") or "").lower() == "openrouter"
+    )
+    reported_cost_sources = sorted({
+        str(source)
+        for record in selected
+        for source in (
+            getattr(record, "cost_source", None),
+            getattr(getattr(record, "usage", None), "cost_source", None),
+        )
+        if source is not None
+    })
     direct_candidates = [
         (record, estimate)
         for record, estimate in zip(selected, estimates)
@@ -332,8 +393,10 @@ def summarize_costs(records: Iterable[Any], *, provider: str | None = None) -> d
         "cache_read_tokens": total("cache_read_tokens"),
         "opencode_api_equivalent_cost_usd": api_cost,
         "openai_api_equivalent_cost_usd": api_cost,
+        "openrouter_reported_cost_usd": openrouter_reported_cost,
         "openai_subscription_usage": "reported separately as API-equivalent informational usage; no invoice or free/unlimited claim",
         "cache_policy": "missing cache-hit usage is charged as all cache-miss and marked estimated",
+        "provider_reported_cost_sources": reported_cost_sources,
     }
 
 

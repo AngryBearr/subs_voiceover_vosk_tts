@@ -1,5 +1,15 @@
 # Память эксперимента сокращения субтитров
 
+## Current production direction
+
+The current single-file CLI uses Muse low as generator and Sol 6 high as
+arbiter. Its latest episode is partial, not a completed quality result.
+Continue from the single active [resume checkpoint and dated history](shortening_tasks.md#resume-here--30-september-2026),
+not from the older Sol-medium experiment notes below. Legacy entrypoints and
+historical results remain separate; optional experiments are in the
+[future experiments backlog](future_experiments.md). This pointer update ran
+no inference and did not change saved artifacts or historical results.
+
 Последний человекочитаемый итог: [`shortening_results_2026-09-10.md`](shortening_results_2026-09-10.md). Проверенная компактная числовая сводка: [`expanded_comparison_final.json`](../output/shortening_verification_20260910/expanded_comparison_final.json).
 
 Это рабочая запись для человека. Здесь разделены реализованные правила,

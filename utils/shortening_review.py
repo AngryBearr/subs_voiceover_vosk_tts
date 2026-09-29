@@ -118,8 +118,8 @@ def _profile_fingerprint(config: PlannerConfig) -> str:
     return _hash({"calibration_profile": config.calibration_profile, "calibration_identity": config.calibration_identity})
 
 
-def _context(items: list[dict[str, Any]], position: int, config: PlannerConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build before/after neighbors using the planner's chronological rule."""
+def _context_index(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[int, int]]:
+    """Index valid chronological neighbors once for this exact snapshot."""
     rows: list[dict[str, Any]] = []
     for pos, item in enumerate(items):
         timing = _timing(item)
@@ -137,13 +137,19 @@ def _context(items: list[dict[str, Any]], position: int, config: PlannerConfig) 
             "duration": timing["duration"],
         })
     rows.sort(key=lambda row: (row["start"], row["position"]))
-    target = next((row for row in rows if row["position"] == position), None)
-    if target is None:
+    return rows, {row["position"]: index for index, row in enumerate(rows)}
+
+
+def _context(index: tuple[list[dict[str, Any]], dict[int, int]], position: int,
+             config: PlannerConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Copy only the before/after neighbors using the planner's chronological rule."""
+    rows, positions = index
+    if position not in positions:
         return [], []
-    index = rows.index(target)
+    offset = positions[position]
     return (
-        _copy(rows[max(0, index - config.context_before):index]),
-        _copy(rows[index + 1:index + 1 + config.context_after]),
+        _copy(rows[max(0, offset - config.context_before):offset]),
+        _copy(rows[offset + 1:offset + 1 + config.context_after]),
     )
 
 
@@ -388,6 +394,8 @@ def build_review_state(
     if any(value not in plan_by_id for value in previous_interventions):
         _fail("previous intervention_ids contains an unknown cue")
     intervention_ids = list(dict.fromkeys([*previous_interventions, *initial_ids]))
+    source_context_index = _context_index(source_copy)
+    current_context_index = _context_index(current_copy)
 
     for position in range(len(source_copy)):
         plan = next(item for item in plans if item.position == position)
@@ -432,8 +440,8 @@ def build_review_state(
         current_shape_valid, actual_chars, local_fits = _local(current_text, max_chars, plan.length_basis)
         local_valid = current_shape_valid
         changed = source_raw != current_raw
-        before, after = _context(source_copy, position, planner_config)
-        current_before, current_after = _context(current_copy, position, planner_config)
+        before, after = _context(source_context_index, position, planner_config)
+        current_before, current_after = _context(current_context_index, position, planner_config)
         original_context_fp = _context_hash(before, after)
         current_context_fp = _context_hash(current_before, current_after)
         neighbor_timing_fp = _neighbor_timing_hash(current_before, current_after)

@@ -7,3 +7,4 @@ tts_out
 temp
 .env
 output/
+/artifacts/

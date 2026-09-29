@@ -222,6 +222,8 @@ async def _http_post_json(*, url: str, headers: Dict[str, str], body: Dict[str, 
     import aiohttp
 
     async with aiohttp.ClientSession() as session:
+        from utils.shortening_html import note_model_request
+        note_model_request()
         async with session.post(
             url,
             headers=headers,

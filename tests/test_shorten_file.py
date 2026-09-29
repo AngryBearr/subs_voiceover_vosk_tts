@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -79,6 +81,42 @@ def test_dry_run_does_not_construct_live_components(tmp_path: Path, monkeypatch:
     assert not list(args.output_dir.glob(".preflight.json.*.tmp"))
 
 
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--budget-usd", "10", "--budget-usd is for the primary OpenRouter route"),
+        ("--max-requests", "1", "max-requests is for the primary OpenRouter route"),
+    ],
+)
+def test_legacy_cost_guards_fail_before_server_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+    value: str,
+    message: str,
+) -> None:
+    args, _, _ = _fixture(tmp_path)
+    monkeypatch.setattr("utils.shorten_file.CleanOpenCodeServer", lambda *_a, **_k: pytest.fail("server constructed"))
+    monkeypatch.setattr("utils.shorten_file.LiveBackend", lambda *_a, **_k: pytest.fail("backend constructed"))
+    status = main([
+        str(args.input), "--output-dir", str(args.output_dir), "--model", args.model,
+        "--profile", str(args.profile), "--model-path", str(args.model_path), option, value,
+    ])
+    assert status == 1
+    assert message in capsys.readouterr().err
+    assert not args.output_dir.exists()
+
+
+def test_primary_default_request_cap_remains_unchanged(tmp_path: Path) -> None:
+    args, _, _ = _fixture(tmp_path)
+    args.model = None
+    args.dry_run = True
+    prepared = prepare_run(args)
+    assert prepared.primary is True
+    assert prepared.metadata["budget"]["max_requests"] == 1000
+
+
 def test_profile_identity_mismatch_fails_before_output(tmp_path: Path) -> None:
     args, _, profile_path = _fixture(tmp_path)
     profile = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -152,6 +190,50 @@ def test_empty_exception_message_returns_cli_error(tmp_path: Path, monkeypatch: 
                  "--profile", "profile.json"]) == 1
     error = capsys.readouterr().err
     assert "no error message" in error
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_primary_first_signal_requests_graceful_stop_without_cancelling(
+    tmp_path: Path, monkeypatch: Any, signum: signal.Signals,
+) -> None:
+    prepared = SimpleNamespace(primary=True, dry_run=False, run_time_limit_sec=None, output_dir=tmp_path / "fresh")
+    monkeypatch.setattr("utils.shorten_file.prepare_run", lambda _args: prepared)
+    initial_handler = signal.getsignal(signum)
+
+    async def fake_execute(_prepared: Any, *, stop_requested: Any) -> dict[str, Any]:
+        assert not stop_requested()
+        signal.raise_signal(signum)
+        assert stop_requested()
+        await asyncio.sleep(0)
+        return {"run_state": "incomplete", "summary": {}, "outcome_summary": {}, "budget": {}}
+
+    monkeypatch.setattr("utils.shorten_file.execute_run", fake_execute)
+    assert main(["fake.json", "--profile", "profile.json", "--output-dir", str(tmp_path / "fresh")]) == 1
+    assert signal.getsignal(signum) == initial_handler
+
+
+def test_primary_deadline_checked_without_background_watchdog(tmp_path: Path, monkeypatch: Any) -> None:
+    prepared = SimpleNamespace(primary=True, dry_run=False, run_time_limit_sec=0.001, output_dir=tmp_path / "fresh")
+    monkeypatch.setattr("utils.shorten_file.prepare_run", lambda _args: prepared)
+    async def fake_execute(_prepared: Any, *, stop_requested: Any) -> dict[str, Any]:
+        await asyncio.sleep(0.01)
+        assert stop_requested()
+        return {"run_state": "incomplete", "summary": {}, "outcome_summary": {}, "budget": {}}
+    monkeypatch.setattr("utils.shorten_file.execute_run", fake_execute)
+    assert main(["fake.json", "--profile", "profile.json", "--output-dir", str(tmp_path / "fresh")]) == 1
+
+
+def test_second_signal_cancels_in_flight_primary(tmp_path: Path, monkeypatch: Any) -> None:
+    prepared = SimpleNamespace(primary=True, dry_run=False, run_time_limit_sec=None, output_dir=tmp_path / "fresh")
+    monkeypatch.setattr("utils.shorten_file.prepare_run", lambda _args: prepared)
+    async def fake_execute(_prepared: Any, *, stop_requested: Any) -> dict[str, Any]:
+        signal.raise_signal(signal.SIGINT)
+        assert stop_requested()
+        signal.raise_signal(signal.SIGINT)
+        await asyncio.sleep(0)
+        pytest.fail("second signal did not cancel the task")
+    monkeypatch.setattr("utils.shorten_file.execute_run", fake_execute)
+    assert main(["fake.json", "--profile", "profile.json", "--output-dir", str(tmp_path / "fresh")]) == 130
 
 
 def test_invalid_top_level_and_existing_output_are_rejected(tmp_path: Path) -> None:

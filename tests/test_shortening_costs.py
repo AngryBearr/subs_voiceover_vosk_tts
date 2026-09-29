@@ -10,6 +10,8 @@ from utils.opencode_transport import OpenCodePromptUsage
 from utils.shortening_costs import (
     CURRENT_PRICE_SNAPSHOT_ID,
     LEGACY_PRICE_SNAPSHOT_ID,
+    OPENROUTER_USAGE_SOURCE,
+    PRICE_SOURCE,
     estimate_call_cost,
     estimate_record_cost,
     is_peak_utc,
@@ -66,6 +68,8 @@ def test_record_without_snapshot_keeps_legacy_tariff_and_mixed_summary_names_sou
         pricing_snapshot_id=CURRENT_PRICE_SNAPSHOT_ID,
     )
     assert estimate_record_cost(legacy)["pricing_snapshot_id"] == LEGACY_PRICE_SNAPSHOT_ID
+    assert estimate_record_cost(legacy)["price_snapshot_date"] == "2026-09-09"
+    assert estimate_record_cost(legacy)["price_source"] == PRICE_SOURCE
     assert estimate_record_cost(legacy)["cost_usd"] == pytest.approx(0.44)
     assert estimate_record_cost(current)["cost_usd"] == pytest.approx(0.30)
     summary = summarize_costs([legacy, current])
@@ -86,6 +90,65 @@ def test_openai_usage_cost_is_informational_and_missing_usage_is_incomplete() ->
     incomplete = summarize_costs([missing])
     assert incomplete["unknown_call_count"] == 1
     assert not incomplete["accounting_complete"]
+
+
+def test_openrouter_reported_cost_is_paid_even_for_openai_model() -> None:
+    usage = _usage(input_tokens=10, output_tokens=4, reasoning_tokens=3, cost=1.25)
+    record = CallRecord("openrouter", "openai/gpt-5.6-sol", "medium", "2026-09-07T02:00:00Z", 0.1, usage, "success",
+                        requested_model="openai/gpt-5.6-sol")
+    estimate = estimate_record_cost(record)
+    assert estimate["cost_usd"] == 1.25
+    assert summarize_costs([record])["known_subtotal_usd"] == 1.25
+
+
+def test_openrouter_receipt_does_not_inherit_deepseek_tariff_metadata() -> None:
+    record = CallRecord(
+        "openrouter", "openai/gpt-5.6-sol", "medium", "2026-09-07T02:00:00Z", 0.1,
+        _usage(input_tokens=10, output_tokens=4, cost=1.25), "success",
+        requested_model="openai/gpt-5.6-sol", requested_variant="medium",
+        pricing_snapshot_id="openrouter-snapshot", cost_source="openrouter_usage",
+    )
+    estimate = estimate_record_cost(record)
+    assert estimate["price_snapshot_date"] is None
+    assert estimate["price_source"] == OPENROUTER_USAGE_SOURCE
+    assert estimate["pricing_snapshot_id"] == "openrouter-snapshot"
+    assert estimate["cost_source"] == "openrouter_usage"
+
+
+def test_openrouter_zero_cost_is_known_but_null_cost_is_unknown() -> None:
+    timestamp = "2026-09-07T02:00:00Z"
+    zero = CallRecord("openrouter", "meta/muse-spark-1.3-contributor", "low", timestamp, 0.1,
+                      _usage(input_tokens=10, output_tokens=4, reasoning_tokens=9, cost=0), "success")
+    unknown = CallRecord("openrouter", "meta/muse-spark-1.3-contributor", "low", timestamp, 0.1,
+                         _usage(input_tokens=10, output_tokens=4, reasoning_tokens=9, cost=None), "error")
+    zero_summary = summarize_costs([zero])
+    assert zero_summary["known_subtotal_usd"] == 0.0
+    assert zero_summary["unknown_call_count"] == 0
+    mixed = summarize_costs([zero, unknown])
+    assert mixed["known_subtotal_usd"] == 0.0
+    assert mixed["unknown_call_count"] == 1
+
+
+def test_mixed_openrouter_models_report_direct_totals_without_double_counting_reasoning() -> None:
+    timestamp = "2026-09-07T02:00:00Z"
+    muse = CallRecord("openrouter", "meta/muse-spark-1.3-contributor", "low", timestamp, 0.1,
+                      _usage(input_tokens=10, output_tokens=4, reasoning_tokens=9, cost=0.3), "success")
+    sol = CallRecord("openrouter", "openai/gpt-5.6-sol", "medium", timestamp, 0.1,
+                     _usage(input_tokens=20, output_tokens=5, reasoning_tokens=11, cost=0.7), "success")
+    summary = summarize_costs([muse, sol])
+    assert summary["known_subtotal_usd"] == 1.0
+    assert summary["openrouter_reported_cost_usd"] == 1.0
+    assert summary["input_tokens"] == 30
+    assert summary["output_tokens"] == 9
+    assert summary["reasoning_tokens"] == 20
+
+
+def test_openai_subscription_detection_still_applies_to_non_openrouter_provider() -> None:
+    record = CallRecord("openai", "gpt-5.6-sol", "medium", "2026-09-07T02:00:00Z", 0.1,
+                        _usage(input_tokens=10, output_tokens=4, cost=1.25), "success",
+                        requested_model="openai/gpt-5.6-sol")
+    assert estimate_record_cost(record)["cost_usd"] == 0.0
+    assert summarize_costs([record])["known_subtotal_usd"] == 0.0
 
 
 def test_missing_openai_usage_does_not_make_known_deepseek_direct_accounting_unknown() -> None:

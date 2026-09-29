@@ -20,11 +20,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from utils.opencode_clean import CleanOpenCodeServer
-from utils.sh08_matrix_models import MAX_TOKENS, MODEL_SPECS, OPENCODE_REQUIRED_VERSION
+from utils.sh08_matrix_models import MAX_TOKENS, MODEL_SPECS, OPENCODE_REQUIRED_VERSION, effective_specs
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_MUSE_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 
 
 _SECRET_PATTERNS = (
@@ -174,11 +175,13 @@ class MatrixBackend:
     """Dispatch one SH08 request and return a serializable accounting receipt."""
 
     def __init__(self, *, allow_muse_data: bool = False, openrouter_no_byok: bool = False,
-                 timeout: float = 300.0) -> None:
+                 timeout: float = 300.0, muse_effort: str = "low") -> None:
         if not isinstance(allow_muse_data, bool) or not isinstance(openrouter_no_byok, bool):
             raise TypeError("transport flags must be bool")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(float(timeout)) or timeout <= 0:
             raise ValueError("timeout must be positive")
+        self._specs = effective_specs(muse_effort)
+        self.muse_effort = muse_effort
         self.allow_muse_data = allow_muse_data
         self.openrouter_no_byok = openrouter_no_byok
         self.timeout = float(timeout)
@@ -224,9 +227,9 @@ class MatrixBackend:
 
     def preflight(self, model_key: Optional[str] = None) -> dict[str, Any]:
         """Run only local checks; this method never starts a server or makes a request."""
-        if model_key is not None and model_key not in MODEL_SPECS:
+        if model_key is not None and model_key not in self._specs:
             return {"ok": False, "error": "unknown_model", "missing_varnames": []}
-        spec = MODEL_SPECS.get(model_key) if model_key is not None else None
+        spec = self._specs.get(model_key) if model_key is not None else None
         missing: list[str] = []
         if spec is not None and spec["provider"] in {"deepseek", "openrouter"}:
             credentials = self._load_credentials()
@@ -246,7 +249,7 @@ class MatrixBackend:
                  error: Optional[str] = None, physical: Optional[int] = 0,
                  returned_model: Any = "unknown", returned_provider: Any = "unknown",
                  observed_assistant_steps: Optional[int] = None, text: Optional[str] = None) -> dict[str, Any]:
-        spec = MODEL_SPECS.get(key, {})
+        spec = self._specs.get(key, {})
         safe_raw = _safe_raw(raw, self._secrets) if raw is not None else {}
         safe_calls = _safe_raw(calls or [], self._secrets)
         return {
@@ -259,18 +262,33 @@ class MatrixBackend:
             "elapsed_sec": max(0.0, time.monotonic() - started),
         }
 
+    @staticmethod
+    def _validate_openrouter_variant(spec: dict[str, Any]) -> Optional[str]:
+        variant = spec.get("variant")
+        if spec.get("reasoning_mandatory") is True:
+            if not isinstance(variant, str) or not variant.strip() or variant not in _MUSE_REASONING_EFFORTS:
+                raise ValueError("invalid_reasoning_effort")
+        elif variant is not None and (not isinstance(variant, str) or not variant.strip()):
+            raise ValueError("invalid_reasoning_effort")
+        return variant
+
     async def __call__(self, model_key: str, system_prompt: str, user_prompt: str,
                        schema: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
-        if model_key not in MODEL_SPECS:
+        if model_key not in self._specs:
             return self._receipt(model_key, started=started, error="unknown_model", physical=0)
-        spec = MODEL_SPECS[model_key]
+        spec = self._specs[model_key]
         if not isinstance(system_prompt, str) or not system_prompt.strip() or not isinstance(user_prompt, str) or not user_prompt.strip() or not isinstance(schema, dict):
             return self._receipt(model_key, started=started, error="invalid_request", physical=0)
         if model_key == "muse" and not self.allow_muse_data:
             return self._receipt(model_key, started=started, error="muse_data_consent_required", physical=0)
         if spec["provider"] == "openrouter" and not self.openrouter_no_byok:
             return self._receipt(model_key, started=started, error="openrouter_no_byok_confirmation_required", physical=0)
+        if spec["provider"] == "openrouter":
+            try:
+                self._validate_openrouter_variant(spec)
+            except ValueError as exc:
+                return self._receipt(model_key, started=started, error=str(exc), physical=0)
         if spec["provider"] in {"deepseek", "openrouter"}:
             credentials = self._load_credentials()
             key_name = "DEEPSEEK_API_KEY" if spec["provider"] == "deepseek" else "OPENROUTER_API_KEY"
@@ -417,12 +435,15 @@ class MatrixBackend:
     async def _post_openrouter(self, *, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, bytes]:
         import aiohttp
         async with aiohttp.ClientSession() as session:
+            from utils.shortening_html import note_model_request
+            note_model_request()
             async with session.post(OPENROUTER_URL, headers=headers, json=body,
                                     timeout=aiohttp.ClientTimeout(total=self.timeout)) as response:
                 return response.status, await response.read()
 
     async def _call_openrouter(self, key: str, spec: dict[str, Any], system: str, user: str,
                                schema: dict[str, Any], started: float) -> dict[str, Any]:
+        requested_variant = self._validate_openrouter_variant(spec)
         body: dict[str, Any] = {
             "model": spec["model"],
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -434,23 +455,24 @@ class MatrixBackend:
                 "require_parameters": True, "allow_fallbacks": False, "only": [spec["endpoint_tag"]],
                 "max_price": {"prompt": spec["input_per_million"], "completion": spec["output_per_million"]},
             },
-            "reasoning": {"effort": "low"},
         }
+        if requested_variant is not None:
+            body["reasoning"] = {"effort": requested_variant}
         headers = {"Authorization": f"Bearer {self._load_credentials()['OPENROUTER_API_KEY']}", "Content-Type": "application/json"}
         try:
             status, raw_bytes = await self._post_openrouter(headers=headers, body=body)
             try:
                 raw_value = json.loads(raw_bytes.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                call = {"provider": "openrouter", "model": "unknown", "variant": spec["variant"], "started_at": _utc_now(),
+                call = {"provider": "openrouter", "model": "unknown", "variant": None, "started_at": _utc_now(),
                         "elapsed_sec": max(0.0, time.monotonic() - started), "usage": None, "status": "error",
-                        "requested_model": spec["model"], "requested_variant": spec["variant"], "request_max_tokens": MAX_TOKENS}
+                        "requested_model": spec["model"], "requested_variant": requested_variant, "request_max_tokens": MAX_TOKENS}
                 return self._receipt(key, started=started, calls=[call], error=f"http_{status}:malformed_provider_response", physical=1)
             if not isinstance(raw_value, dict):
-                call = {"provider": "openrouter", "model": "unknown", "variant": spec["variant"],
+                call = {"provider": "openrouter", "model": "unknown", "variant": None,
                         "started_at": _utc_now(), "elapsed_sec": max(0.0, time.monotonic() - started),
                         "usage": None, "status": "error", "requested_model": spec["model"],
-                        "requested_variant": spec["variant"], "request_max_tokens": MAX_TOKENS}
+                        "requested_variant": requested_variant, "request_max_tokens": MAX_TOKENS}
                 return self._receipt(key, started=started, calls=[call], error="malformed_provider_response", physical=1)
             return self._parse_openrouter(key, spec, raw_value, _safe_raw(raw_value, self._secrets), started,
                                           status=status)
@@ -510,9 +532,9 @@ class MatrixBackend:
         known = _finite_nonnegative(cost) and not byok
 
         call = call or {
-            "provider": "openrouter", "model": actual_model, "variant": spec["variant"],
+            "provider": "openrouter", "model": actual_model, "variant": None,
             "started_at": _utc_now(), "elapsed_sec": max(0.0, time.monotonic() - started),
-            "requested_model": spec["model"], "requested_variant": spec["variant"],
+            "requested_model": spec["model"], "requested_variant": spec.get("variant"),
             "request_max_tokens": MAX_TOKENS,
         }
         call["model"] = actual_model

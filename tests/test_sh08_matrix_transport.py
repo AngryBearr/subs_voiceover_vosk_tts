@@ -15,7 +15,7 @@ from utils.opencode_transport import OpenCodePromptUsage
 def test_model_specs_are_locked() -> None:
     assert transport.MODEL_SPECS is models.MODEL_SPECS
     assert transport.MAX_TOKENS == models.MAX_TOKENS == 16384
-    assert transport.OPENCODE_REQUIRED_VERSION == models.OPENCODE_REQUIRED_VERSION == "1.18.29"
+    assert transport.OPENCODE_REQUIRED_VERSION == models.OPENCODE_REQUIRED_VERSION == "1.18.31"
     assert transport.MODEL_SPECS["deepseek"]["variant"] == "off"
     assert transport.MODEL_SPECS["gemini"]["endpoint_tag"] == "google-ai-studio/flex"
     assert transport.MODEL_SPECS["muse"]["reasoning_mandatory"] is True
@@ -45,6 +45,103 @@ def test_openrouter_request_is_pinned_and_cost_is_reported(monkeypatch: pytest.M
     assert result["cost_known"] is True
     assert result["cost_kind"] == "provider_reported"
     assert result["raw"]["usage"]["cost"] == 0.004125
+
+
+@pytest.mark.parametrize("variant", ["low", "high"])
+def test_openrouter_uses_requested_variant_and_only_records_it_as_requested(monkeypatch: pytest.MonkeyPatch,
+                                                                            variant: str) -> None:
+    seen: list[dict[str, object]] = []
+
+    async def post(*, headers, body):
+        seen.append(body)
+        return 200, json.dumps({
+            "model": "google/gemini-3.8-flash",
+            "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001},
+        }).encode()
+
+    monkeypatch.setitem(transport.MODEL_SPECS["gemini"], "variant", variant)
+    backend = transport.MatrixBackend(openrouter_no_byok=True)
+    backend._credentials = {"OPENROUTER_API_KEY": "fake"}
+    monkeypatch.setattr(backend, "_post_openrouter", post)
+    result = asyncio.run(backend("gemini", "system", "user", {}))
+
+    assert seen[0]["reasoning"] == {"effort": variant}
+    assert result["calls"][0]["requested_variant"] == variant
+    assert result["calls"][0]["variant"] is None
+
+
+def test_muse_high_backend_isolated_from_low_backends_and_receipts_keep_requested_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    async def post(*, headers: dict[str, str], body: dict[str, object]) -> tuple[int, bytes]:
+        seen.append(body)
+        return 200, json.dumps({
+            "model": "meta/muse-spark-1.3-contributor",
+            "provider_name": "meta",
+            "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001},
+        }).encode()
+
+    low = transport.MatrixBackend(allow_muse_data=True, openrouter_no_byok=True, muse_effort="low")
+    high = transport.MatrixBackend(allow_muse_data=True, openrouter_no_byok=True, muse_effort="high")
+    another_low = transport.MatrixBackend(allow_muse_data=True, openrouter_no_byok=True, muse_effort="low")
+    for backend in (low, high, another_low):
+        backend._credentials = {"OPENROUTER_API_KEY": "fake"}
+        monkeypatch.setattr(backend, "_post_openrouter", post)
+
+    high_receipt = asyncio.run(high("muse", "system", "user", {}))
+    low_receipt = asyncio.run(low("muse", "system", "user", {}))
+    another_receipt = asyncio.run(another_low("muse", "system", "user", {}))
+
+    assert [body["reasoning"] for body in seen] == [{"effort": "high"}, {"effort": "low"}, {"effort": "low"}]
+    assert high_receipt["error"] is None and high_receipt["cost_known"] is True
+    assert low_receipt["error"] is None and another_receipt["error"] is None
+    assert [receipt["calls"][0]["requested_variant"] for receipt in (high_receipt, low_receipt, another_receipt)] == ["high", "low", "low"]
+    assert [receipt["calls"][0]["variant"] for receipt in (high_receipt, low_receipt, another_receipt)] == [None, None, None]
+    assert low.muse_effort == another_low.muse_effort == "low"
+    assert low._specs["muse"]["variant"] == another_low._specs["muse"]["variant"] == "low"
+    assert high._specs["muse"]["variant"] == "high"
+    assert transport.MODEL_SPECS["muse"]["variant"] == "low"
+
+
+@pytest.mark.parametrize("variant", ["", "unsupported", None])
+def test_muse_invalid_reasoning_effort_fails_before_credentials_or_network(
+    monkeypatch: pytest.MonkeyPatch, variant: object,
+) -> None:
+    backend = transport.MatrixBackend(allow_muse_data=True, openrouter_no_byok=True)
+    monkeypatch.setitem(backend._specs["muse"], "variant", variant)
+
+    def load_credentials() -> dict[str, str]:
+        raise AssertionError("credentials must not be loaded")
+
+    async def post(*, headers, body):
+        raise AssertionError("network must not be called")
+
+    monkeypatch.setattr(backend, "_load_credentials", load_credentials)
+    monkeypatch.setattr(backend, "_post_openrouter", post)
+    result = asyncio.run(backend("muse", "system", "user", {}))
+
+    assert result["error"] == "invalid_reasoning_effort"
+    assert result["physical_calls_observed"] == 0
+
+
+def test_muse_missing_reasoning_effort_fails_before_credentials_or_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = transport.MatrixBackend(allow_muse_data=True, openrouter_no_byok=True)
+    monkeypatch.delitem(backend._specs["muse"], "variant")
+
+    def load_credentials() -> dict[str, str]:
+        raise AssertionError("credentials must not be loaded")
+
+    monkeypatch.setattr(backend, "_load_credentials", load_credentials)
+    result = asyncio.run(backend("muse", "system", "user", {}))
+
+    assert result["error"] == "invalid_reasoning_effort"
+    assert result["physical_calls_observed"] == 0
 
 
 def test_openrouter_unknown_usage_and_byok_are_not_free(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -310,7 +407,7 @@ def test_openencode_config_isolated_and_version_refusal(monkeypatch: pytest.Monk
     backend = transport.MatrixBackend()
     result = asyncio.run(backend("luna", "s", "u", {}))
     assert result["physical_calls_observed"] is None
-    assert result["error"] == "opencode_version_required:1.18.29"
+    assert result["error"] == "opencode_version_required:1.18.31"
 
 
 def _openrouter_backend(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object], status: int = 200) -> dict[str, object]:

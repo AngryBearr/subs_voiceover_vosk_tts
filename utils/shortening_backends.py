@@ -45,7 +45,9 @@ class LiveBackend:
 
     def __init__(self, server: CleanOpenCodeServer | None = None, *, deepseek_api_key: str | None = None,
                  timeout: float = 300.0, max_tokens: int | None = None,
-                 deepseek_base_url: str = "https://api.deepseek.com") -> None:
+                 deepseek_base_url: str = "https://api.deepseek.com",
+                 openrouter_api_key: str | None = None,
+                 openrouter_pricing_snapshot: dict[str, Any] | None = None) -> None:
         self.runtime_metadata = transport_runtime_metadata()
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
             raise ValueError("timeout must be positive")
@@ -54,6 +56,8 @@ class LiveBackend:
         self.timeout = float(timeout)
         self.max_tokens = max_tokens
         self.deepseek_base_url = deepseek_base_url
+        self.openrouter_api_key = openrouter_api_key
+        self.openrouter_pricing_snapshot = openrouter_pricing_snapshot
 
     async def __call__(self, spec: ModelSpec, system_prompt: str, user_prompt: str,
                        output_schema: dict[str, Any], allow_length_tool: bool) -> DetailedResponse:
@@ -63,7 +67,22 @@ class LiveBackend:
             if spec.model not in OPENAI_MODELS or spec.variant not in OPENAI_MODELS[spec.model]:
                 return DetailedResponse(None, [], "unsupported_openai_model_variant")
             return await self._opencode(spec, system_prompt, user_prompt, output_schema, allow_length_tool)
+        if spec.provider == "openrouter":
+            return await self._openrouter(spec, system_prompt, user_prompt, output_schema)
         return DetailedResponse(None, [], "unsupported_provider")
+
+    async def _openrouter(self, spec: ModelSpec, system_prompt: str, user_prompt: str,
+                          output_schema: dict[str, Any]) -> DetailedResponse:
+        if not self.openrouter_api_key:
+            return DetailedResponse(None, [], "openrouter_api_key_required")
+        if not isinstance(self.openrouter_pricing_snapshot, dict):
+            return DetailedResponse(None, [], "openrouter_pricing_snapshot_required")
+        from utils.openrouter_transport import request_json_detailed
+        return await request_json_detailed(
+            api_key=self.openrouter_api_key, model=spec.model, reasoning_effort=spec.variant,
+            system_prompt=system_prompt, user_prompt=user_prompt, schema=output_schema,
+            pricing_snapshot=self.openrouter_pricing_snapshot, timeout=self.timeout,
+        )
 
     async def _deepseek(self, spec: ModelSpec, system_prompt: str, user_prompt: str,
                         output_schema: dict[str, Any], allow_length_tool: bool) -> DetailedResponse:

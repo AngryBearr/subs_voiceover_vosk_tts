@@ -46,6 +46,66 @@ def _new_run(tmp_path: Path, manifest: dict[str, Any]) -> Path:
     return output_dir
 
 
+def _restricted_manifest(*, muse_effort: str = "low") -> dict[str, Any]:
+    manifest = _manifest()
+    manifest.update(
+        {
+            "experiment_id": matrix.RESTRICTED_EXPERIMENT_ID,
+            "muse_effort": muse_effort,
+            "full_specs": matrix.effective_specs(muse_effort),
+            "carryover": matrix._zero_carryover(),
+            "receipt_import": {"enabled": False},
+            "limits": {
+                "direct_api_cap_usd": "1.50",
+                "subscription_conservative_attempt_units": 75,
+                "total_attempt_units": 150,
+                "max_tokens": matrix.MAX_TOKENS,
+                "payload_bytes": matrix.PAYLOAD_LIMIT,
+            },
+        }
+    )
+    manifest["approved_scope"] = {
+        "cases": 60,
+        "repetitions": 2,
+        "pairs": [["muse", "sol"]],
+        "smoke_cases": 6,
+        "smoke_repetition": 1,
+    }
+    return manifest
+
+
+@pytest.mark.parametrize("mutation", ["pair", "effort", "cap", "selection"])
+def test_restricted_protocol_rejects_invalid_scope_before_any_backend_call(
+    tmp_path: Path, mutation: str
+) -> None:
+    approval = json.loads(
+        Path("docs/sh08_followup_protocol_20260915.json").read_text(encoding="utf-8")
+    )
+    frozen = {"version": matrix.VERSION, "selected_case_ids": ["frozen"]}
+    frozen_path = tmp_path / "selection.json"
+    frozen_path.write_text(json.dumps(frozen), encoding="utf-8")
+    approval["selection_reference"] = {
+        "path": str(frozen_path),
+        "sha256": matrix._sha_file(frozen_path),
+    }
+    calls: list[str] = []
+    if mutation == "pair":
+        approval["allowed_pairs"] = [["muse", "luna"]]
+        selection: Any = frozen
+    elif mutation == "effort":
+        approval["allowed_efforts"] = ["low"]
+        selection = frozen
+    elif mutation == "cap":
+        approval["budgets"]["per_arm"]["total_units"] = 149
+        selection = frozen
+    else:
+        selection = {"version": matrix.VERSION, "selected_case_ids": ["different"]}
+
+    with pytest.raises(matrix.MatrixError):
+        matrix._validate_restricted_protocol(approval, selection)
+    assert calls == []
+
+
 def _descriptor(
     manifest: dict[str, Any],
     *,
@@ -101,6 +161,43 @@ def _response(
         "provider": provider or spec["provider"],
         "elapsed_sec": 0.0,
     }
+
+
+def test_restricted_coordinator_calls_only_muse_sol_and_keeps_zero_invalid_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _restricted_manifest()
+    for case in manifest["selection"]["cases"]:
+        case["max_chars"] = 0
+    manifest["selection"]["cases"][0]["max_chars"] = 30
+    manifest["selection"]["cases"][1].update({"max_chars": 30, "status": "invalid"})
+    output_dir = _new_run(tmp_path, manifest)
+    monkeypatch.setattr(matrix, "_read_manifest", lambda _: manifest)
+    calls: list[tuple[str, list[str]]] = []
+
+    async def fake_backend(model: str, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        ids = [str(target["cue_id"]) for target in payload["targets"]]
+        calls.append((model, ids))
+        assert model in {"muse", "sol"}
+        if schema == matrix.generation_schema():
+            results = [{"cue_id": case_id, "text": "short", "status": "ok"} for case_id in ids]
+        else:
+            results = [{"cue_id": case_id, "verdict": "accept", "issues": [], "advice": ""} for case_id in ids]
+        text = json.dumps({"results": results})
+        spec = matrix.effective_specs("low")[model]
+        return _response(model, cost=0.0, physical=None if spec["subscription"] else 1) | {"text": text, "raw": text}
+
+    result = asyncio.run(matrix.run_matrix(output_dir, fake_backend))
+    assert {model for model, _ in calls} == {"muse", "sol"}
+    excluded_ids = {manifest["selection"]["cases"][1]["case_id"]} | {
+        case["case_id"] for case in manifest["selection"]["cases"][2:]
+    }
+    assert all(not excluded_ids.intersection(ids) for _, ids in calls)
+    assert result["zero_count"] == 58
+    assert result["invalid_count"] == 1
+    assert result["eligible_denominator"] == 1
+    assert all(counts["unresolved"] == 0 and counts["missing"] == 0 for counts in result["firstpass_counts"].values())
 
 
 def _prior_attempt_fixture(tmp_path: Path) -> dict[str, Any]:
@@ -379,6 +476,29 @@ def _admission_at_cap(tmp_path: Path, model_key: str, rows: dict[str, dict[str, 
     return matrix._Admission(output_dir, manifest, ledger, matrix.DEFAULT_SPECS), _descriptor(manifest, model_key=model_key), before
 
 
+def test_restricted_per_arm_budget_admission_blocks_before_backend(tmp_path: Path) -> None:
+    manifest = _restricted_manifest()
+    output_dir = _new_run(tmp_path, manifest)
+    rows = dict(_complete_row(manifest, "sol", number, cost=0.0) for number in range(12))
+    ledger = {
+        "schema": "sh08_matrix_ledger.v1",
+        "manifest_checksum": manifest["checksum"],
+        "requests": rows,
+    }
+    matrix._save_ledger(output_dir, ledger)
+    before = (output_dir / "ledger.json").read_bytes()
+    admission = matrix._Admission(output_dir, manifest, ledger, manifest["full_specs"])
+    descriptor = _descriptor(manifest, model_key="sol")
+    calls: list[str] = []
+
+    with pytest.raises(matrix.BudgetLimited):
+        admission.admit(descriptor, key=matrix.canonical_hash(descriptor))
+
+    assert calls == []
+    assert admission._totals()[2:] == (72, 72)
+    assert (output_dir / "ledger.json").read_bytes() == before
+
+
 def test_pure_admit_blocks_subscription_300_units_before_ledger_write(tmp_path: Path) -> None:
     manifest = _manifest()
     rows = dict(_complete_row(manifest, "luna", number, cost=0.0) for number in range(50))
@@ -454,6 +574,60 @@ def test_usage_cost_counts_opencode_cache_tokens_in_effective_input() -> None:
     }
     cost, known = matrix._usage_cost(response, matrix.DEFAULT_SPECS["sol"])
     assert cost == matrix.Decimal(0) and known
+
+
+def test_receipt_import_rejects_source_vs_destination_prompt_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_manifest: dict[str, Any] = {
+        "schema": "sh08_matrix_manifest.v1",
+        "approved_scope": {},
+        "selection": {},
+        "selection_sha256": "selection",
+        "source": {},
+        "profile": {},
+        "batches": [],
+        "full_specs": {},
+        "limits": {},
+        "prompts": {"generator_system": "source prompt"},
+        "user_consent": {},
+        "carryover": matrix._zero_carryover(),
+        "opencode_required_version": matrix.OPENCODE_REQUIRED_VERSION,
+    }
+    source_manifest["checksum"] = matrix.canonical_hash(source_manifest)
+    source_ledger = {
+        "schema": "sh08_matrix_ledger.v1",
+        "manifest_checksum": source_manifest["checksum"],
+        "requests": {},
+    }
+    source_envelope = dict(source_ledger)
+    source_envelope["checksum"] = matrix.canonical_hash(source_ledger)
+    config = {
+        "enabled": True,
+        "action": "reuse_durable_responses_after_local_usage_reconciliation",
+        "algorithm": "opencode-disjoint-cache-v1",
+        "source_manifest_checksum": source_manifest["checksum"],
+    }
+    monkeypatch.setattr(matrix, "_receipt_import_config", lambda approval: config)
+    monkeypatch.setattr(matrix, "_receipt_reference", lambda config, name: (Path(name), "fixture-sha"))
+
+    def fake_load_json(path: Path, label: str) -> Any:
+        return source_manifest if "manifest" in label else source_envelope
+
+    monkeypatch.setattr(matrix, "_load_json", fake_load_json)
+    destination_manifest = deepcopy(source_manifest)
+    destination_manifest["prompts"] = {"generator_system": "destination prompt"}
+
+    with pytest.raises(matrix.MatrixError, match="source differs in frozen field: prompts"):
+        matrix._import_receipts({}, destination_manifest)
+
+
+def test_disabled_receipt_import_requires_exact_shape() -> None:
+    assert matrix._receipt_import_config({}) == {"enabled": False}
+    assert matrix._receipt_import_config({"receipt_import": {"enabled": False}}) == {"enabled": False}
+    for value in ({"enabled": False, "action": "ignored"}, {"enabled": 0}, {"enabled": True}):
+        with pytest.raises(matrix.MatrixError):
+            matrix._receipt_import_config({"receipt_import": value})
 
 
 @pytest.mark.parametrize(
@@ -939,3 +1113,211 @@ def test_cli_invalid_manifest_skips_credentials_preflight_but_closes_context(
     assert matrix._cli() == 2
     assert "preflight:deepseek" not in events
     assert events[-1] == "exit"
+
+
+def _recheck_condition_fixture(
+    *,
+    old_text: str = "same  text",
+    new_text: str = "same text ",
+    targets: list[dict[str, Any]] | None = None,
+    context: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    manifest = _manifest()
+    case_id = manifest["selection"]["cases"][0]["case_id"]
+    original_targets = targets or [{
+        "cue_id": case_id,
+        "original": "original text",
+        "candidate": old_text,
+        "max_chars": 30,
+        "actual_chars": len(old_text),
+        "length_basis": "display_text",
+    }]
+    review_context = context or [{"cue_id": case_id, "text": "original text"}]
+    review_prompt = matrix.build_review_prompt(review_context, original_targets)
+    review_descriptor = matrix._request_descriptor(
+        manifest,
+        rep=1,
+        stage="review",
+        generator="luna",
+        arbiter="deepseek",
+        batch="batch-0",
+        system=matrix.ARBITER_SYSTEM_PROMPT,
+        user=review_prompt,
+        schema=matrix.review_schema(),
+    )
+    receipt_id = matrix.canonical_hash(review_descriptor)
+    ledger = {"requests": {receipt_id: {"status": "complete", "descriptor": review_descriptor}}}
+    repair_targets = deepcopy(original_targets)
+    repair_targets[0]["candidate"] = new_text
+    repair_targets[0]["actual_chars"] = len(new_text)
+    repair_prompt = matrix.build_review_prompt(review_context, repair_targets)
+    prospective_descriptor = matrix._request_descriptor(
+        manifest,
+        rep=1,
+        stage="recheck",
+        generator="luna",
+        arbiter="deepseek",
+        batch="batch-0:repair",
+        system=matrix.ARBITER_SYSTEM_PROMPT,
+        user=repair_prompt,
+        schema=matrix.review_schema(),
+    )
+    branch = {
+        "case_id": case_id,
+        "rep": 1,
+        "stage": "review",
+        "generator": "luna",
+        "arbiter": "deepseek",
+        "status": "complete",
+        "verdict": "revise",
+        "candidate": old_text,
+        "local_fit": matrix.check_length(old_text, 30, "display_text"),
+        "review_receipt_id": receipt_id,
+        "repair": {
+            "status": "candidate",
+            "text": new_text,
+            "local_fit": matrix.check_length(new_text, 30, "display_text"),
+        },
+    }
+    return branch, prospective_descriptor, ledger
+
+
+def test_identical_whitespace_repair_is_eligible_for_skip() -> None:
+    branch, descriptor, ledger = _recheck_condition_fixture()
+    assert matrix._same_recheck_conditions(branch, descriptor, ledger) is True
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["rep", "generator", "arbiter", "model_key", "spec", "system_prompt", "schema"],
+)
+def test_recheck_condition_does_not_cross_review_identity(field: str) -> None:
+    branch, descriptor, ledger = _recheck_condition_fixture()
+    altered = deepcopy(descriptor)
+    altered[field] = 2 if field == "rep" else "changed" if field != "schema" else {"changed": True}
+    assert matrix._same_recheck_conditions(branch, altered, ledger) is False
+
+
+def test_recheck_condition_rejects_changed_text_length_and_scope_or_context() -> None:
+    branch, descriptor, ledger = _recheck_condition_fixture(new_text="different")
+    assert matrix._same_recheck_conditions(branch, descriptor, ledger) is False
+
+    branch, descriptor, ledger = _recheck_condition_fixture(
+        targets=[
+            {
+                "cue_id": _manifest()["selection"]["cases"][0]["case_id"],
+                "original": "original text",
+                "candidate": "same  text",
+                "max_chars": 30,
+                "actual_chars": 10,
+                "length_basis": "display_text",
+            },
+            {
+                "cue_id": _manifest()["selection"]["cases"][1]["case_id"],
+                "original": "original text",
+                "candidate": "other text",
+                "max_chars": 30,
+                "actual_chars": 10,
+                "length_basis": "display_text",
+            },
+        ],
+    )
+    assert matrix._same_recheck_conditions(branch, descriptor, ledger) is True
+    altered = deepcopy(descriptor)
+    altered_payload = json.loads(descriptor["user_prompt"].split("Input JSON:\n", 1)[1])
+    altered_payload["targets"].pop()
+    altered["user_prompt"] = "Review\nInput JSON:\n" + json.dumps(altered_payload)
+    assert matrix._same_recheck_conditions(branch, altered, ledger) is False
+
+    branch, descriptor, ledger = _recheck_condition_fixture(context=[{"cue_id": "other", "text": "changed"}])
+    assert matrix._same_recheck_conditions(branch, descriptor, ledger) is True
+    altered = deepcopy(descriptor)
+    payload = json.loads(altered["user_prompt"].split("Input JSON:\n", 1)[1])
+    payload["context"][0]["text"] = "changed again"
+    altered["user_prompt"] = "Review\nInput JSON:\n" + json.dumps(payload)
+    assert matrix._same_recheck_conditions(branch, altered, ledger) is False
+
+    branch["local_fit"]["fits"] = False
+    assert matrix._same_recheck_conditions(branch, descriptor, ledger) is False
+
+
+def test_singleton_identical_repairs_skip_rechecks_and_are_not_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest()
+    case_id = manifest["selection"]["cases"][0]["case_id"]
+    for case in manifest["selection"]["cases"]:
+        case["max_chars"] = 30 if case["case_id"] == case_id else 0
+    output_dir = _new_run(tmp_path, manifest)
+    monkeypatch.setattr(matrix, "_read_manifest", lambda _: manifest)
+    calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+    async def fake_backend(model: str, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        targets = payload["targets"]
+        calls.append((model, deepcopy(targets)))
+        if schema == matrix.generation_schema():
+            repair = "prior_candidate" in targets[0]
+            text = "same text " if repair else "same  text"
+            results = [{"cue_id": target["cue_id"], "text": text, "status": "ok"} for target in targets]
+        else:
+            results = [{"cue_id": target["cue_id"], "verdict": "revise", "issues": ["semantic"], "advice": "try again"} for target in targets]
+        response_text = json.dumps({"results": results})
+        spec = matrix.MODEL_SPECS[model]
+        return _response(model, cost=0.0, physical=None if spec["subscription"] else 1) | {"text": response_text, "raw": response_text}
+
+    result = asyncio.run(matrix.run_matrix(output_dir, fake_backend))
+    assert result["status"] == "complete"
+    ledger = matrix._load_ledger(output_dir, manifest=manifest)
+    assert not any(row["descriptor"].get("stage") == "recheck" for row in ledger["requests"].values())
+    case_body = json.loads((output_dir / "case_results.json").read_text(encoding="utf-8"))
+    branches = [branch for branch in case_body["rows"][0]["branches"] if branch.get("stage") == "review"]
+    assert len(branches) == len(matrix.PAIR_ORDER) * 2
+    assert all(branch["repair"]["status"] == "unchanged_proposal" for branch in branches)
+    assert all(branch["repair"]["recheck"] == {
+        "status": "skipped_identical_proposal",
+        "accepted": False,
+        "reason": "repair_did_not_change_proposal",
+        "prior_review_receipt_id": branch["review_receipt_id"],
+    } for branch in branches)
+    assert all(branch["repair_status"] == "unresolved" and branch["repair_reason"] == "repair_did_not_change_proposal" for branch in branches)
+    assert all(branch["accepted"] is False and branch["verdict"] == "revise" for branch in branches)
+    repair_targets = [targets[0] for _, targets in calls if targets and "prior_candidate" in targets[0]]
+    assert repair_targets and all(target["rejected_candidates"] == ["same  text"] for target in repair_targets)
+
+
+def test_multi_target_changed_repair_retains_the_recheck_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest()
+    case_ids = [case["case_id"] for case in manifest["selection"]["cases"][:2]]
+    for case in manifest["selection"]["cases"]:
+        case["max_chars"] = 30 if case["case_id"] in case_ids else 0
+    output_dir = _new_run(tmp_path, manifest)
+    monkeypatch.setattr(matrix, "_read_manifest", lambda _: manifest)
+    recheck_targets: list[list[str]] = []
+
+    async def fake_backend(model: str, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        payload = json.loads(user.split("Input JSON:\n", 1)[1])
+        targets = payload["targets"]
+        if schema == matrix.generation_schema():
+            repair = "prior_candidate" in targets[0]
+            results = []
+            for target in targets:
+                text = ("same text " if repair else "same  text") if target["cue_id"] == case_ids[0] else ("new text" if repair else "other text")
+                results.append({"cue_id": target["cue_id"], "text": text, "status": "ok"})
+        else:
+            if any(target.get("candidate") == "new text" for target in targets):
+                recheck_targets.append([target["cue_id"] for target in targets])
+            results = [{"cue_id": target["cue_id"], "verdict": "revise", "issues": [], "advice": ""} for target in targets]
+        response_text = json.dumps({"results": results})
+        spec = matrix.MODEL_SPECS[model]
+        return _response(model, cost=0.0, physical=None if spec["subscription"] else 1) | {"text": response_text, "raw": response_text}
+
+    asyncio.run(matrix.run_matrix(output_dir, fake_backend))
+    assert len(recheck_targets) == len(matrix.PAIR_ORDER) * 2
+    assert all(ids == case_ids for ids in recheck_targets)
+    case_body = json.loads((output_dir / "case_results.json").read_text(encoding="utf-8"))
+    for case_id in case_ids:
+        branches = [branch for branch in case_body["rows"] if branch["case_id"] == case_id for branch in branch["branches"] if branch.get("stage") == "review"]
+        assert branches and all(branch["repair"]["recheck"]["status"] == "complete" for branch in branches)

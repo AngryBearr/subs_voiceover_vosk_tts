@@ -20,9 +20,13 @@ from utils.shortening_prompts import (
 
 
 def test_versioned_prompts_and_strict_schemas() -> None:
-    assert PROMPT_VERSION == "shortening-v2"
+    assert PROMPT_VERSION == "shortening-v4"
     assert "FULL essential meaning" in GENERATOR_SYSTEM_PROMPT
     assert "JSON only" in ARBITER_SYSTEM_PROMPT
+    numeric_rule = "'двадцать пять' -> '25' is prohibited"
+    assert numeric_rule in GENERATOR_SYSTEM_PROMPT
+    assert numeric_rule in ARBITER_SYSTEM_PROMPT
+    assert "request revise" in ARBITER_SYSTEM_PROMPT
     for schema, required in ((generation_schema(), {"cue_id", "text", "status"}), (review_schema(), {"cue_id", "verdict", "issues", "advice"})):
         assert schema["additionalProperties"] is False
         assert set(schema["properties"]["results"]["items"]["properties"]) == required
@@ -42,6 +46,7 @@ def test_prompt_payload_fields_and_no_history() -> None:
     assert "provider" not in generation
     assert "history" not in review
     assert "prior_candidate" in generation
+    assert "rejected_candidates" not in generation
     assert "actual_chars" in review
     generation_payload = json.loads(generation.split("Input JSON:\n", 1)[1])
     review_payload = json.loads(review.split("Input JSON:\n", 1)[1])
@@ -49,6 +54,21 @@ def test_prompt_payload_fields_and_no_history() -> None:
     assert review_payload["schema"] == review_schema()
     assert generation_payload["targets"][0]["length_basis"] == "normalized_tts_text"
     assert review_payload["targets"][0]["length_basis"] == "normalized_tts_text"
+
+
+def test_rejected_candidates_are_whitelisted_only_for_generation() -> None:
+    prompt = build_generation_prompt(
+        [], [{"cue_id": "cue-1", "original": "original", "max_chars": 5,
+              "length_basis": "normalized_tts_text", "rejected_candidates": ["old"]}],
+    )
+    payload = json.loads(prompt.split("Input JSON:\n", 1)[1])
+    assert payload["targets"][0]["rejected_candidates"] == ["old"]
+    review = build_review_prompt(
+        [], [{"cue_id": "cue-1", "original": "original", "candidate": "new",
+              "max_chars": 5, "actual_chars": 3, "length_basis": "normalized_tts_text",
+              "rejected_candidates": ["old"]}],
+    )
+    assert "rejected_candidates" not in review
 
 
 def test_generation_parse_and_deterministic_order() -> None:

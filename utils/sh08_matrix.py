@@ -41,7 +41,7 @@ from utils.shortening_prompts import (
 )
 from utils.shortening_resume import atomic_json, canonical_hash, _read_json
 from utils.vosk_text import normalize_vosk_text
-from utils.sh08_matrix_models import MODEL_SPECS, MAX_TOKENS, OPENCODE_REQUIRED_VERSION
+from utils.sh08_matrix_models import MODEL_SPECS, MAX_TOKENS, OPENCODE_REQUIRED_VERSION, effective_specs
 
 
 VERSION = "sh08-matrix-v1"
@@ -65,6 +65,7 @@ PAIR_ORDER: tuple[tuple[str, str], ...] = (
 # Keep the historical public name as an alias, while keeping the immutable
 # model contract in the pure models module.
 DEFAULT_SPECS = MODEL_SPECS
+RESTRICTED_EXPERIMENT_ID = "muse_reasoning_20260915"
 
 Backend = Callable[[str, str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -116,6 +117,87 @@ def _safe_path(root: Path, value: Any) -> Path:
     if root.resolve() not in result.parents:
         raise MatrixError("source path escapes its root")
     return result
+
+
+def _active_pairs(manifest: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Return the exact pair scope recorded by the manifest."""
+    if manifest.get("experiment_id") is None:
+        return PAIR_ORDER
+    scope = manifest.get("approved_scope")
+    pairs = scope.get("pairs") if isinstance(scope, Mapping) else None
+    if not isinstance(pairs, list) or any(not isinstance(pair, list) or len(pair) != 2 or any(not isinstance(item, str) for item in pair) for pair in pairs):
+        raise MatrixError("manifest pair scope is invalid")
+    return tuple((pair[0], pair[1]) for pair in pairs)
+
+
+def _active_generators(manifest: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(generator for generator, _ in _active_pairs(manifest)))
+
+
+def _reference_path(value: Any) -> Path:
+    if not isinstance(value, str):
+        raise MatrixError("reference path is invalid")
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
+    return path
+
+
+def _validate_restricted_protocol(approval: Mapping[str, Any], selection: Any = None) -> dict[str, Any]:
+    if approval.get("experiment_id") != RESTRICTED_EXPERIMENT_ID:
+        raise MatrixError("restricted experiment ID is invalid")
+    scope = approval.get("approved_scope")
+    if not isinstance(scope, Mapping) or scope.get("cases") != 60 or scope.get("unique_cases") != 60 or scope.get("repetitions") != 2 or scope.get("pairs") != [["muse", "sol"]] or scope.get("batches") != [6, 27, 27]:
+        raise MatrixError("restricted experiment scope is invalid")
+    if approval.get("allowed_pairs") != [["muse", "sol"]]:
+        raise MatrixError("restricted experiment pairs are invalid")
+    efforts = approval.get("allowed_efforts")
+    if efforts != ["low", "high"]:
+        raise MatrixError("restricted Muse efforts are invalid")
+    budgets = approval.get("budgets")
+    per_arm = budgets.get("per_arm") if isinstance(budgets, Mapping) else None
+    overall = budgets.get("overall") if isinstance(budgets, Mapping) else None
+    remainder = budgets.get("pilot_remainder") if isinstance(budgets, Mapping) else None
+    combined = budgets.get("combined_muse_arms_maximum") if isinstance(budgets, Mapping) else None
+    if (not isinstance(per_arm, Mapping) or per_arm.get("direct_api_usd") != "1.50" or per_arm.get("subscription_units") != 75 or per_arm.get("total_units") != 150
+            or not isinstance(overall, Mapping) or overall.get("direct_api_usd") != "5" or overall.get("subscription_units") != 300 or overall.get("total_units") != 600
+            or not isinstance(combined, Mapping) or combined.get("direct_api_usd") != "3" or combined.get("subscription_units") != 150 or combined.get("total_units") != 300
+            or not isinstance(remainder, Mapping) or remainder.get("direct_api_usd") != "2" or remainder.get("subscription_units") != 150 or remainder.get("total_units") != 150):
+        raise MatrixError("restricted experiment budget is invalid")
+    consent = approval.get("user_consent")
+    authorization = approval.get("budget_authorization")
+    prior_approval = consent.get("prior_approval_reference") if isinstance(consent, Mapping) else None
+    if (not isinstance(consent, Mapping) or consent.get("no_byok_confirmed") is not True or consent.get("muse_data_approved") is not True
+            or not isinstance(prior_approval, Mapping) or not isinstance(prior_approval.get("path"), str)
+            or not isinstance(prior_approval.get("sha256"), str) or not isinstance(authorization, Mapping)
+            or authorization.get("authorized_by_user") is not True or authorization.get("direct_api_usd") != "5"
+            or authorization.get("subscription_units") != 300 or authorization.get("per_arm_direct_api_usd") != "1.50"
+            or authorization.get("per_arm_subscription_units") != 75 or authorization.get("per_arm_total_units") != 150
+            or authorization.get("no_paid_sol_fallback") is not True):
+        raise MatrixError("restricted experiment consent is incomplete")
+    prior_approval_file = _reference_path(prior_approval["path"])
+    if _sha_file(prior_approval_file) != prior_approval["sha256"]:
+        raise MatrixError("restricted prior approval reference hash mismatch")
+    receipt_import = _receipt_import_config(approval)
+    receipt_value = approval.get("receipt_import")
+    if (approval.get("carryover") != _zero_carryover() or receipt_import != {"enabled": False}
+            or not isinstance(receipt_value, Mapping) or set(receipt_value) != {"enabled"} or receipt_value.get("enabled") is not False):
+        raise MatrixError("restricted experiment carryover or receipt import is not zero")
+    permitted_output_dirs = approval.get("permitted_output_dirs")
+    if (not isinstance(permitted_output_dirs, Mapping)
+            or set(permitted_output_dirs) != {"low", "high"}
+            or any(not isinstance(permitted_output_dirs.get(effort), str) or not permitted_output_dirs[effort] for effort in ("low", "high"))):
+        raise MatrixError("restricted permitted output directories are incomplete")
+    reference = approval.get("selection_reference")
+    if not isinstance(reference, Mapping) or not isinstance(reference.get("path"), str) or not isinstance(reference.get("sha256"), str):
+        raise MatrixError("restricted selection reference is incomplete")
+    reference_file = _reference_path(reference["path"])
+    if _sha_file(reference_file) != reference["sha256"]:
+        raise MatrixError("restricted selection reference hash mismatch")
+    frozen = _load_json(reference_file, "restricted frozen selection")
+    if selection is not None and selection != frozen:
+        raise MatrixError("deterministic selection differs from restricted frozen selection")
+    return {"selection": frozen, "selection_reference": {"path": str(reference_file), "sha256": reference["sha256"]}}
 
 
 def _load_json(path: Path, label: str) -> Any:
@@ -308,6 +390,8 @@ def _prepare_manifest_unlocked(
     profile_path: Path | None = None,
     model_path: Path | None = None,
     input_root: Path | None = None,
+    approval_path: Path | None = None,
+    muse_effort: str | None = None,
 ) -> dict[str, Any]:
     """Build the immutable 60-case matrix contract using local files only."""
     output_dir = Path(output_dir)
@@ -322,8 +406,19 @@ def _prepare_manifest_unlocked(
     profile = _load_json(Path(profile_file), "calibration profile")
     if not isinstance(corpus, dict) or not isinstance(pilot, dict) or not isinstance(profile, dict):
         raise MatrixError("preparation manifests must be objects")
-    approval_path = root / 'docs/sh08_live_protocol.json'
-    approval = _load_json(approval_path, 'approved matrix protocol')
+    approval_file = Path(approval_path) if approval_path is not None else root / "docs/sh08_live_protocol.json"
+    if not approval_file.is_absolute():
+        approval_file = root / approval_file
+    approval = _load_json(approval_file, 'approved matrix protocol')
+    chosen_effort = muse_effort or "low"
+    if chosen_effort not in {"low", "high"}:
+        raise MatrixError("Muse effort must be low or high")
+    restricted = isinstance(approval, Mapping) and approval.get("experiment_id") == RESTRICTED_EXPERIMENT_ID
+    if restricted:
+        _validate_restricted_protocol(approval)
+        _validate_restricted_output_dir(approval, chosen_effort, output_dir)
+    elif chosen_effort != "low":
+        raise MatrixError("high Muse effort requires the restricted experiment protocol")
     consent = approval.get('user_consent') if isinstance(approval, dict) else None
     if not isinstance(consent, dict) or consent.get("no_byok_confirmed") is not True or consent.get("muse_data_approved") is not True:
         raise MatrixError("explicit no-BYOK and Muse data consent is required")
@@ -468,33 +563,51 @@ def _prepare_manifest_unlocked(
     for number, start in enumerate(range(6, len(selected), 27), 1):
         batches.append({"batch_id": f"batch-{number}", "case_ids": [row["case_id"] for row in selected[start:start + 27]]})
     selection = {"version": VERSION, "cases": selected, "selected_case_ids": [row["case_id"] for row in selected], "pool_count": len(pool), "pool_counts": dict(pool_counts), "not_selected": [{"case_id": row["case_id"], "reason": "rank_after_first_60"} for row in pool[MAX_CASES:]], "exclusions": exclusions, "batches": batches}
+    restricted_reference = _validate_restricted_protocol(approval, selection) if restricted else None
     selection_sha = canonical_hash(selection)
     code_hashes = _code_hashes()
-    tariffs = {key: {"input_per_million": spec["input_per_million"], "output_per_million": spec["output_per_million"], "source_url": "https://opencode.ai/docs/" if spec["subscription"] else "https://api-docs.deepseek.com/quick_start/pricing" if key == "deepseek" else "https://ai.google.dev/gemini-api/docs/pricing" if key == "gemini" else "https://openrouter.ai/meta/muse-spark-1.3-contributor"} for key, spec in DEFAULT_SPECS.items()}
+    prepared_specs = effective_specs(chosen_effort)
+    tariffs = {key: {"input_per_million": spec["input_per_million"], "output_per_million": spec["output_per_million"], "source_url": "https://opencode.ai/docs/" if spec["subscription"] else "https://api-docs.deepseek.com/quick_start/pricing" if key == "deepseek" else "https://ai.google.dev/gemini-api/docs/pricing" if key == "gemini" else "https://openrouter.ai/meta/muse-spark-1.3-contributor"} for key, spec in prepared_specs.items()}
+    approved_pairs = [["muse", "sol"]] if restricted else [list(pair) for pair in PAIR_ORDER]
+    approved_limits = {
+        "direct_api_cap_usd": "1.50" if restricted else str(DIRECT_CAP),
+        "subscription_conservative_attempt_units": 75 if restricted else SUBSCRIPTION_CAP_UNITS,
+        "total_attempt_units": 150 if restricted else TOTAL_CAP_UNITS,
+        "max_tokens": MAX_TOKENS, "payload_bytes": PAYLOAD_LIMIT,
+        "opencode_subscription_attempt_units": 6, "opencode_retry_policy": "permanent six charged quota units per prompt",
+    }
     body: dict[str, Any] = {
         "schema": "sh08_matrix_manifest.v1",
         "version": VERSION,
         "created_at": _now(),
-        "approved_scope": {"cases": MAX_CASES, "repetitions": 2, "pairs": [list(pair) for pair in PAIR_ORDER], "smoke_cases": 6, "smoke_repetition": 1},
+        "experiment_id": RESTRICTED_EXPERIMENT_ID if restricted else None,
+        "muse_effort": chosen_effort,
+        "approved_scope": {"cases": MAX_CASES, "repetitions": 2, "pairs": approved_pairs, "smoke_cases": 6, "smoke_repetition": 1},
         "source": {"corpus_manifest": str(Path(corpus_path).resolve()), "corpus_manifest_sha256": _sha_file(Path(corpus_path)), "input_root": str(actual_root), "sources": {key: {"raw_sha256": source_meta[key].get("sha256"), "parsed_sha256": source_meta[key].get("parsed_sha256"), "metadata": source_meta[key]} for key in sorted(source_meta)}, "source_snapshots_sha256": canonical_hash(source_snapshots)},
         "profile": {"path": str(Path(profile_file).resolve()), "sha256": _sha_file(Path(profile_file)), "identity": identity, "model": {"path": str(model.resolve()), "metadata": _model_fingerprint(model)[2]}},
         "selection": selection,
         "selection_sha256": selection_sha,
         "batches": batches,
         "code_hashes": code_hashes,
-        "approval": {"path": str(approval_path), "sha256": _sha_file(approval_path)},
+        "approval": {"path": str(approval_file), "sha256": _sha_file(approval_file)},
         "runtime": {"python": platform.python_version(), "system": platform.system(), "implementation": sys.implementation.name},
         "prompts": {"version": PROMPT_VERSION, "generator_system": GENERATOR_SYSTEM_PROMPT, "arbiter_system": ARBITER_SYSTEM_PROMPT, "generation_schema": generation_schema(), "review_schema": review_schema()},
-        "full_specs": deepcopy(DEFAULT_SPECS),
+        "full_specs": prepared_specs,
         "opencode_required_version": OPENCODE_REQUIRED_VERSION,
-        "limits": {"direct_api_cap_usd": str(DIRECT_CAP), "subscription_conservative_attempt_units": SUBSCRIPTION_CAP_UNITS, "total_attempt_units": TOTAL_CAP_UNITS, "max_tokens": MAX_TOKENS, "payload_bytes": PAYLOAD_LIMIT, "opencode_subscription_attempt_units": 6, "opencode_retry_policy": "permanent six charged quota units per prompt"},
+        "limits": approved_limits,
         "baselines_snapshot_sha256": canonical_hash({"planner": asdict(planner), "sources": source_snapshots}),
-        "user_consent": {"no_byok_confirmed": True, "muse_data_approved": True, "placeholder": False, "approved_source": deepcopy(consent.get("approved_source", "user conversation; docs/sh08_live_protocol.json")), "approved_scope": deepcopy(consent.get("approved_scope", "SH08 matrix"))},
+        "user_consent": {"no_byok_confirmed": True, "muse_data_approved": True, "placeholder": False, "approved_source": deepcopy(consent.get("approved_source", "user conversation; docs/sh08_live_protocol.json")), "approved_scope": deepcopy(consent.get("approved_scope", "SH08 matrix")), **({"prior_approval_reference": deepcopy(consent["prior_approval_reference"])} if restricted and "prior_approval_reference" in consent else {})},
         "tariffs": tariffs,
         "carryover": carryover,
-        "receipt_import": _receipt_import_config(approval),
+        "receipt_import": {"enabled": False} if restricted else _receipt_import_config(approval),
         "status": "prepared",
     }
+    if restricted and isinstance(restricted_reference, Mapping):
+        body["selection_reference"] = restricted_reference["selection_reference"]
+        body["budget_authorization"] = deepcopy(approval["budget_authorization"])
+        body["pilot_remainder"] = deepcopy(approval["budgets"]["pilot_remainder"])
+        execution = approval.get("execution")
+        body["execution_authorized"] = execution.get("execution_authorized") if isinstance(execution, Mapping) else None
     body["checksum"] = canonical_hash(body)
     imported_ledger = _import_receipts(approval, body)
     output_dir.mkdir(parents=True)
@@ -515,6 +628,8 @@ def prepare_manifest(
     profile_path: Path | None = None,
     model_path: Path | None = None,
     input_root: Path | None = None,
+    approval_path: Path | None = None,
+    muse_effort: str | None = None,
 ) -> dict[str, Any]:
     """Build a fresh manifest while holding the prepare lock."""
     output_dir = Path(output_dir)
@@ -529,11 +644,22 @@ def prepare_manifest(
             profile_path=profile_path,
             model_path=model_path,
             input_root=input_root,
+            approval_path=approval_path,
+            muse_effort=muse_effort,
         )
 
 
 def _specs() -> dict[str, dict[str, Any]]:
     return deepcopy(MODEL_SPECS)
+
+
+def _validate_restricted_output_dir(approval: Mapping[str, Any], effort: str, output_dir: Path) -> None:
+    permitted = approval.get("permitted_output_dirs")
+    permitted_path = permitted.get(effort) if isinstance(permitted, Mapping) else None
+    if not isinstance(permitted_path, str) or not permitted_path:
+        raise MatrixError("restricted permitted output directory is missing")
+    if Path(output_dir).resolve() != _reference_path(permitted_path).resolve():
+        raise MatrixError("restricted output directory is not permitted for this Muse effort")
 
 
 def _read_manifest(output_dir: Path) -> dict[str, Any]:
@@ -559,6 +685,24 @@ def _read_manifest(output_dir: Path) -> dict[str, Any]:
     current_approval = _load_json(Path(approval['path']), 'approved matrix protocol')
     if not isinstance(current_approval, Mapping) or manifest.get("carryover") != _carryover(current_approval):
         raise MatrixError("manifest carryover differs from current approved retry")
+    restricted = manifest.get("experiment_id") == RESTRICTED_EXPERIMENT_ID
+    if restricted:
+        _validate_restricted_protocol(current_approval, selection)
+        if manifest.get("muse_effort") not in {"low", "high"}:
+            raise MatrixError("manifest Muse effort is invalid")
+        _validate_restricted_output_dir(current_approval, manifest["muse_effort"], output_dir)
+        expected_specs = effective_specs(manifest["muse_effort"])
+        if manifest.get("full_specs") != expected_specs:
+            raise MatrixError("restricted manifest model specifications differ from effective specifications")
+        reference = current_approval["selection_reference"]
+        if manifest.get("selection_reference") != {"path": str(_reference_path(reference["path"])), "sha256": reference["sha256"]}:
+            raise MatrixError("manifest restricted selection reference differs from approved protocol")
+        execution = current_approval.get("execution")
+        expected_execution_authorized = execution.get("execution_authorized") if isinstance(execution, Mapping) else None
+        if manifest.get("execution_authorized") != expected_execution_authorized:
+            raise MatrixError("manifest execution authorization differs from approved protocol")
+    elif manifest.get("experiment_id") is not None:
+        raise MatrixError("unknown experiment ID")
     approved_import = _receipt_import_config(current_approval) if isinstance(current_approval, Mapping) else {"enabled": False}
     if manifest.get("receipt_import", {"enabled": False}) != approved_import:
         raise MatrixError("manifest receipt import differs from approved protocol")
@@ -577,15 +721,17 @@ def _read_manifest(output_dir: Path) -> dict[str, Any]:
             snapshot_path = _safe_path(source_manifest_path.parent, metadata['json_path'])
             if canonical_hash(_load_json(snapshot_path, 'current source copy')) != source['parsed_sha256']:
                 raise MatrixError(f'current source copy mismatch: {source_id}')
-    if manifest.get("full_specs") != MODEL_SPECS:
+    if not restricted and manifest.get("full_specs") != MODEL_SPECS:
         raise MatrixError("manifest model specifications differ from immutable specifications")
     if manifest.get("opencode_required_version") != OPENCODE_REQUIRED_VERSION:
         raise MatrixError("manifest OpenCode version differs from immutable protocol")
     scope = manifest.get("approved_scope")
-    if not isinstance(scope, Mapping) or scope.get("cases") != 60 or scope.get("repetitions") != 2 or scope.get("pairs") != [list(pair) for pair in PAIR_ORDER] or scope.get("smoke_cases") != 6 or scope.get("smoke_repetition") != 1:
+    expected_pairs = [["muse", "sol"]] if restricted else [list(pair) for pair in PAIR_ORDER]
+    if not isinstance(scope, Mapping) or scope.get("cases") != 60 or scope.get("repetitions") != 2 or scope.get("pairs") != expected_pairs or scope.get("smoke_cases") != 6 or scope.get("smoke_repetition") != 1:
         raise MatrixError("manifest scope does not match fixed SH08 protocol")
     limits = manifest.get("limits")
-    if not isinstance(limits, Mapping) or limits.get("max_tokens") != MAX_TOKENS or limits.get("payload_bytes") != PAYLOAD_LIMIT or limits.get("direct_api_cap_usd") != str(DIRECT_CAP) or limits.get("subscription_conservative_attempt_units") != SUBSCRIPTION_CAP_UNITS or limits.get("total_attempt_units") != TOTAL_CAP_UNITS:
+    expected_direct, expected_sub, expected_total = ("1.50", 75, 150) if restricted else (str(DIRECT_CAP), SUBSCRIPTION_CAP_UNITS, TOTAL_CAP_UNITS)
+    if not isinstance(limits, Mapping) or limits.get("max_tokens") != MAX_TOKENS or limits.get("payload_bytes") != PAYLOAD_LIMIT or limits.get("direct_api_cap_usd") != expected_direct or limits.get("subscription_conservative_attempt_units") != expected_sub or limits.get("total_attempt_units") != expected_total:
         raise MatrixError("manifest limits do not match fixed SH08 protocol")
     prompts = manifest.get("prompts")
     if not isinstance(prompts, Mapping) or prompts.get("version") != PROMPT_VERSION or prompts.get("generator_system") != GENERATOR_SYSTEM_PROMPT or prompts.get("arbiter_system") != ARBITER_SYSTEM_PROMPT or prompts.get("generation_schema") != generation_schema() or prompts.get("review_schema") != review_schema():
@@ -653,6 +799,8 @@ def _validate_ledger(ledger: Mapping[str, Any], manifest: Mapping[str, Any] | No
         spec = specs.get(model_key) if isinstance(specs, Mapping) else None
         if not isinstance(spec, Mapping):
             raise MatrixError("ledger model key is invalid")
+        if descriptor.get("spec") != spec:
+            raise MatrixError("ledger descriptor model specification mismatch")
         if row.get("quota_units") != spec.get("quota_units") or row.get("subscription") is not spec.get("subscription"):
             raise MatrixError("ledger reservation does not match model weights")
         for field in ("reservation_usd", "cost_usd"):
@@ -771,6 +919,8 @@ _RECEIPT_REQUEST_ID = "47abdbe1c9eb6e4435c1058fd611cfbcbeb467c4e25d8dc980be4f26c
 def _receipt_import_config(approval: Mapping[str, Any]) -> dict[str, Any]:
     value = approval.get("receipt_import")
     if value is None:
+        return {"enabled": False}
+    if isinstance(value, Mapping) and set(value) == {"enabled"} and value.get("enabled") is False:
         return {"enabled": False}
     if not isinstance(value, Mapping) or value.get("enabled") is not True:
         raise MatrixError("approved receipt import is invalid")
@@ -914,6 +1064,10 @@ def _import_receipts(approval: Mapping[str, Any], new_manifest: Mapping[str, Any
         if source_manifest.get(field) != new_manifest.get(field):
             raise MatrixError(f"receipt source differs in frozen field: {field}")
     _validate_ledger(source_ledger, source_manifest)
+    source_specs = source_manifest.get("full_specs")
+    source_prompts = source_manifest.get("prompts")
+    if not isinstance(source_specs, Mapping) or not isinstance(source_prompts, Mapping):
+        raise MatrixError("receipt source model or prompt contract is missing")
     requests = source_ledger.get("requests")
     if not isinstance(requests, dict):
         raise MatrixError("receipt source requests are invalid")
@@ -936,17 +1090,19 @@ def _import_receipts(approval: Mapping[str, Any], new_manifest: Mapping[str, Any
         if not isinstance(descriptor, dict) or canonical_hash(descriptor) != key:
             raise MatrixError("receipt source descriptor key mismatch")
         model_key = descriptor.get("model_key")
-        spec = MODEL_SPECS.get(model_key)
+        spec = source_specs.get(model_key)
         if not isinstance(spec, Mapping) or descriptor.get("spec") != spec:
             raise MatrixError("receipt source descriptor model specification changed")
-        if descriptor.get("rep") not in (1, 2) or descriptor.get("stage") not in {"generation", "review", "repair", "recheck"} or descriptor.get("generator") not in MODEL_SPECS:
+        if descriptor.get("rep") not in (1, 2) or descriptor.get("stage") not in {"generation", "review", "repair", "recheck"} or descriptor.get("generator") not in source_specs:
             raise MatrixError("receipt source logical identity is invalid")
         if descriptor.get("stage") in {"generation", "repair"} and descriptor.get("arbiter") is not None:
             raise MatrixError("receipt source generation arbiter is invalid")
-        if descriptor.get("stage") in {"review", "recheck"} and descriptor.get("arbiter") not in {"luna", "deepseek", "sol"}:
+        if descriptor.get("stage") in {"review", "recheck"} and descriptor.get("arbiter") not in source_specs:
             raise MatrixError("receipt source review arbiter is invalid")
-        system_expected = GENERATOR_SYSTEM_PROMPT if descriptor.get("stage") in {"generation", "repair"} else ARBITER_SYSTEM_PROMPT
-        schema_expected = generation_schema() if descriptor.get("stage") in {"generation", "repair"} else review_schema()
+        system_expected = source_prompts.get("generator_system") if descriptor.get("stage") in {"generation", "repair"} else source_prompts.get("arbiter_system")
+        schema_expected = source_prompts.get("generation_schema") if descriptor.get("stage") in {"generation", "repair"} else source_prompts.get("review_schema")
+        if not isinstance(system_expected, str) or not isinstance(schema_expected, dict):
+            raise MatrixError("receipt source prompt contract is invalid")
         if descriptor.get("system_prompt") != system_expected or descriptor.get("schema") != schema_expected or descriptor.get("payload_bytes") != _payload_size(system_expected, descriptor.get("user_prompt", ""), schema_expected):
             raise MatrixError("receipt source context prompt changed")
         if row.get("status") == "complete":
@@ -979,6 +1135,10 @@ class _Admission:
     def __init__(self, output_dir: Path, manifest: Mapping[str, Any], ledger: dict[str, Any], specs: Mapping[str, Mapping[str, Any]], *, report_only: bool = False) -> None:
         self.output_dir, self.manifest, self.ledger, self.specs = output_dir, manifest, ledger, specs
         self.report_only = report_only
+        limits = manifest.get("limits")
+        self.direct_cap = Decimal(str(limits.get("direct_api_cap_usd", DIRECT_CAP))) if isinstance(limits, Mapping) else DIRECT_CAP
+        self.subscription_cap = int(limits.get("subscription_conservative_attempt_units", SUBSCRIPTION_CAP_UNITS)) if isinstance(limits, Mapping) else SUBSCRIPTION_CAP_UNITS
+        self.total_cap = int(limits.get("total_attempt_units", TOTAL_CAP_UNITS)) if isinstance(limits, Mapping) else TOTAL_CAP_UNITS
 
     def _totals(self) -> tuple[Decimal, int, int, int]:
         carryover = self.manifest.get("carryover", _zero_carryover())
@@ -1029,10 +1189,12 @@ class _Admission:
         units = int(spec.get("quota_units", 0))
         subscription = bool(spec.get("subscription"))
         known, pending, sub, total = self._totals()
-        if known + pending + reserve > DIRECT_CAP:
+        if known + pending + reserve > self.direct_cap:
             raise BudgetLimited("direct API cap reservation would be exceeded")
-        if sub + (units if subscription else 0) > SUBSCRIPTION_CAP_UNITS or total + units > TOTAL_CAP_UNITS:
+        if sub + (units if subscription else 0) > self.subscription_cap or total + units > self.total_cap:
             raise BudgetLimited("quota reservation would be exceeded")
+        if descriptor.get("spec") != spec:
+            raise MatrixError("request model specification differs from manifest")
         row = {"key": key, "status": "pending", "descriptor": deepcopy(descriptor), "started_at": _now(), "reservation_usd": str(reserve), "cost_usd": "0", "quota_units": units, "subscription": subscription}
         self.ledger["requests"][key] = row
         _save_ledger(self.output_dir, self.ledger)
@@ -1133,6 +1295,99 @@ def _response_text(response: Mapping[str, Any] | None) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _prompt_payload(user_prompt: Any) -> Mapping[str, Any] | None:
+    if not isinstance(user_prompt, str) or "Input JSON:\n" not in user_prompt:
+        return None
+    try:
+        payload = json.loads(user_prompt.split("Input JSON:\n", 1)[1])
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _normalized_candidate(value: Any) -> str | None:
+    return " ".join(value.split()) if isinstance(value, str) else None
+
+
+def _same_recheck_conditions(
+    branch: Mapping[str, Any],
+    prospective_descriptor: Mapping[str, Any],
+    ledger: Mapping[str, Any],
+) -> bool:
+    """Return whether this repair can reuse its successful initial review."""
+    if branch.get("stage") != "review" or branch.get("status") != "complete" or branch.get("verdict") != "revise":
+        return False
+    if not branch.get("local_fit", {}).get("fits"):
+        return False
+    repair = branch.get("repair")
+    if not isinstance(repair, Mapping) or repair.get("status") != "candidate" or not repair.get("local_fit", {}).get("fits"):
+        return False
+    old_candidate = _normalized_candidate(branch.get("candidate"))
+    new_candidate = _normalized_candidate(repair.get("text"))
+    if old_candidate is None or new_candidate is None or old_candidate != new_candidate:
+        return False
+    if branch.get("local_fit", {}).get("length") != repair.get("local_fit", {}).get("length"):
+        return False
+
+    receipt_id = branch.get("review_receipt_id")
+    requests = ledger.get("requests") if isinstance(ledger, Mapping) else None
+    receipt = requests.get(receipt_id) if isinstance(requests, Mapping) and isinstance(receipt_id, str) else None
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "complete":
+        return False
+    original_descriptor = receipt.get("descriptor")
+    if (not isinstance(original_descriptor, Mapping) or original_descriptor.get("stage") != "review"
+            or prospective_descriptor.get("stage") != "recheck" or canonical_hash(dict(original_descriptor)) != receipt_id):
+        return False
+    for field in ("rep", "generator", "arbiter"):
+        if branch.get(field) != original_descriptor.get(field) or branch.get(field) != prospective_descriptor.get(field):
+            return False
+    for field in ("rep", "generator", "arbiter", "model_key", "spec", "system_prompt", "schema"):
+        if original_descriptor.get(field) != prospective_descriptor.get(field):
+            return False
+    original_payload = _prompt_payload(original_descriptor.get("user_prompt"))
+    prospective_payload = _prompt_payload(prospective_descriptor.get("user_prompt"))
+    if original_payload is None or prospective_payload is None:
+        return False
+    original_prompt = original_descriptor.get("user_prompt")
+    prospective_prompt = prospective_descriptor.get("user_prompt")
+    if (not isinstance(original_prompt, str) or not isinstance(prospective_prompt, str)
+            or original_prompt.split("Input JSON:\n", 1)[0] != prospective_prompt.split("Input JSON:\n", 1)[0]):
+        return False
+    if original_payload.get("version") != prospective_payload.get("version") or original_payload.get("schema") != prospective_payload.get("schema"):
+        return False
+    if original_payload.get("context") != prospective_payload.get("context"):
+        return False
+    original_targets = original_payload.get("targets")
+    if not isinstance(original_targets, list) or not isinstance(prospective_payload.get("targets"), list):
+        return False
+    prospective_targets = prospective_payload["targets"]
+    if len(original_targets) != len(prospective_targets):
+        return False
+    target_id = branch.get("case_id")
+    if not isinstance(target_id, str):
+        return False
+    if any(not isinstance(item, Mapping) for item in original_targets + prospective_targets):
+        return False
+    comparable_original = []
+    comparable_prospective = []
+    for original_target, prospective_target in zip(original_targets, prospective_targets):
+        original_item = dict(original_target)
+        prospective_item = dict(prospective_target)
+        if original_item.get("cue_id") == target_id and prospective_item.get("cue_id") == target_id:
+            if (_normalized_candidate(original_item.get("candidate")) != old_candidate
+                    or _normalized_candidate(prospective_item.get("candidate")) != new_candidate):
+                return False
+            original_item.pop("candidate", None)
+            prospective_item.pop("candidate", None)
+        comparable_original.append(original_item)
+        comparable_prospective.append(prospective_item)
+    if comparable_original != comparable_prospective:
+        return False
+    if not any(item.get("cue_id") == target_id for item in comparable_original):
+        return False
+    return True
+
+
 def _write_outputs(output_dir: Path, manifest: Mapping[str, Any], ledger: Mapping[str, Any], branches: Mapping[str, dict[str, Any]], *, status: str) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     cases = _case_map(manifest)
@@ -1156,15 +1411,17 @@ def _mark_pending(manifest: Mapping[str, Any], branches: dict[str, dict[str, Any
     """Make budget-stopped work visible instead of silently truncating it."""
     repetitions = (1,) if smoke else (1, 2)
     cases = _case_map(manifest)
+    active_pairs = _active_pairs(manifest)
+    generators = _active_generators(manifest)
     for repetition in repetitions:
         for batch in manifest["batches"]:
             for case_id in batch["case_ids"]:
                 if case_id not in cases:
                     continue
-                for generator in ("luna", "deepseek", "gemini", "muse"):
+                for generator in generators:
                     key = f"{repetition}:generation:{generator}:{batch['batch_id']}:{case_id}"
                     branches.setdefault(key, {"case_id": case_id, "rep": repetition, "stage": "generation", "generator": generator, "batch": batch["batch_id"], "status": "pending", "reason": "run_budget_limited"})
-                for generator, arbiter in PAIR_ORDER:
+                for generator, arbiter in active_pairs:
                     key = f"{repetition}:review:{generator}:{arbiter}:{batch['batch_id']}:{case_id}"
                     branches.setdefault(key, {"case_id": case_id, "rep": repetition, "stage": "review", "generator": generator, "arbiter": arbiter, "batch": batch["batch_id"], "status": "pending", "reason": "run_budget_limited"})
 
@@ -1199,6 +1456,7 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
 def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], *, status: str) -> dict[str, Any]:
     requests = [value for value in ledger.get("requests", {}).values() if isinstance(value, Mapping)]
     cases = _case_map(manifest)
+    active_pairs = _active_pairs(manifest)
     eligible_ids = {case_id for case_id, case in cases.items() if case.get("max_chars", 0) > 0 and case.get("status") != "invalid"}
     zero_count = sum(case.get("max_chars") == 0 and case.get("status") != "invalid" for case in cases.values())
     invalid_count = sum(case.get("status") == "invalid" for case in cases.values())
@@ -1208,7 +1466,7 @@ def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequen
     accepted_counts: dict[str, int] = {}
     firstpass_verdicts: Counter[str] = Counter()
     for rep in (1, 2):
-        for generator, arbiter in PAIR_ORDER:
+        for generator, arbiter in active_pairs:
             pair = f"{generator}->{arbiter}"
             counts = {"accepted": 0, "declined": 0, "missing": 0, "unresolved": 0, "cannot_shorten": 0, "processed": 0, "zero": 0, "invalid": 0, "denominator": MAX_CASES}
             for case_id in cases:
@@ -1247,7 +1505,7 @@ def _report(manifest: Mapping[str, Any], ledger: Mapping[str, Any], rows: Sequen
     coverage: dict[str, dict[str, int]] = {}
     finalaccepted_counts: dict[str, int] = defaultdict(int)
     for rep in (1, 2):
-        for generator, arbiter in PAIR_ORDER:
+        for generator, arbiter in active_pairs:
             key = f"rep{rep}:{generator}->{arbiter}"
             relevant = [branch for branch in all_branches if branch.get("stage") == "review" and branch.get("rep") == rep and branch.get("generator") == generator and branch.get("arbiter") == arbiter and branch.get("case_id") in eligible_ids and branch.get("status") == "complete" and branch.get("verdict") in {"accept", "revise"} and branch.get("candidate") and (branch.get("verdict") == "revise" or not branch.get("local_fit", {}).get("fits"))]
             for branch in all_branches:
@@ -1349,13 +1607,14 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
     with lock:
         manifest = _read_manifest(output_dir)
         ledger = _load_ledger(output_dir, fresh=False, manifest=manifest)
-        specs = _specs()
+        specs = deepcopy(manifest["full_specs"])
+        active_pairs = _active_pairs(manifest)
+        generators = _active_generators(manifest)
         cases = _case_map(manifest)
         selected_ids = list(manifest["selection"]["selected_case_ids"])
         requested_ids = selected_ids[:6] if smoke else selected_ids
         branches: dict[str, dict[str, Any]] = {}
         admission = _Admission(output_dir, manifest, ledger, specs, report_only=_report_only)
-        generators = ("luna", "deepseek", "gemini", "muse")
         init_reps = (1,) if smoke else (1, 2)
         for rep in init_reps:
             for batch in manifest["batches"]:
@@ -1364,7 +1623,7 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                         continue
                     for generator in generators:
                         branches[f"{rep}:generation:{generator}:{batch['batch_id']}:{case_id}"] = {"case_id": case_id, "rep": rep, "stage": "generation", "generator": generator, "batch": batch["batch_id"], "status": "pending"}
-                        for pair_generator, arbiter in PAIR_ORDER:
+                        for pair_generator, arbiter in active_pairs:
                             if pair_generator == generator:
                                 branches[f"{rep}:review:{generator}:{arbiter}:{batch['batch_id']}:{case_id}"] = {"case_id": case_id, "rep": rep, "stage": "review", "generator": generator, "arbiter": arbiter, "batch": batch["batch_id"], "status": "pending"}
         candidates: dict[tuple[int, str, str], dict[str, dict[str, Any]]] = {}
@@ -1419,7 +1678,7 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                     _mark_pending(manifest, branches, smoke=smoke)
                     return _write_outputs(output_dir, manifest, ledger, branches, status='reported_incomplete' if _report_only else stop_reason)
                 # Every first-pass judge follows every generation, before repairs.
-                for generator, arbiter in PAIR_ORDER:
+                for generator, arbiter in active_pairs:
                     current = candidates.get((repetition, batch["batch_id"], generator), {})
                     target_rows = [row for row in batch_ids if current.get(row, {}).get("status") == "candidate"]
                     for case_id in batch_ids:
@@ -1482,7 +1741,12 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                         continue
                     case = cases[case_id]
                     fit = branch.get("local_fit", {})
-                    targets.append({"cue_id": case_id, "original": case["original"], "max_chars": case["max_chars"], "length_basis": case["length_basis"], "prior_candidate": branch["candidate"], "feedback": f"local length {fit.get('length')} exceeds limit {case['max_chars']}; " + " ".join(branch.get("issues", [])) + " " + branch.get("advice", "")})
+                    feedback = [f"local length {fit.get('length')}; limit {case['max_chars']}"]
+                    feedback.extend(issue for issue in branch.get("issues", []) if isinstance(issue, str))
+                    advice = branch.get("advice")
+                    if isinstance(advice, str) and advice:
+                        feedback.append(advice)
+                    targets.append({"cue_id": case_id, "original": case["original"], "max_chars": case["max_chars"], "length_basis": case["length_basis"], "prior_candidate": branch["candidate"], "rejected_candidates": [branch["candidate"]], "feedback": " ".join(feedback)})
                 if not targets:
                     continue
                 prompt = build_generation_prompt(context, targets)
@@ -1525,6 +1789,19 @@ async def run_matrix(output_dir: Path, backend: Backend, *, smoke: bool = False,
                     case = cases[branch["case_id"]]
                     review_targets.append({"cue_id": branch["case_id"], "original": case["original"], "candidate": repair["text"], "max_chars": case["max_chars"], "actual_chars": repair["local_fit"]["length"], "length_basis": case["length_basis"]})
                     eligible_rechecks.append(branch)
+                prospective_recheck_descriptor = _request_descriptor(manifest, rep=rep, stage="recheck", generator=generator, arbiter=arbiter, batch=batch_id + ":repair", system=ARBITER_SYSTEM_PROMPT, user=build_review_prompt(context, review_targets), schema=review_schema(), origin=canonical_hash({branch["case_id"]: branch["repair"]["candidate_hash"] for branch in eligible_rechecks}))
+                matched: list[dict[str, Any]] = []
+                for branch in eligible_rechecks:
+                    if _same_recheck_conditions(branch, prospective_recheck_descriptor, ledger):
+                        repair = branch["repair"]
+                        repair["status"] = "unchanged_proposal"
+                        repair["recheck"] = {"status": "skipped_identical_proposal", "accepted": False, "reason": "repair_did_not_change_proposal", "prior_review_receipt_id": branch["review_receipt_id"]}
+                        branch["repair_status"] = "unresolved"
+                        branch["repair_reason"] = "repair_did_not_change_proposal"
+                        matched.append(branch)
+                if matched:
+                    eligible_rechecks = [branch for branch in eligible_rechecks if branch not in matched]
+                    review_targets = [target for target in review_targets if target["cue_id"] not in {branch["case_id"] for branch in matched}]
                 if review_targets:
                     review_prompt = build_review_prompt(context, review_targets)
                     review_descriptor = _request_descriptor(manifest, rep=rep, stage="recheck", generator=generator, arbiter=arbiter, batch=batch_id + ":repair", system=ARBITER_SYSTEM_PROMPT, user=review_prompt, schema=review_schema(), origin=canonical_hash({branch["case_id"]: branch["repair"]["candidate_hash"] for branch in eligible_rechecks}))
@@ -1562,6 +1839,8 @@ def _cli() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--output-dir", type=Path, required=True)
+    prepare.add_argument("--protocol", type=Path)
+    prepare.add_argument("--muse-effort", choices=("low", "high"), default="low")
     run = sub.add_parser("run")
     run.add_argument("--output-dir", type=Path, required=True)
     run.add_argument("--smoke", action="store_true")
@@ -1571,7 +1850,7 @@ def _cli() -> int:
     report.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "prepare":
-        prepare_manifest(args.output_dir)
+        prepare_manifest(args.output_dir, approval_path=args.protocol, muse_effort=args.muse_effort)
         return 0
     if args.command == "report":
         report_matrix(args.output_dir)
@@ -1580,14 +1859,26 @@ def _cli() -> int:
         return 2
     from utils.sh08_matrix_transport import MatrixBackend
     async def execute() -> dict[str, Any]:
-        async with MatrixBackend(allow_muse_data=True, openrouter_no_byok=True) as backend:
-            _read_manifest(args.output_dir)
-            _load_ledger(args.output_dir, manifest=_read_manifest(args.output_dir))
-            for model_key in MODEL_SPECS:
+        try:
+            manifest = _read_manifest(args.output_dir)
+        except (BudgetLimited, UnknownRequest, MatrixError):
+            # Preserve the context lifecycle even when validation fails before run.
+            async with MatrixBackend(allow_muse_data=True, openrouter_no_byok=True):
+                pass
+            raise
+        if manifest.get("experiment_id") == RESTRICTED_EXPERIMENT_ID and manifest.get("execution_authorized") is not True:
+            raise MatrixError("restricted execution is not authorized by the approved protocol")
+        effort = manifest.get("muse_effort", "low")
+        async with MatrixBackend(allow_muse_data=True, openrouter_no_byok=True, muse_effort=effort) as backend:
+            _load_ledger(args.output_dir, manifest=manifest)
+            active_models = tuple(dict.fromkeys(model for pair in _active_pairs(manifest) for model in pair))
+            for model_key in active_models:
                 result = backend.preflight(model_key)
                 if not result.get('ok'):
                     raise MatrixError(f"local preflight failed for {model_key}: {result.get('error')}")
-            return await run_matrix(args.output_dir, backend, smoke=args.smoke)
+            from utils.shortening_html import live_html_report
+            with live_html_report(args.output_dir):
+                return await run_matrix(args.output_dir, backend, smoke=args.smoke)
     try:
         result = asyncio.run(execute())
     except (BudgetLimited, UnknownRequest, MatrixError):

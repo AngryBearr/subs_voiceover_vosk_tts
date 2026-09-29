@@ -492,7 +492,9 @@ def main(argv: list[str] | None = None) -> int:
             _write(args.output_dir / "manifest.json", manifest)
             print(json.dumps(manifest["selection"], ensure_ascii=False, sort_keys=True))
             return 0
-        return asyncio.run(_execute(args, items, plans, target_ids))
+        from utils.shortening_html import live_html_report
+        with live_html_report(args.output_dir):
+            return asyncio.run(_execute(args, items, plans, target_ids))
     except Exception as exc:
         print(f"shortening failed: {_error_type(exc)}", file=sys.stderr)
         return 1

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import hashlib
 import json
 import math
 import os
+import sys
 import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -20,6 +23,7 @@ from filelock import FileLock, Timeout
 from utils.json_to_srt import json_to_srt
 from utils.llm_types import CallRecord, DetailedResponse
 from utils.length_check import check_length, prepare_length_text
+from utils.opencode_transport import OpenCodePromptUsage
 from utils.shortening_costs import estimate_record_cost, project_500, summarize_costs
 from utils.shortening_plan import (
     CuePlan,
@@ -54,6 +58,7 @@ from utils.shortening_resume import (
     RUNNER_ALGORITHM_VERSION,
 )
 from utils.shortening_review import build_review_state
+from utils.shortening_budget import BudgetPolicy, BudgetStop
 
 # Compatibility aliases used by the pre-SH04 experiment runner.  The durable
 # implementations are shared so legacy consumers retain their public shape.
@@ -76,6 +81,7 @@ class RunConfig:
     max_repairs: int = 1
     max_context_chars: int = 20000
     length_tools: bool = False
+    scheduling: str = "stage_major"
 
     def __post_init__(self) -> None:
         for name in ("gen_batch_size", "review_batch_size", "max_context_chars"):
@@ -86,10 +92,16 @@ class RunConfig:
             raise ValueError("max_repairs must be between 0 and 2")
         if not isinstance(self.length_tools, bool):
             raise TypeError("length_tools must be bool")
+        if not isinstance(self.scheduling, str) or self.scheduling not in {"stage_major", "windowed"}:
+            raise ValueError("scheduling must be stage_major or windowed")
 
 
 RequestFunction = Callable[[ModelSpec, str, str, dict[str, Any], bool], Awaitable[DetailedResponse]]
 OriginalTimingVerifier = Callable[[list[CuePlan], Path], dict[str, dict[str, Any]]]
+
+
+class GracefulStop(RuntimeError):
+    """Stop after the current durable response, before another live request."""
 
 
 def _atomic_text(path: Path, value: str) -> None:
@@ -128,13 +140,23 @@ def _source_hash(items: list[dict[str, Any]]) -> str:
     return canonical_hash(items)
 
 
-def _module_hashes() -> dict[str, str]:
+def _decimal_text(value: Any) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _module_hashes(*, primary: bool = False) -> dict[str, str]:
     names = (
         "shortening_runner.py", "shortening_resume.py", "shortening_plan.py",
         "shortening_prompts.py", "length_check.py", "text_metrics.py", "vosk_text.py",
         "shortening_costs.py",
         "shortening_review.py", "shortening_review_io.py",
     )
+    if primary:
+        names += ("shortening_budget.py", "openrouter_transport.py", "llm_types.py",
+                  "shortening_backends.py", "shorten_file.py")
     root = Path(__file__).parent
     return {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
@@ -147,8 +169,9 @@ def _manifest_contract(
     planner_config: PlannerConfig, run_config: RunConfig, generator: ModelSpec,
     arbiter: ModelSpec, report_metadata: dict[str, Any] | None,
     has_original_timing_verifier: bool,
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
-    return {
+    contract = {
         "source": {"items": copy.deepcopy(items), "sha256": _source_hash(items)},
         "initial_plans": [_plan_payload(plan) for plan in plans],
         "target_ids": list(target_ids),
@@ -165,12 +188,96 @@ def _manifest_contract(
             "review_schema": review_schema(),
         },
         "runner_algorithm_version": RUNNER_ALGORITHM_VERSION,
-        "module_sha256": _module_hashes(),
+        "module_sha256": _module_hashes(primary=budget_policy is not None),
     }
+    if budget_policy is not None:
+        contract["budget_policy"] = {
+            "limit_usd": _decimal_text(budget_policy.limit_usd),
+            "max_requests": budget_policy.max_requests,
+            "max_unknown_calls": budget_policy.max_unknown_calls,
+            "recovery": "at most one queued repair/recheck per failed cue when max_repairs=1",
+            "pricing_snapshot_id": budget_policy.snapshot["id"],
+            "snapshot": copy.deepcopy(budget_policy.snapshot),
+        }
+    return contract
 
 
 def _target_context(items: list[dict[str, Any]], plans: list[CuePlan], ids: list[str], planner: PlannerConfig) -> list[dict[str, Any]]:
     return context_items(items, plans, ids, planner)
+
+
+def _normalize_candidate_whitespace(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _rejected_candidates(record: dict[str, Any]) -> list[str]:
+    candidates: dict[str, str] = {}
+    for event in record.get("history", []):
+        if not isinstance(event, dict) or event.get("stage") not in {"generation", "repair"}:
+            continue
+        if event.get("generator_status") != "ok" or event.get("error") is not None:
+            continue
+        candidate = event.get("candidate")
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        normalized = _normalize_candidate_whitespace(candidate)
+        candidates.pop(normalized, None)
+        candidates[normalized] = candidate
+    return list(candidates.values())[-3:]
+
+
+def _review_fingerprint(
+    context: list[dict[str, Any]], targets: list[dict[str, Any]], cue_id: str,
+    arbiter: ModelSpec,
+) -> str:
+    scoped_targets = copy.deepcopy(targets)
+    target = next(target for target in scoped_targets if target["cue_id"] == cue_id)
+    target["candidate"] = _normalize_candidate_whitespace(target["candidate"])
+    return canonical_hash({
+        "context": context,
+        "target": target,
+        "targets": scoped_targets,
+        "arbiter": asdict(arbiter),
+        "arbiter_system_prompt": ARBITER_SYSTEM_PROMPT,
+        "review_schema": review_schema(),
+        "prompt_version": PROMPT_VERSION,
+    })
+
+
+def _successful_repair_candidate(record: dict[str, Any]) -> bool:
+    candidate = record.get("candidate")
+    if not isinstance(candidate, str):
+        return False
+    for event in reversed(record.get("history", [])):
+        if not isinstance(event, dict) or event.get("stage") not in {"generation", "repair"}:
+            continue
+        return (
+            event.get("stage") == "repair"
+            and event.get("generator_status") == "ok"
+            and event.get("error") is None
+            and event.get("candidate") == candidate
+        )
+    return False
+
+
+def _matching_review_event(
+    record: dict[str, Any], candidate: str, fingerprint: str,
+) -> tuple[int, dict[str, Any]] | None:
+    for index, event in enumerate(record.get("history", [])):
+        if not isinstance(event, dict) or event.get("stage") not in {"review", "recheck"}:
+            continue
+        judgment = event.get("judgment")
+        if not isinstance(judgment, dict) or judgment.get("verdict") != "revise":
+            continue
+        prior_candidate = event.get("candidate")
+        if (
+            event.get("review_fingerprint") != fingerprint
+            or not isinstance(prior_candidate, str)
+            or _normalize_candidate_whitespace(prior_candidate) != _normalize_candidate_whitespace(candidate)
+        ):
+            continue
+        return index, event
+    return None
 
 
 def _plan_payload(plan: CuePlan) -> dict[str, Any]:
@@ -226,7 +333,8 @@ def _request_log(output_dir: Path, request_id: str, stage: str, model: ModelSpec
                  target_ids: list[str], system: str, user: str, schema: dict[str, Any],
                  allow_tool: bool, state: str, text: str | None = None, error: str | None = None,
                  started_at: str | None = None, elapsed_sec: float | None = None,
-                 call_count: int | None = None, failure: dict[str, Any] | None = None) -> None:
+                  call_count: int | None = None, failure: dict[str, Any] | None = None,
+                  reservation: dict[str, Any] | None = None) -> None:
     # Prompts are saved for reproduction, but credentials and model reasoning are
     # never put into this record; the response field contains only final text.
     payload: dict[str, Any] = {
@@ -235,7 +343,9 @@ def _request_log(output_dir: Path, request_id: str, stage: str, model: ModelSpec
     }
     if state == "start":
         payload.update({"system_prompt": system, "user_prompt": user, "output_schema": schema,
-                        "allow_tool": allow_tool})
+                         "allow_tool": allow_tool})
+        if reservation is not None:
+            payload["reservation"] = copy.deepcopy(reservation)
     else:
         payload.update({"text": text, "error": error, "call_count": call_count or 0,
                         "failure": copy.deepcopy(failure)})
@@ -246,13 +356,51 @@ def _request_log(output_dir: Path, request_id: str, stage: str, model: ModelSpec
     append_jsonl(output_dir / "requests.jsonl", payload)
 
 
+def _permanent_openrouter_error(error: str | None) -> bool:
+    return (isinstance(error, str) and error.startswith("pricing_")) or error in {
+                     "http_permanent", "model_mismatch", "provider_identity_mismatch", "receipt_incomplete",
+                     "pricing_snapshot_schema", "pricing_snapshot_id", "pricing_snapshot_model",
+                     "invalid_model", "invalid_reasoning_effort", "invalid_timeout", "request_invalid",
+                     "api_key_required", "usage_cost"}
+
+
+def _is_reconciled_interruption(response: DetailedResponse, model: ModelSpec, policy: BudgetPolicy,
+                                all_calls: list[CallRecord], failures: list[dict[str, Any]]) -> bool:
+    if response.error != "interrupted_response" or response.text is not None or len(response.calls) != 1:
+        return False
+    call = response.calls[0]
+    models = policy.snapshot.get("models")
+    entry = models.get(model.model) if isinstance(models, dict) else None
+    usage = call.usage
+    cost = getattr(usage, "cost", None) if isinstance(usage, OpenCodePromptUsage) else None
+    try:
+        valid_cost = (isinstance(cost, (int, float)) and not isinstance(cost, bool)
+                      and math.isfinite(float(cost)) and cost >= 0)
+    except (OverflowError, ValueError):
+        valid_cost = False
+    if not isinstance(entry, dict) or not valid_cost:
+        return False
+    if (call.provider != "openrouter" or call.requested_model != model.model
+            or call.requested_variant != model.variant or call.variant != model.variant
+            or call.model not in {entry.get("model"), entry.get("canonical_model")}
+            or call.provider_name != entry.get("provider_name") or call.is_byok is not False
+            or not isinstance(call.generation_id, str) or not call.generation_id
+            or call.cost_source != "openrouter_generation" or call.status != "error"
+            or call.error != "interrupted_response"):
+        return False
+    summary = policy.summary(all_calls, failures)
+    return summary.get("status") != "blocked_unknown_cost" and summary.get("unknown_reserved_usd") == "0"
+
+
 async def _request(request_fn: RequestFunction, model: ModelSpec, system: str, user: str,
                    schema: dict[str, Any], allow_tool: bool, *, stage: str,
                    ids: list[str], output_dir: Path, stage_calls: dict[str, list[CallRecord]],
                    request_counts: dict[str, int], request_failures: list[dict[str, Any]],
                    journal: RunJournal | None = None,
                     records: list[dict[str, Any]] | None = None,
-                    replayed_counter: list[int] | None = None) -> DetailedResponse:
+                    replayed_counter: list[int] | None = None,
+                    budget_policy: BudgetPolicy | None = None,
+                    stop_requested: Callable[[], bool] | None = None) -> DetailedResponse:
     descriptor = {
         "stage": stage, "model": asdict(model), "target_ids": list(ids),
         "system_prompt": system, "user_prompt": user, "output_schema": schema,
@@ -263,7 +411,25 @@ async def _request(request_fn: RequestFunction, model: ModelSpec, system: str, u
         assert step.response is not None
         if replayed_counter is not None:
             replayed_counter[0] += 1
+        if budget_policy is not None and model.provider == "openrouter" and step.response.error is not None:
+            all_calls = [call for stage_records in stage_calls.values() for call in stage_records]
+            if not _is_reconciled_interruption(step.response, model, budget_policy, all_calls, request_failures) and (
+                not budget_policy.max_unknown_calls or _permanent_openrouter_error(step.response.error)
+            ):
+                summary = budget_policy.summary(all_calls, request_failures)
+                summary.update({"status": "openrouter_response_error", "blocked_reason": step.response.error})
+                raise BudgetStop("openrouter_response_error", summary)
         return step.response
+    if stop_requested is not None and stop_requested():
+        raise GracefulStop("graceful_stop")
+    reservation: dict[str, Any] | None = None
+    if budget_policy is not None:
+        all_calls = [call for stage_records in stage_calls.values() for call in stage_records]
+        try:
+            reservation = budget_policy.admit(model, all_calls, request_failures)
+        except BudgetStop as exc:
+            exc.summary["status"] = exc.reason
+            raise
     if journal is not None:
         journal.before_live(records if records is not None else [])
     request_id = step.request_id if step is not None else uuid.uuid4().hex
@@ -271,7 +437,7 @@ async def _request(request_fn: RequestFunction, model: ModelSpec, system: str, u
     started = time.monotonic()
     request_counts[stage] = request_counts.get(stage, 0) + 1
     _request_log(output_dir, request_id, stage, model, ids, system, user, schema, allow_tool, "start",
-                 started_at=started_at, elapsed_sec=0.0)
+                 started_at=started_at, elapsed_sec=0.0, reservation=reservation)
     failure: dict[str, Any] | None = None
     try:
         response = await request_fn(model, system, user, schema, allow_tool)
@@ -287,6 +453,7 @@ async def _request(request_fn: RequestFunction, model: ModelSpec, system: str, u
                    "started_at": started_at,
                    "accounting_incomplete": not response_accounting_complete}
     for call_index, call in enumerate(response.calls):
+        call.request_id = request_id
         _record_call(call, stage=stage, target_ids=ids, model=model, output_dir=output_dir,
                      request_id=request_id, call_index=call_index)
         stage_calls.setdefault(stage, []).append(call)
@@ -299,6 +466,30 @@ async def _request(request_fn: RequestFunction, model: ModelSpec, system: str, u
                   response.text if response.error is None else None, response.error,
                   started_at=started_at, elapsed_sec=elapsed,
                   call_count=len(response.calls), failure=failure)
+    if budget_policy is not None and model.provider == "openrouter":
+        summary = budget_policy.summary(
+            [call for stage_records in stage_calls.values() for call in stage_records], request_failures,
+        )
+        if response.error is not None and (not budget_policy.max_unknown_calls or _permanent_openrouter_error(response.error)):
+            summary.update({"status": "openrouter_response_error", "blocked_reason": response.error})
+            raise BudgetStop("openrouter_response_error", summary)
+        if summary.get("status") == "blocked_unknown_cost":
+            summary.update({"status": "unknown_reported_cost", "blocked_reason": "unknown_reported_cost"})
+            raise BudgetStop("unknown_reported_cost", summary)
+        reservation_amount = Decimal(str(reservation["usd"])) if reservation is not None else Decimal(0)
+        over_reservation = False
+        for call in response.calls:
+            usage = getattr(call, "usage", None)
+            cost = getattr(usage, "cost", None) if usage is not None else None
+            if cost is not None:
+                try:
+                    if Decimal(str(cost)) > reservation_amount:
+                        over_reservation = True
+                except (InvalidOperation, ValueError):
+                    over_reservation = True
+        if over_reservation or Decimal(summary["known_spent_usd"]) > budget_policy.limit_usd:
+            summary.update({"status": "reported_cost_exceeds_reservation", "blocked_reason": "reported_cost_exceeds_reservation"})
+            raise BudgetStop("reported_cost_exceeds_reservation", summary)
     return response
 
 
@@ -346,9 +537,11 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
                    source_hash: str, export_error: str | None = None, selected_initial: dict[str, Any] | None = None,
                     *, run_state: str = "running", request_counts: dict[str, int] | None = None,
                       request_failures: list[dict[str, Any]] | None = None,
-                      report_metadata: dict[str, Any] | None = None,
-                      journal: RunJournal | None = None,
-                      replayed_request_count: int = 0) -> dict[str, Any]:
+                       report_metadata: dict[str, Any] | None = None,
+                       journal: RunJournal | None = None,
+                       replayed_request_count: int = 0,
+                       budget_policy: BudgetPolicy | None = None,
+                       budget_stop: dict[str, Any] | None = None) -> dict[str, Any]:
     accepted = sum(record["status"] == "accepted" for record in records)
     actual_fits = sum(record["status"] == "actual_fits" for record in records)
     manual = len(records) - accepted - actual_fits
@@ -446,6 +639,21 @@ def _build_report(items: list[dict[str, Any]], plans: list[CuePlan], target_ids:
         "cost": {"stages": costs, "direct": direct, "projection_500": projection,
                  "coverage_note": "OpenCode hidden title/compaction steps may be outside this logical-session ledger; API-equivalent usage is informational, not an invoice."},
     }
+    if budget_policy is not None:
+        budget_summary = budget_policy.summary(all_calls, request_failures or [])
+        budget_summary["limit_usd"] = _decimal_text(budget_policy.limit_usd)
+        try:
+            known = Decimal(str(budget_summary["known_spent_usd"]))
+            unknown = Decimal(str(budget_summary["unknown_reserved_usd"]))
+            budget_summary["remaining_usd"] = _decimal_text(max(Decimal(0), budget_policy.limit_usd - known - unknown))
+        except (InvalidOperation, KeyError, TypeError, ValueError):
+            pass
+        if budget_stop is not None:
+            budget_summary.update(copy.deepcopy(budget_stop))
+        report["budget"] = budget_summary
+        report["summary"]["budget"] = copy.deepcopy(budget_summary)
+    if budget_stop is not None:
+        report["budget_stop"] = copy.deepcopy(budget_stop)
     if selected_initial is not None:
         report["selection"] = selected_initial
     if report_metadata is not None:
@@ -780,7 +988,9 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
                       original_timing_verifier: OriginalTimingVerifier | None = None,
                       report_metadata: dict[str, Any] | None = None,
                       resume: bool = False,
-                      retry_unknown_ids: tuple[str, ...] = ()) -> dict[str, Any]:
+                      retry_unknown_ids: tuple[str, ...] = (),
+                      budget_policy: BudgetPolicy | None = None,
+                      stop_requested: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Run one independent trial and write fail-closed checkpoints after each batch."""
     if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
         raise TypeError("items must be a list of objects")
@@ -807,7 +1017,7 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
         raise ValueError("all selected targets must need shortening or have short timing")
     contract = _manifest_contract(
         items, supplied_plans, target_ids, planner_config, run_config, generator, arbiter,
-        report_metadata, original_timing_verifier is not None,
+        report_metadata, original_timing_verifier is not None, budget_policy,
     )
     ensure_manifest(output_dir, contract, resume=resume)
     source_copy = copy.deepcopy(items)
@@ -828,7 +1038,10 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
         record_by_id = {record["cue_id"]: record for record in records}
     plan_by_id = {plan.cue_id: plan for plan in plans}
     source_path: str | None = None
-    journal = RunJournal(output_dir, resume=resume, retry_unknown_ids=retry_unknown_ids)
+    journal = RunJournal(output_dir, resume=resume, retry_unknown_ids=retry_unknown_ids,
+                         retry_budget_policy=budget_policy if run_config.scheduling == "windowed" else None)
+    if budget_policy is not None and resume:
+        journal.validate_budget_reservations(budget_policy)
     replayed_counter = [0]
 
     effective_selected = selected
@@ -858,13 +1071,15 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
     for stage in ("generation", "review", "repair", "recheck"):
         request_counts.setdefault(stage, 0)
     request_failures = copy.deepcopy(journal_failures)
+    budget_stop: dict[str, Any] | None = None
 
     def save(run_state: str) -> dict[str, Any]:
         report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter,
                                   output_dir, records, stage_calls, source_path, _source_hash(items),
                                   run_state=run_state, request_counts=request_counts,
-                                  request_failures=request_failures, report_metadata=report_metadata, journal=journal,
-                                  replayed_request_count=replayed_counter[0])
+                                   request_failures=request_failures, report_metadata=report_metadata, journal=journal,
+                                   replayed_request_count=replayed_counter[0], budget_policy=budget_policy,
+                                   budget_stop=budget_stop)
         _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
         return report
 
@@ -893,9 +1108,10 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
         report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter,
                                output_dir, records, stage_calls, source_path, _source_hash(items),
                                   run_state="incomplete" if request_failures else "running",
-                                  request_counts=request_counts, request_failures=request_failures,
-                                  report_metadata=report_metadata, journal=journal,
-                                  replayed_request_count=replayed_counter[0])
+                                   request_counts=request_counts, request_failures=request_failures,
+                                   report_metadata=report_metadata, journal=journal,
+                                   replayed_request_count=replayed_counter[0], budget_policy=budget_policy,
+                                   budget_stop=budget_stop)
         _checkpoint(output_dir, report, _prepare_checkpoint(source_copy, records, plans, planner_config))
 
     async def run_generation(
@@ -941,13 +1157,18 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
                     "length_basis": plan.length_basis,
                 }
                 if stage == "repair":
-                    row.update({"prior_candidate": feedback[cue_id]["candidate"], "feedback": feedback[cue_id]["feedback"]})
+                    row.update({
+                        "prior_candidate": feedback[cue_id]["candidate"],
+                        "rejected_candidates": _rejected_candidates(record_by_id[cue_id]),
+                        "feedback": feedback[cue_id]["feedback"],
+                    })
                 targets.append(row)
             response = await _request(
                 request_fn, generator, GENERATOR_SYSTEM_PROMPT, build_generation_prompt(context, targets),
                 generation_schema(), run_config.length_tools, stage=stage, ids=batch, output_dir=output_dir,
                 stage_calls=stage_calls, request_counts=request_counts, request_failures=request_failures,
                 journal=journal, records=records, replayed_counter=replayed_counter,
+                budget_policy=budget_policy, stop_requested=stop_requested,
             )
             parsed: PartialParseResult | None = None
             if response.error is None and response.text is not None:
@@ -964,6 +1185,8 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
                     record["failure"] = "transport"
                     record["history"].append({"stage": stage, "attempt": attempt, "status": "error",
                                               "failure": "transport", "response_issues": response_issues})
+                    if budget_policy is not None and budget_policy.max_unknown_calls and can_retry(round_index):
+                        queue_unique(generation_queue, cue_id)
                     continue
                 assert parsed is not None
                 if cue_id in parsed.errors:
@@ -1071,18 +1294,57 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
                                 "max_chars": record["budget"]["max_chars"],
                                 "actual_chars": len(prepare_length_text(candidate, plan.length_basis)),
                                 "length_basis": plan.length_basis})
+            fingerprints = {
+                cue_id: _review_fingerprint(context, targets, cue_id, arbiter)
+                for cue_id in batch
+            }
+            skipped: set[str] = set()
+            if stage == "recheck":
+                for cue_id in batch:
+                    record = record_by_id[cue_id]
+                    candidate = next(target["candidate"] for target in targets if target["cue_id"] == cue_id)
+                    if not _successful_repair_candidate(record):
+                        continue
+                    match = _matching_review_event(record, candidate, fingerprints[cue_id])
+                    if match is None:
+                        continue
+                    prior_index, _ = match
+                    attempt = sum(1 for event in record["history"] if event.get("stage") == stage) + 1
+                    record["history"].append({
+                        "stage": stage,
+                        "attempt": attempt,
+                        "status": "skipped_identical_proposal",
+                        "fingerprint": fingerprints[cue_id],
+                        "prior_event_ref": prior_index,
+                        "reason": "identical_proposal_after_repair",
+                    })
+                    record["status"] = "manual"
+                    record["failure"] = "repair_unchanged"
+                    record["final_text"] = record["original"]
+                    record["final_review"] = None
+                    skipped.add(cue_id)
+            sent_ids = [cue_id for cue_id in batch if cue_id not in skipped]
+            if not sent_ids:
+                checkpoint()
+                continue
+            sent_targets = [target for target in targets if target["cue_id"] in sent_ids]
+            sent_fingerprints = {
+                cue_id: _review_fingerprint(context, sent_targets, cue_id, arbiter)
+                for cue_id in sent_ids
+            }
             response = await _request(
-                request_fn, arbiter, ARBITER_SYSTEM_PROMPT, build_review_prompt(context, targets), review_schema(), False,
-                stage=stage, ids=batch, output_dir=output_dir, stage_calls=stage_calls,
+                request_fn, arbiter, ARBITER_SYSTEM_PROMPT, build_review_prompt(context, sent_targets), review_schema(), False,
+                stage=stage, ids=sent_ids, output_dir=output_dir, stage_calls=stage_calls,
                 request_counts=request_counts, request_failures=request_failures,
-                journal=journal, records=records, replayed_counter=replayed_counter,
+                 journal=journal, records=records, replayed_counter=replayed_counter,
+                 budget_policy=budget_policy, stop_requested=stop_requested,
             )
             parsed: PartialParseResult | None = (
-                parse_review_partial(response.text, batch)
+                parse_review_partial(response.text, sent_ids)
                 if response.error is None and response.text is not None
                 else None
             )
-            for cue_id in batch:
+            for cue_id in sent_ids:
                 record = record_by_id[cue_id]
                 attempt = sum(1 for event in record["history"] if event.get("stage") == stage) + 1
                 response_issues = parsed.response_issues if parsed is not None else []
@@ -1091,6 +1353,8 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
                     record["failure"] = "transport"
                     record["history"].append({"stage": stage, "attempt": attempt, "status": "error",
                                               "failure": "transport", "response_issues": response_issues})
+                    if budget_policy is not None and budget_policy.max_unknown_calls and can_retry(round_index):
+                        queue_unique(next_review, cue_id)
                 elif parsed is not None and cue_id in parsed.errors:
                     record["status"] = "error"
                     record["failure"] = "schema"
@@ -1103,35 +1367,121 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
                     assert parsed is not None
                     verdict = parsed.results[cue_id]
                     record["history"].append({"stage": stage, "attempt": attempt,
-                                              "judgment": verdict, "response_issues": response_issues})
+                                              "judgment": verdict, "candidate": record["candidate"],
+                                              "review_fingerprint": sent_fingerprints[cue_id],
+                                              "response_issues": response_issues})
                     apply_review_result(cue_id, verdict, initial=initial, round_index=round_index,
                                         next_generation=next_generation)
             checkpoint()
         return next_generation, next_review
 
-    initial_review = await run_generation(eligible_ids, stage="generation", round_index=None)
-    repair_from_review, review_recovery = await run_review(
-        initial_review, stage="review", initial=True, round_index=None,
-    )
-    generation_queue = list(dict.fromkeys(generation_queue + repair_from_review))
-    review_queue = list(dict.fromkeys(review_queue + review_recovery))
+    try:
+        windows = ([eligible_ids] if run_config.scheduling == "stage_major" else
+                   [eligible_ids[i:i + run_config.review_batch_size]
+                    for i in range(0, len(eligible_ids), run_config.review_batch_size)])
+        for window in windows:
+            generation_queue = []
+            review_queue = []
+            initial_review = await run_generation(window, stage="generation", round_index=None)
+            repair_from_review, review_recovery = await run_review(
+                initial_review, stage="review", initial=True, round_index=None,
+            )
+            generation_queue = list(dict.fromkeys(generation_queue + repair_from_review))
+            review_queue = list(dict.fromkeys(review_queue + review_recovery))
 
-    for round_index in range(run_config.max_repairs):
-        # Snapshot both queues: work discovered during this round belongs to the next round,
-        # except that a newly generated candidate receives its review in this same round.
-        generation_ids = list(generation_queue)
-        review_ids = list(review_queue)
-        generation_queue = []
-        review_queue = []
-        if not generation_ids and not review_ids:
-            break
-        generated_review = await run_generation(generation_ids, stage="repair", round_index=round_index)
-        review_ids = list(dict.fromkeys(generated_review + review_ids))
-        next_generation, next_review = await run_review(
-            review_ids, stage="recheck", initial=False, round_index=round_index,
+            for round_index in range(run_config.max_repairs):
+                # Repairs discovered in a window cannot spill into the next window.
+                generation_ids = list(generation_queue)
+                review_ids = list(review_queue)
+                generation_queue = []
+                review_queue = []
+                if not generation_ids and not review_ids:
+                    break
+                generated_review = await run_generation(generation_ids, stage="repair", round_index=round_index)
+                review_ids = list(dict.fromkeys(generated_review + review_ids))
+                next_generation, next_review = await run_review(
+                    review_ids, stage="recheck", initial=False, round_index=round_index,
+                )
+                generation_queue = list(dict.fromkeys(generation_queue + next_generation))
+                review_queue = list(dict.fromkeys(review_queue + next_review))
+    except GracefulStop as exc:
+        budget_stop = budget_policy.summary([call for group in stage_calls.values() for call in group], request_failures) if budget_policy else {}
+        budget_stop.update({"reason": str(exc), "status": "graceful_stop"})
+        for record in records:
+            if record["status"] != "accepted":
+                record["final_text"] = record["original"]
+        journal.assert_consumed()
+        final_report = _build_report(
+            items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
+            records, stage_calls, source_path, _source_hash(items), run_state="incomplete",
+            request_counts=request_counts, request_failures=request_failures,
+            report_metadata=report_metadata, journal=journal,
+            replayed_request_count=replayed_counter[0], budget_policy=budget_policy,
+            budget_stop=budget_stop,
         )
-        generation_queue = list(dict.fromkeys(generation_queue + next_generation))
-        review_queue = list(dict.fromkeys(review_queue + next_review))
+        if journal.checkpoint_allowed(records):
+            _checkpoint(output_dir, final_report, _prepare_checkpoint(source_copy, records, plans, planner_config))
+            atomic_json(output_dir / "resume_status.json", {
+                "schema_version": 1, "status": "incomplete", "run_state": "incomplete",
+                "unknown_requests": final_report["resume"]["unknown_requests"],
+                "accounting_complete": final_report["summary"]["accounting_complete"],
+                "budget_stop": budget_stop,
+            })
+        return final_report
+    except asyncio.CancelledError:
+        # A forced interruption can leave a request start without a completion.
+        # Reload the append-only journal before publishing the partial checkpoint.
+        try:
+            journal = RunJournal.readonly_snapshot(output_dir, logical_unknown_only=run_config.scheduling == "windowed")
+            saved_calls, request_counts, request_failures = journal.accounting()
+            stage_calls = {stage: list(saved_calls.get(stage, [])) for stage in ("generation", "review", "repair", "recheck")}
+            for stage in stage_calls:
+                request_counts.setdefault(stage, 0)
+            for record in records:
+                if record["status"] != "accepted":
+                    record["final_text"] = record["original"]
+            if journal.checkpoint_allowed(records):
+                save("incomplete")
+                atomic_json(output_dir / "resume_status.json", {
+                    "schema_version": 1, "status": "incomplete", "run_state": "incomplete",
+                    "unknown_requests": journal.unknown_requests, "accounting_complete": False,
+                })
+        except Exception as exc:
+            print(f"warning: cancellation snapshot update failed ({type(exc).__name__}); inspect saved journal",
+                  file=sys.stderr)
+        raise
+    except BudgetStop as exc:
+        budget_stop = copy.deepcopy(exc.summary)
+        if budget_policy is not None:
+            budget_stop["limit_usd"] = _decimal_text(budget_policy.limit_usd)
+            try:
+                known = Decimal(str(budget_stop["known_spent_usd"]))
+                unknown = Decimal(str(budget_stop["unknown_reserved_usd"]))
+                budget_stop["remaining_usd"] = _decimal_text(max(Decimal(0), budget_policy.limit_usd - known - unknown))
+            except (InvalidOperation, KeyError, TypeError, ValueError):
+                pass
+        budget_stop.update({"reason": exc.reason, "status": exc.reason})
+        for record in records:
+            if record["status"] != "accepted":
+                record["final_text"] = record["original"]
+        journal.assert_consumed()
+        final_report = _build_report(
+            items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
+            records, stage_calls, source_path, _source_hash(items), run_state="incomplete",
+            request_counts=request_counts, request_failures=request_failures,
+            report_metadata=report_metadata, journal=journal,
+            replayed_request_count=replayed_counter[0], budget_policy=budget_policy,
+            budget_stop=budget_stop,
+        )
+        if journal.checkpoint_allowed(records):
+            _checkpoint(output_dir, final_report, _prepare_checkpoint(source_copy, records, plans, planner_config))
+            atomic_json(output_dir / "resume_status.json", {
+                "schema_version": 1, "status": "incomplete", "run_state": "incomplete",
+                "unknown_requests": final_report["resume"]["unknown_requests"],
+                "accounting_complete": final_report["summary"]["accounting_complete"],
+                "budget_stop": budget_stop,
+            })
+        return final_report
 
     for record in records:
         if record["status"] == "pending":
@@ -1145,10 +1495,12 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
     journal.assert_consumed()
     final_report = _build_report(items, plans, target_ids, planner_config, run_config, generator, arbiter, output_dir,
                                   records, stage_calls, source_path, _source_hash(items),
-                                   run_state="incomplete" if request_failures else "completed",
-                                    request_counts=request_counts, request_failures=request_failures,
-                                    report_metadata=report_metadata, journal=journal,
-                                    replayed_request_count=replayed_counter[0])
+                                   run_state="completed" if budget_policy is not None and budget_policy.max_unknown_calls else
+                                             "incomplete" if request_failures else "completed",
+                                     request_counts=request_counts, request_failures=request_failures,
+                                     report_metadata=report_metadata, journal=journal,
+                                     replayed_request_count=replayed_counter[0], budget_policy=budget_policy,
+                                     budget_stop=budget_stop)
     if journal.checkpoint_allowed(records):
         _checkpoint(output_dir, final_report, _prepare_checkpoint(source_copy, records, plans, planner_config))
         atomic_json(output_dir / "resume_status.json", {
@@ -1164,9 +1516,11 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
 async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target_ids: list[str],
                     planner_config: PlannerConfig, run_config: RunConfig, generator: ModelSpec,
                     arbiter: ModelSpec, output_dir: Path, request_fn: RequestFunction,
-                    original_timing_verifier: OriginalTimingVerifier | None = None,
-                    report_metadata: dict[str, Any] | None = None, resume: bool = False,
-                    retry_unknown_ids: tuple[str, ...] = ()) -> dict[str, Any]:
+                     original_timing_verifier: OriginalTimingVerifier | None = None,
+                     report_metadata: dict[str, Any] | None = None, resume: bool = False,
+                     retry_unknown_ids: tuple[str, ...] = (),
+                     budget_policy: BudgetPolicy | None = None,
+                     stop_requested: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Run a trial while holding its durable process lock for its full lifetime."""
     output_dir = Path(output_dir)
     if retry_unknown_ids and not resume:
@@ -1186,8 +1540,9 @@ async def run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], target
         return await _run_trial(
             items=items, plans=plans, target_ids=target_ids, planner_config=planner_config,
             run_config=run_config, generator=generator, arbiter=arbiter, output_dir=output_dir,
-            request_fn=request_fn, original_timing_verifier=original_timing_verifier,
-            report_metadata=report_metadata, resume=resume, retry_unknown_ids=retry_unknown_ids,
+             request_fn=request_fn, original_timing_verifier=original_timing_verifier,
+             report_metadata=report_metadata, resume=resume, retry_unknown_ids=retry_unknown_ids,
+             budget_policy=budget_policy, stop_requested=stop_requested,
         )
     finally:
         lock.release()

@@ -261,6 +261,33 @@ _DESCRIPTOR_KEYS = ("stage", "model", "target_ids", "system_prompt", "user_promp
 _START_KEYS = ("request_id", "stage", "model", "target_ids", "system_prompt", "user_prompt", "output_schema", "allow_tool", "started_at", "elapsed_sec")
 
 
+def _validate_reservation(value: Any, label: str = "request reservation") -> None:
+    if not isinstance(value, dict) or set(value) != {"usd", "pricing_snapshot_id", "input_tokens", "output_tokens", "model"}:
+        raise ResumeError(f"{label} is invalid")
+    if not isinstance(value.get("usd"), str):
+        raise ResumeError(f"{label} usd is invalid")
+    try:
+        from decimal import Decimal, InvalidOperation
+        amount = Decimal(value["usd"])
+    except (InvalidOperation, TypeError, ValueError):
+        raise ResumeError(f"{label} usd is invalid") from None
+    if not amount.is_finite() or amount <= 0:
+        raise ResumeError(f"{label} usd is invalid")
+    snapshot_id = value["pricing_snapshot_id"]
+    if (not isinstance(snapshot_id, str) or len(snapshot_id) != 64
+            or any(char not in "0123456789abcdef" for char in snapshot_id)):
+        raise ResumeError(f"{label} pricing_snapshot_id is invalid")
+    for key in ("input_tokens", "output_tokens"):
+        token_count = value[key]
+        if isinstance(token_count, bool) or not isinstance(token_count, int) or token_count <= 0:
+            raise ResumeError(f"{label} {key} is invalid")
+    model = value["model"]
+    if (not isinstance(model, dict) or set(model) != {"provider", "model", "variant"}
+            or model.get("provider") != "openrouter"
+            or any(not isinstance(model.get(key), str) or not model[key] for key in ("model", "variant"))):
+        raise ResumeError(f"{label} model is invalid")
+
+
 def _descriptor_from_start(row: dict[str, Any]) -> dict[str, Any]:
     descriptor = {key: row[key] for key in _DESCRIPTOR_KEYS}
     _validate_descriptor(descriptor)
@@ -297,6 +324,8 @@ def _validate_start(row: dict[str, Any]) -> None:
     _require_elapsed(row["elapsed_sec"], "elapsed_sec")
     if row.get("state") != "start":
         raise ResumeError("request start has invalid state")
+    if "reservation" in row:
+        _validate_reservation(row["reservation"])
 
 
 def _validate_failure(failure: dict[str, Any], start: dict[str, Any]) -> None:
@@ -339,20 +368,23 @@ class JournalStep:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class JournalInspection:
+    """Read-only journal data, with no replay cursor or request authorization API."""
+
+    calls: tuple[CallRecord, ...]
+    failures: tuple[dict[str, Any], ...]
+    requests: tuple[dict[str, Any], ...]
+    unknown_requests: tuple[dict[str, Any], ...]
+
+
 class RunJournal:
     """Read the old journal and expose an ordered, non-writing replay cursor."""
 
-    def __init__(self, output_dir: Path, *, resume: bool, retry_unknown_ids: tuple[str, ...] = ()) -> None:
-        self.output_dir = Path(output_dir)
-        self._starts: dict[str, dict[str, Any]] = {}
-        self._completes: dict[str, dict[str, Any]] = {}
-        self._calls: dict[str, list[tuple[int, CallRecord]]] = {}
-        self._events: dict[str, str] = {}
-        self._reserved: dict[str, dict[str, Any]] = {}
-        self._replacements: set[str] = set()
-        self._roots: list[str] = []
-        self._cursor = 0
-        self._accepted_snapshot: dict[str, tuple[str, Any]] = {}
+    def __init__(self, output_dir: Path, *, resume: bool, retry_unknown_ids: tuple[str, ...] = (),
+                 retry_budget_policy: Any = None) -> None:
+        self._initialize(output_dir)
+        self._logical_unknown_only = retry_budget_policy is not None
         if resume:
             self._load()
         else:
@@ -370,6 +402,15 @@ class RunJournal:
         if unresolved and set(unresolved) != set(requested):
             self._write_blocked(unresolved, requested)
             raise UnknownRequestsError(unresolved)
+        if requested:
+            if retry_budget_policy is not None and any(old_id in self._replacements for old_id in requested):
+                raise ResumeError("an unknown request already has its one permitted replacement")
+            if retry_budget_policy is not None:
+                self.validate_budget_reservations(retry_budget_policy)
+                calls_by_stage, _, failures = self.accounting()
+                all_calls = [call for group in calls_by_stage.values() for call in group]
+                for old_id in requested:
+                    retry_budget_policy.admit(self._starts[old_id]["model"], all_calls, failures)
         for old_id in requested:
             replacement = uuid.uuid4().hex
             while replacement in self._starts or replacement in self._events.values():
@@ -385,6 +426,31 @@ class RunJournal:
             })
         self._rebuild_roots()
         self._validate_root_order()
+
+    def _initialize(self, output_dir: Path) -> None:
+        self.output_dir = Path(output_dir)
+        self._starts: dict[str, dict[str, Any]] = {}
+        self._completes: dict[str, dict[str, Any]] = {}
+        self._calls: dict[str, list[tuple[int, CallRecord]]] = {}
+        self._events: dict[str, str] = {}
+        self._reserved: dict[str, dict[str, Any]] = {}
+        self._replacements: set[str] = set()
+        self._roots: list[str] = []
+        self._cursor = 0
+        self._logical_unknown_only = False
+        self._accepted_snapshot: dict[str, tuple[str, Any]] = {}
+
+    @classmethod
+    def readonly_snapshot(cls, output_dir: Path, *, logical_unknown_only: bool = False) -> "RunJournal":
+        """Refresh saved starts and receipts after cancellation without retrying them."""
+        journal = object.__new__(cls)
+        journal._initialize(output_dir)
+        journal._logical_unknown_only = logical_unknown_only
+        journal._load()
+        journal._load_report_snapshot()
+        journal._validate_root_order()
+        journal._cursor = len(journal._roots)
+        return journal
 
     def _load(self) -> None:
         starts_rows = _read_jsonl(self.output_dir / "requests.jsonl", "requests.jsonl")
@@ -502,6 +568,8 @@ class RunJournal:
                 record = call_record_from_dict(row["record"])
             except (TypeError, ValueError, KeyError) as exc:
                 raise ResumeError(f"invalid typed call receipt: {exc}") from exc
+            if record.request_id is not None and record.request_id != request_id:
+                raise ResumeError("typed call request_id differs from journal request_id")
             if not isinstance(row["provider"], str) or row["provider"] != record.provider:
                 raise ResumeError("call provider metadata differs from typed receipt")
             self._calls.setdefault(request_id, []).append((index, record))
@@ -596,9 +664,10 @@ class RunJournal:
     @property
     def unknown_requests(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        for request_id, start in self._starts.items():
-            if request_id not in self._completes:
-                result.append({"request_id": request_id, **_descriptor_from_start(start)})
+        request_ids = (self._current_unresolved() if self._logical_unknown_only else
+                       [request_id for request_id in self._starts if request_id not in self._completes])
+        for request_id in request_ids:
+            result.append({"request_id": request_id, **_descriptor_from_start(self._starts[request_id])})
         return result
 
     @property
@@ -679,3 +748,60 @@ class RunJournal:
         self.assert_consumed()
         if not self.checkpoint_allowed(records):
             raise ResumeError("checkpoint is not yet allowed")
+
+    def validate_budget_reservations(self, policy: Any) -> None:
+        """Validate every saved physical request against the frozen policy."""
+        for request_id, start in self._starts.items():
+            reservation = start.get("reservation")
+            if reservation is None:
+                raise ResumeError(f"request {request_id} is missing its budget reservation")
+            try:
+                expected = policy.reservation(start["model"])
+            except Exception as exc:
+                raise ResumeError(f"request {request_id} has an invalid budget model") from exc
+            if canonical_hash(reservation) != canonical_hash(expected):
+                raise ResumeError(f"request {request_id} budget reservation differs from frozen policy")
+
+
+def inspect_journal(output_dir: Path, policy: Any) -> JournalInspection:
+    """Validate saved journal data without constructing an actionable replay cursor."""
+    journal = object.__new__(RunJournal)
+    journal._initialize(output_dir)
+    journal._load()
+    journal._load_report_snapshot()
+    journal._validate_root_order()
+    journal.validate_budget_reservations(policy)
+    by_stage, _, failures = journal.accounting()
+    requests = tuple({
+        "request_id": request_id,
+        "stage": start["stage"],
+        "model": start["model"],
+        "completed": request_id in journal._completes,
+        "superseded": request_id in journal._events,
+        "receipt_ids": [call.generation_id for _, call in journal._calls.get(request_id, [])],
+    } for request_id, start in journal._starts.items())
+    contract = load_manifest_contract(output_dir)
+    unresolved = (journal._current_unresolved() if contract.get("run", {}).get("scheduling") == "windowed" else
+                  [request_id for request_id in journal._starts if request_id not in journal._completes])
+    unknown = tuple(request for request in requests if request["request_id"] in unresolved)
+    return JournalInspection(
+        calls=tuple(call for stage_calls in by_stage.values() for call in stage_calls),
+        failures=tuple(failures), requests=requests, unknown_requests=unknown,
+    )
+
+
+def load_manifest_contract(output_dir: Path) -> dict[str, Any]:
+    """Read and validate an existing immutable run contract."""
+    path = Path(output_dir) / "run_manifest.json"
+    if not path.exists():
+        raise ResumeError("resume manifest is missing; preserve the directory instead of starting a new run")
+    stored = _require_dict(_read_json(path, "run_manifest.json"), "run_manifest.json")
+    _require_schema_version(stored.get("schema_version"), "run manifest")
+    if stored.get("runner_algorithm_version") != RUNNER_ALGORITHM_VERSION:
+        raise ResumeError("run manifest algorithm version is incompatible; preserve the directory")
+    if "contract" not in stored or "contract_hash" not in stored:
+        raise ResumeError("run manifest is incomplete; preserve the directory")
+    contract = stored["contract"]
+    if stored["contract_hash"] != canonical_hash(contract):
+        raise ResumeError("run manifest contract hash is corrupt; preserve the directory")
+    return _require_dict(contract, "run manifest contract")

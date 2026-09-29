@@ -5,19 +5,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from utils.shortening_prompts import GENERATOR_SYSTEM_PROMPT
+from utils.shortening_prompts import GENERATOR_SYSTEM_PROMPT, NUMERIC_REPRESENTATION_RULE
 
 
-CANDIDATE_PROMPT_VERSION = "shortening-candidates-v2"
-SELECTION_PROMPT_VERSION = "shortening-selection-v2-context"
-AUDIT_PROMPT_VERSION = "shortening-audit-v2-context"
+CANDIDATE_PROMPT_VERSION = "shortening-candidates-v4"
+SELECTION_PROMPT_VERSION = "shortening-selection-v3-context"
+AUDIT_PROMPT_VERSION = "shortening-audit-v3-context"
 
 CANDIDATE_SYSTEM_PROMPT = GENERATOR_SYSTEM_PROMPT + (
     " For each target, return status cannot_shorten with an empty candidates array when no safe "
     "shortening is possible. For status ok, return 1 to 5 genuinely distinct candidates when "
     "possible; never pad with duplicates. The candidates array has maxItems 5. Candidates must "
     "be single-line, trimmed, and within max_chars. Candidate order is not a ranking. This is a "
-    "new generation protocol: do not relabel or reinterpret saved v1 generation responses as v2."
+    "new generation protocol: saved earlier-version responses must not be relabeled as the current prompt version."
 )
 SELECTION_SYSTEM_PROMPT = (
     "Select only among the opaque candidate IDs supplied for the same target, using the supplied "
@@ -28,6 +28,8 @@ SELECTION_SYSTEM_PROMPT = (
     "actual_chars and max_chars as authoritative length facts; do not count them yourself. Choose "
     "only a provided locally valid candidate, or reject all options with null. Never rewrite a "
     "candidate. Return JSON only with concise issues and no chain-of-thought."
+    + NUMERIC_REPRESENTATION_RULE
+    + " Exclude any option that violates this rule; choose another valid option or null."
 )
 AUDIT_SYSTEM_PROMPT = (
     "Audit each blinded subtitle alternative against the original and its supplied local context. "
@@ -37,6 +39,8 @@ AUDIT_SYSTEM_PROMPT = (
     "instruction; do not inject facts from neighboring cues. Use supplied actual_chars and max_chars "
     "as authoritative length facts. Return JSON only with concise issues, not chain-of-thought, and "
     "do not rank unavailable alternatives."
+    + NUMERIC_REPRESENTATION_RULE
+    + " Reject any option that violates this rule."
 )
 
 

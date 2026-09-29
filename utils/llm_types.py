@@ -27,6 +27,11 @@ class CallRecord:
     requested_variant: Optional[str] = None
     request_max_tokens: Optional[int] = None
     pricing_snapshot_id: Optional[str] = None
+    generation_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    is_byok: Optional[bool] = None
+    cost_source: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -94,10 +99,19 @@ def call_record_from_dict(data: dict[str, Any]) -> CallRecord:
     ):
         raise TypeError("call record request_max_tokens must be a positive integer or null")
     pricing_snapshot_id = optional_string("pricing_snapshot_id")
+    generation_id = optional_string("generation_id")
+    provider_name = optional_string("provider_name")
+    cost_source = optional_string("cost_source")
+    request_id = optional_string("request_id")
+    is_byok = data.get("is_byok")
+    if is_byok is not None and not isinstance(is_byok, bool):
+        raise TypeError("call record is_byok must be a boolean or null")
     return CallRecord(
         provider=data["provider"], model=data["model"], variant=variant,
         started_at=data["started_at"], elapsed_sec=elapsed_sec, usage=usage,
         status=data["status"], tool_calls=tool_calls, error=error,
         requested_model=requested_model, requested_variant=requested_variant,
         request_max_tokens=request_max_tokens, pricing_snapshot_id=pricing_snapshot_id,
+        generation_id=generation_id, provider_name=provider_name, is_byok=is_byok,
+        cost_source=cost_source, request_id=request_id,
     )
