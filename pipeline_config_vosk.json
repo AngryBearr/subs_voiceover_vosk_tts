@@ -13,9 +13,9 @@
     "model_path": "models/vosk-model-tts-ru-0.10-multi",
     "device": "cpu",
     "voice": 8,
-    "use_analysis_speech_rate": true,
+    "use_analysis_speech_rate": false,
     "base_speech_rate": 1.25,
-    "max_extra_pct": 0.2,
+    "max_total_speed": 1.5,
     "output_sample_rate": null
   },
   "segments": {
@@ -29,10 +29,19 @@
     "threshold_sec": 0.5,
     "target_sec": 0.2
   },
+  "silero_pauses": {
+    "enabled": true
+  },
+  "silero_edges": {
+    "enabled": true
+  },
+  "mix": {
+    "enabled": true,
+    "sample_rate": 44100,
+    "channels": 1
+  },
   "audio_analysis": {
     "enabled": true,
-    "overage_threshold_pct": 0.1,
-    "speedup_factor": 1.1,
     "prefer_ffmpeg": true
   },
   "resample": {

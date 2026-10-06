@@ -86,6 +86,7 @@ class CuePlan:
     estimate_source: str = "nominal_cps_estimate"
     invalid_timing: bool = False
     length_basis: LengthBasis = "display_text"
+    calibrated_max_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -153,9 +154,9 @@ def _decimal_budget(config: PlannerConfig, available_ms: int) -> int:
     return int(budget.to_integral_value(rounding=ROUND_FLOOR))
 
 
-def _budget(config: PlannerConfig, available_ms: int) -> int:
+def _budget(config: PlannerConfig, available_ms: int) -> tuple[int, int | None]:
     if config.calibration_profile is None:
-        return _decimal_budget(config, available_ms)
+        return _decimal_budget(config, available_ms), None
     assert config.calibration_identity is not None
     result = max_chars_for_window(
         config.calibration_profile,
@@ -164,7 +165,10 @@ def _budget(config: PlannerConfig, available_ms: int) -> int:
     )
     if result is None:
         raise ValueError("calibrated character budget is unavailable")
-    return result
+    # A conservative zero forecast is not a usable text-shortening target.
+    # Keep it as evidence; nominal CPS supplies the existing text-only target.
+    target = _decimal_budget(config, available_ms) if result == 0 else result
+    return target, result
 
 
 def _severity(reduction_fraction: float, status: str) -> str:
@@ -232,7 +236,7 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
         assert record.start is not None and record.end is not None
         available_ms = available_by_position[record.position]
         prepared_text = prepare_length_text(record.text, config.length_basis)
-        max_chars = _budget(config, available_ms)
+        max_chars, calibrated_max_chars = _budget(config, available_ms)
         original_length = len(prepared_text)
         if available_ms > 0:
             if config.calibration_profile is not None:
@@ -274,14 +278,19 @@ def plan_subtitles(items: list[dict[str, Any]], config: PlannerConfig) -> list[C
                 status=classification.status,
                 words_count=classification.words_count,
                 repetition_candidate=classification.repetition_candidate,
-                short_timing_risk=classification.short_timing_risk,
-                reason=classification.reason,
+                short_timing_risk=classification.short_timing_risk or calibrated_max_chars == 0,
+                reason=(
+                    "calibrated_zero_budget"
+                    if calibrated_max_chars == 0 and classification.status == "fits"
+                    else classification.reason
+                ),
                 estimate_source=(
                     "vosk_calibration_char_linear"
                     if config.calibration_profile is not None
                     else "nominal_cps_estimate"
                 ),
                 length_basis=config.length_basis,
+                calibrated_max_chars=calibrated_max_chars,
             )
         )
     return plans
@@ -472,6 +481,9 @@ def analysis_for_text(
         else "nominal_cps_estimate"
     )
     budget_basis = (
+        "nominal_cps_fallback_zero_calibration"
+        if plan.calibrated_max_chars == 0 and plan.max_chars > 0
+        else
         "vosk_calibration_char_linear"
         if calibrated
         else
@@ -511,6 +523,8 @@ def analysis_for_text(
             else None
         ),
     }
+    if plan.calibrated_max_chars is not None:
+        base["calibrated_max_chars"] = plan.calibrated_max_chars
     if plan.status == "invalid" or plan.start is None or plan.end is None or plan.end <= plan.start:
         return base
 
@@ -537,8 +551,12 @@ def analysis_for_text(
         used_gap_sec = (plan.available_ms - duration_ms) / 1000.0
     classification = classify_text(prepared_text, plan.max_chars)
     words_count = classification.words_count
-    short_timing_risk = classification.short_timing_risk
-    reason = classification.reason
+    short_timing_risk = classification.short_timing_risk or plan.calibrated_max_chars == 0
+    reason = (
+        "calibrated_zero_budget"
+        if plan.calibrated_max_chars == 0 and classification.status == "fits"
+        else classification.reason
+    )
     is_short_segment = duration_sec < 1.0
     is_checked = True
     # The acoustic character cap is intentionally stricter than the nominal CPS
@@ -548,6 +566,13 @@ def analysis_for_text(
         short_timing_risk = False
         is_critical = False
         reason = "actual_fit"
+    elif plan.calibrated_max_chars == 0:
+        base["timing_warning"] = (
+            "Calibrated character cap is zero; the nominal CPS fallback is a text-only target. "
+            "Audio timing is unverified."
+            if plan.max_chars > 0
+            else "Calibrated and nominal character caps are zero; no positive text target is representable. Audio timing is unverified."
+        )
     base.update(
         {
             "duration_sec": duration_sec,

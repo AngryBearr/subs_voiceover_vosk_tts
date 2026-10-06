@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import random
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -234,3 +234,90 @@ def test_measured_fit_keeps_evidence_source_separate_from_calibrated_forecast() 
     assert analysis["estimate_basis"] == "vosk_calibration_char_linear"
     assert analysis["reason"] == "actual_fit"
     assert analysis["is_critical"] is False
+
+
+def _frozen_calibration_config() -> PlannerConfig:
+    # Frozen voice-8/rate-1.5 coefficients; tests do not need ignored artifacts.
+    return _calibration_config(
+        coefficients=[0.5066993855016315, 0.058044399760824324],
+        guard=0.6197317842554448,
+    )
+
+
+@pytest.mark.parametrize(
+    ("available_ms", "target", "raw"),
+    [(158, 3, 0), (456, 8, 0), (1150, 22, 0), (1182, 23, 0), (1184, 23, 0), (1185, 1, 1)],
+)
+def test_frozen_zero_forecast_uses_nominal_target_without_relaxing_positive_cap(
+    available_ms: int, target: int, raw: int,
+) -> None:
+    config = _frozen_calibration_config()
+    items = [{"index": 7, "start": 0, "end": available_ms, "text": "Да."}]
+    source = copy.deepcopy(items)
+    plan = plan_subtitles(items, config)[0]
+    assert items == source
+    assert plan.max_chars == target
+    assert plan.calibrated_max_chars == raw
+    assert plan.estimate_source == "vosk_calibration_char_linear"
+    assert CuePlan(**asdict(plan)) == plan
+    analysis = analysis_for_text(plan, plan.text, config)
+    assert analysis["calibrated_max_chars"] == raw
+    assert analysis["max_chars"] == target
+    assert analysis["estimate_label"] == "vosk_calibration_char_linear"
+    assert analysis["reason"] != "actual_fit"
+    if raw == 0:
+        assert plan.status == "fits"  # Text target fit is not measured audio fit.
+        assert plan.short_timing_risk and analysis["short_timing_risk"]
+        assert analysis["budget_basis"] == "nominal_cps_fallback_zero_calibration"
+        assert analysis["reason"] == "calibrated_zero_budget"
+        assert "Audio timing is unverified" in analysis["timing_warning"]
+        assert analysis["is_critical"] is False
+    else:
+        assert plan.status == "short_timing"
+        assert analysis["budget_basis"] == "vosk_calibration_char_linear"
+
+
+@pytest.mark.parametrize(
+    ("text", "status"),
+    [("Непредставимо.", "short_timing"), ("Это длинная реплика из нескольких слов.", "needs_shortening")],
+)
+def test_zero_calibration_overflow_keeps_text_classification(text: str, status: str) -> None:
+    plan = plan_subtitles([{"start": 0, "end": 158, "text": text}], _frozen_calibration_config())[0]
+    assert plan.status == status
+    assert plan.max_chars == 3 and plan.calibrated_max_chars == 0
+    assert plan.short_timing_risk
+
+
+def test_ultrashort_window_does_not_invent_one_character_or_valid_timing() -> None:
+    config = _frozen_calibration_config()
+    for start, end in ((0, 0), (1, 0), (-1, 1), ("0", 158), (0, "158")):
+        invalid = plan_subtitles([{"start": start, "end": end, "text": "Да."}], config)[0]
+        assert invalid.status == "invalid" and invalid.invalid_timing
+        assert invalid.max_chars == 0 and invalid.calibrated_max_chars is None
+    plan = plan_subtitles([{"start": 0, "end": 1, "text": "Да."}], config)[0]
+    assert plan.max_chars == plan.calibrated_max_chars == 0
+    assert plan.status == "short_timing" and not plan.invalid_timing
+    analysis = analysis_for_text(plan, plan.text, config)
+    assert analysis["budget_basis"] == "vosk_calibration_char_linear"
+    assert "no positive text target is representable" in analysis["timing_warning"]
+
+
+def test_fallback_measurement_warning_clears_only_for_exact_measured_original() -> None:
+    config = _frozen_calibration_config()
+    plan = plan_subtitles([{"start": 0, "end": 158, "text": "Да."}], config)[0]
+    measured = replace(plan, reason="actual_fit", short_timing_risk=False, estimate_source="vosk_measurement")
+    original = analysis_for_text(measured, measured.text, config)
+    assert original["reason"] == "actual_fit" and not original["short_timing_risk"]
+    assert "timing_warning" not in original
+    candidate = analysis_for_text(measured, "Да!", config)
+    assert candidate["reason"] == "calibrated_zero_budget" and candidate["short_timing_risk"]
+    assert candidate["estimate_source"] == "vosk_calibration_char_linear"
+    assert "Audio timing is unverified" in candidate["timing_warning"]
+
+
+def test_zero_fallback_does_not_bypass_profile_identity_check() -> None:
+    config = _frozen_calibration_config()
+    assert config.calibration_identity is not None
+    identity = dict(config.calibration_identity, voice=7)
+    with pytest.raises(ValueError, match="identity mismatch"):
+        replace(config, calibration_identity=identity)

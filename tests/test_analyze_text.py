@@ -85,3 +85,13 @@ def test_analyzer_cli_rejects_bad_speed_as_argparse_error_and_preserves_input(tm
         main([str(source), "--threshold", "1.6"])
     assert raised.value.code == 2
     assert json.loads(source.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.parametrize(("window_ms", "target"), [(158, 3), (456, 8), (1150, 22), (1182, 23), (1, 0)])
+def test_ordinary_analyzer_keeps_existing_nominal_caps(window_ms: int, target: int) -> None:
+    analysis = analyze_subtitles([{"start": 0, "end": window_ms, "text": "Да."}], 13.0, 1.5)["items"][0]["analysis"]
+    assert analysis["max_chars"] == target
+    assert analysis["budget_basis"] == "stricter_character_budget"
+    assert analysis["estimate_source"] == "nominal_cps_estimate"
+    assert "calibrated_max_chars" not in analysis
+    assert "timing_warning" not in analysis

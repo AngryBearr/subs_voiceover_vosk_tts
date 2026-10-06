@@ -50,13 +50,14 @@ def synthesize_json_lines(
     output_naming: str = "position",
     text_key: str = "text",
     output_sample_rate: int | None = None,
-) -> None:
+) -> List[dict[str, Any]]:
     """Synthesize audio for each entry in a JSON/JSONL file using synthesize.synthesize.
 
     Expectations:
     - Input is an array of objects (or JSONL) with at least a text field (default 'text').
     - The text field may be a string or a list of strings; lists are joined with a space.
     - Output files are named '<file_prefix><n>.wav' (1-based) in output_folder.
+    Returns and saves per-call input evidence in output_folder/tts_inputs.json.
     """
     ensure_folder_exists(output_folder)
 
@@ -64,6 +65,7 @@ def synthesize_json_lines(
 
     # Create shared Synth once for batch
     synth = create_synth(model_path=model_path, device=device)
+    evidence: List[dict[str, Any]] = []
 
     for idx, entry in enumerate(entries):
         raw = entry.get(text_key)
@@ -102,6 +104,8 @@ def synthesize_json_lines(
                 round_ndigits=2,
             )
 
+        tts_input_texts: list[str] = []
+        error: str | None = None
         try:
             synthesize_text(
                 text=text,
@@ -113,11 +117,21 @@ def synthesize_json_lines(
                 filename_prefix=None,
                 output_sample_rate=output_sample_rate,
                 synth=synth,
+                tts_input_texts=tts_input_texts,
             )
             print(f"Synthesized: {outname} (speech_rate={speech_rate:.2f})")
         except (ValueError, FileNotFoundError, OSError, SynthesisError) as e:
             # Continue batch on individual failures
+            error = str(e)
             print(f"Failed to synthesize entry {idx+1}: {e}")
+        finally:
+            evidence.append({"position": idx, "index": entry.get("index"), "file_id": file_id,
+                             "source_text": text, "tts_input_text": tts_input_texts[0] if tts_input_texts else None,
+                             "voice": chosen_voice, "speech_rate": speech_rate, "audio_path": outname,
+                             "status": "synthesized" if error is None else "failed", "error": error})
+            (Path(output_folder) / "tts_inputs.json").write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    return evidence
 
 
 if __name__ == "__main__":

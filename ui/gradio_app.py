@@ -1,6 +1,6 @@
 """Gradio UI for subtitle voice-over pipeline (Vosk TTS / Edge TTS).
 
-Run (from repo root, with vosk_env activated):
+Run (from repo root, with subs_env activated):
     uv run -m ui.gradio_app
 
 MVP UX: two tabs:
@@ -12,11 +12,14 @@ The UI calls existing in-repo modules directly (no shelling out).
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from utils.pipeline_text import SpeedPolicy
 
 import gradio as gr  # type: ignore
 
@@ -115,7 +118,6 @@ def _normalize_gender_mode_items(items: List[Dict[str, Any]], mode: str, gender_
 
 
 def run_pipeline_from_ui(
-    *,
     engine: str,
     srt_file_path: str,
     output_root: str,
@@ -149,6 +151,8 @@ def run_pipeline_from_ui(
     export_wav: bool,
     export_mp3: bool,
     video_duration_sec: str,
+    silero_pauses_enabled: bool = False,
+    silero_edges_enabled: bool = False,
 ) -> Any:
     """Generator for Gradio: yields (log_text, files)."""
 
@@ -165,8 +169,22 @@ def run_pipeline_from_ui(
     srt_path = Path(srt_file_path)
     if not srt_path.exists():
         raise FileNotFoundError(f"SRT not found: {srt_path}")
+    policy = SpeedPolicy(float(base_speech_rate), float(max_mismatch_ratio)) if engine == "vosk" else None
+    if policy is not None and (silero_pauses_enabled or silero_edges_enabled):
+        from utils.silero_pauses import validate_profile
+        validate_profile({"silero_pauses": {"enabled": bool(silero_pauses_enabled)},
+                          "silero_edges": {"enabled": bool(silero_edges_enabled)}, "tts": {
+            "model_path": vosk_model_dir, "voice": _parse_speaker_choice(vosk_male_voice_choice),
+            "voice_female": _parse_speaker_choice(vosk_female_voice_choice)}})
+    audio_failed: int | None = None
+    if policy is not None:
+        yield log(f"[ui] Vosk fixed base={policy.base_speech_rate:g}x; ONE total cap={policy.max_total_speed:g}x (also analyzer cap)")
+        if use_analysis_speech_rate:
+            yield log("[ui] Predicted dynamic TTS disabled: bounded acceleration uses measured audio only")
 
     run_dir = Path(output_root).expanduser().resolve() / f"run_{_now_slug()}"
+    if (run_dir / "segments").exists() and any((run_dir / "segments").iterdir()):
+        raise ValueError("Run directory already has segments; start a fresh run")
     json_dir = run_dir / "json"
     segments_dir = run_dir / "segments"
     mix_dir = run_dir / "mix"
@@ -180,6 +198,9 @@ def run_pipeline_from_ui(
     from utils.srt_to_json import parse_srt_file
 
     subs: List[Dict[str, Any]] = parse_srt_file(str(srt_path))
+    edge_items = copy.deepcopy(subs)  # Original words, before analysis/normalization/stress.
+    if policy is not None and len({item["index"] for item in subs}) != len(subs):
+        raise ValueError("Bounded Vosk requires unique SRT indices")
     subs_json = json_dir / "subs.json"
     _save_json(subs_json, subs)
     yield log(f"[ui] Parsed SRT: {len(subs)} entries")
@@ -254,8 +275,6 @@ def run_pipeline_from_ui(
         voice_male = int(male_voice_id)
         voice_female = int(female_voice_id)
 
-        use_analysis_sr = bool(use_analysis_speech_rate) and bool(do_analysis)
-
         yield log(
             f"[ui] Vosk TTS: model={model_path} device={vosk_device} male={voice_male} female={voice_female}"
         )
@@ -271,9 +290,9 @@ def run_pipeline_from_ui(
             voice_female=int(voice_female),
             gender_key=gender_key,
             default_speech_rate=float(base_speech_rate),
-            use_analysis_speech_rate=bool(use_analysis_sr),
+            use_analysis_speech_rate=False,
             base_speech_rate=float(base_speech_rate),
-            max_extra_pct=float(max_extra_pct),
+            max_extra_pct=0.0,
             output_naming="index",
             text_key="text",
         )
@@ -317,7 +336,7 @@ def run_pipeline_from_ui(
         )
         yield log("[ui] Reduce silence: done")
 
-    if audio_analysis_enabled:
+    if audio_analysis_enabled and engine == "edge":
         from utils.audio_analysis import check_and_speedup_segments
 
         check_and_speedup_segments(
@@ -341,8 +360,46 @@ def run_pipeline_from_ui(
         )
         yield log(f"[ui] Resample segments: {resample_target_sr} Hz")
 
+    pauses_path: Path | None = None
+    edges_path: Path | None = None
+    if policy is not None and silero_pauses_enabled:
+        from utils.silero_pauses import process_segments
+        edges: List[Dict[str, Any]] | None = [] if silero_edges_enabled else None
+        receipts = process_segments(normalized_items, segments_dir, run_dir / "pause_stage",
+            budget_items=edge_items, max_total_speed=policy.max_total_speed, edge_receipts=edges)
+        pauses_path = json_dir / "silero_pauses.json"
+        _save_json(pauses_path, receipts)
+        yield log(f"[ui] Silero internal pauses: removed {sum(row['saving_ms'] for row in receipts):.3f} ms; no tempo/text edits")
+        if edges is not None:
+            edges_path = json_dir / "silero_edges.json"
+            _save_json(edges_path, edges)
+            yield log(f"[ui] Conditional edges: removed {sum(row['saving_ms'] for row in edges):.3f} ms; fitting clips unchanged")
+
+    if policy is not None:
+        from utils.audio_analysis import check_and_speedup_segments
+
+        timing = check_and_speedup_segments(
+            normalized_items, segments_dir, in_place=True,
+            synthesis_rate=policy.base_speech_rate, max_total_speed=policy.max_total_speed,
+            allow_speedup=bool(audio_analysis_enabled), report_path=json_dir / "audio_timing.json",
+        )
+        audio_failed = sum(row.status not in {"fits", "accelerated_fits"} for row in timing)
+        yield log(f"[ui] Measured timing: unresolved/invalid/missing={audio_failed}/{len(timing)}; no truncation")
+        if audio_failed:
+            report_path = json_dir / "audio_timing.json"
+            message = (f"[ui] Not exported: {audio_failed} unresolved/invalid/missing cues; "
+                       f"timing report={report_path}; segments retained={segments_dir}")
+            yield "\n".join(log_lines + [message]), [str(report_path)]
+            return
+
     # 6) Mix and export
     from utils.audio_mixer import mix_segments
+    if policy is not None:
+        from pipeline import validate_complete_mix
+        validate_complete_mix(normalized_items, subs, segments_dir, json_dir / "audio_timing.json",
+                              pauses_path=pauses_path, synthesis_rate=policy.base_speech_rate,
+                              max_total_speed=policy.max_total_speed, allow_speedup=bool(audio_analysis_enabled),
+                              edges_path=edges_path, edge_items=edge_items)
 
     total_duration_ms = _seconds_to_ms(video_duration_sec)
 
@@ -358,24 +415,29 @@ def run_pipeline_from_ui(
         transcode_to=transcode_to,
         total_duration_ms=total_duration_ms,
         expected_index_ext=".wav",
+        missing_policy="error" if policy is not None else "skip",
     )
 
     mix_wav = output_basename.with_suffix(".wav")
     mix_mp3 = output_basename.with_suffix(".mp3") if export_mp3 else None
 
     files: List[str] = []
+    if policy is not None:
+        files.append(str(json_dir / "audio_timing.json"))
     if export_wav and mix_wav.exists():
         files.append(str(mix_wav))
     if export_mp3 and mix_mp3 is not None and mix_mp3.exists():
         files.append(str(mix_mp3))
 
-    yield "\n".join(log_lines + [f"[ui] Done. Final: {final_path}"]), files
+    timing_summary = f"; unresolved/invalid/missing={audio_failed}" if audio_failed is not None else ""
+    yield "\n".join(log_lines + [f"[ui] Export complete{timing_summary}. Final: {final_path}"]), files
 
 
 def build_demo() -> gr.Blocks:
     model_dirs = _list_model_dirs()
     default_model = model_dirs[0] if model_dirs else ""
     default_speakers = _speaker_choices(default_model) if default_model else ["0: speaker_0"]
+    default_voice = next((choice for choice in default_speakers if choice.startswith("8:")), default_speakers[0])
 
     with gr.Blocks(title="Subs Voiceover (Vosk/Edge)") as demo:
         gr.Markdown("# Subtitle voice-over UI (MVP)")
@@ -406,7 +468,7 @@ def build_demo() -> gr.Blocks:
                 do_analysis = gr.Checkbox(value=True, label="Analyze subtitles")
                 with gr.Row():
                     avg_chars_per_sec = gr.Number(value=13.0, label="Avg chars/sec")
-                    max_mismatch_ratio = gr.Number(value=1.5, label="Max mismatch ratio")
+                    max_mismatch_ratio = gr.Number(value=1.5, label="Vosk total speed cap (1–1.5) / Edge analysis ratio")
 
                 gr.Markdown("## Subtitle preprocessing")
                 with gr.Row():
@@ -430,16 +492,17 @@ def build_demo() -> gr.Blocks:
                 with gr.Row():
                     vosk_male_voice_choice = gr.Dropdown(
                         choices=default_speakers,
-                        value=default_speakers[0],
+                        value=default_voice,
                         label="Male voice (speaker id)",
                     )
                     vosk_female_voice_choice = gr.Dropdown(
                         choices=default_speakers,
-                        value=default_speakers[0],
+                        value=default_voice,
                         label="Female voice (speaker id)",
                     )
 
-                use_analysis_speech_rate = gr.Checkbox(value=True, label="Use analysis-driven speech rate")
+                gr.Markdown("Vosk uses a fixed synthesis base, then only measured needed tempo within the total cap. Native reviewed-text handoff is CLI-only; no model runs in this UI.")
+                use_analysis_speech_rate = gr.Checkbox(value=False, interactive=False, visible=False, label="Legacy predicted rate (disabled)")
                 base_speech_rate = gr.Dropdown(
                     choices=[1.0, 1.1, 1.25, 1.5],
                     value=1.25,
@@ -448,9 +511,11 @@ def build_demo() -> gr.Blocks:
                 max_extra_pct = gr.Slider(
                     minimum=0.0,
                     maximum=0.5,
-                    value=0.2,
+                    value=0.0,
                     step=0.01,
-                    label="Max extra pct over base",
+                    label="Legacy extra pct (disabled)",
+                    interactive=False,
+                    visible=False,
                 )
 
                 gr.Markdown("## Edge TTS")
@@ -468,6 +533,8 @@ def build_demo() -> gr.Blocks:
                     audio_analysis_enabled = gr.Checkbox(value=True, label="Speedup if too long")
                     resample_enabled = gr.Checkbox(value=True, label="Resample segments")
                 resample_target_sr = gr.Dropdown(choices=[44100, 48000], value=44100, label="Resample target SR")
+                silero_pauses_enabled = gr.Checkbox(value=True, label="Silero internal pauses (reviewed Vosk voice 8 only; ignored for Edge)")
+                silero_edges_enabled = gr.Checkbox(value=True, label="Conservative edges only if too long (requires Silero internal; Vosk voice 8)")
 
                 gr.Markdown("## Mix")
                 with gr.Row():
@@ -496,7 +563,7 @@ def build_demo() -> gr.Blocks:
 
                 def _on_model_change(model_dir: str):
                     choices = _speaker_choices(model_dir)
-                    default = choices[0] if choices else "0: speaker_0"
+                    default = next((choice for choice in choices if choice.startswith("8:")), choices[0] if choices else "0: speaker_0")
                     return gr.update(choices=choices, value=default), gr.update(choices=choices, value=default)
 
                 vosk_model_dir.change(
@@ -541,6 +608,8 @@ def build_demo() -> gr.Blocks:
                         export_wav,
                         export_mp3,
                         video_duration_sec,
+                        silero_pauses_enabled,
+                        silero_edges_enabled,
                     ],
                     outputs=[log_box, outputs],
                 )

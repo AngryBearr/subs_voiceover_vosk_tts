@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from utils.vosk_text import normalize_vosk_text
+
 # Import from the installed/checked-out package
 from vosk_tts import Model, Synth  # type: ignore
 import wave
@@ -166,6 +168,7 @@ def synthesize_text(
     filename_prefix: Optional[str] = None,
     output_sample_rate: Optional[int] = None,
     synth: Optional[Synth] = None,
+    tts_input_texts: list[str] | None = None,
 ) -> Path:
     """
     Synthesize text to a .wav file using Vosk TTS.
@@ -178,6 +181,7 @@ def synthesize_text(
         device: "cpu" or "cuda" (advisory: GPU use depends on onnxruntime build and providers).
         output_path: Full output .wav path. If omitted, one is generated under ./out.
         filename_prefix: Prefix used when output_path is not provided.
+        tts_input_texts: Optional capture of the exact text passed to the engine.
 
     Returns:
         Path to the written .wav file.
@@ -218,6 +222,9 @@ def synthesize_text(
     if output_sample_rate is not None and output_sample_rate <= 0:
         raise ValueError("output_sample_rate must be a positive integer if provided.")
 
+    # Canonicalize punctuation once for every engine branch, retaining stress marks.
+    text = normalize_vosk_text(text)
+
     # Prepare output path
     out_path = _ensure_output_path(output_path, filename_prefix, default_dir=Path.cwd() / "out")
 
@@ -226,6 +233,8 @@ def synthesize_text(
             synth = create_synth(str(model_dir), device=device)
 
         speaker_id = 0 if voice is None else int(voice)
+        if tts_input_texts is not None:
+            tts_input_texts.append(text)
 
         # If no resampling requested (or native rate requested), use fast path
         if output_sample_rate is None or output_sample_rate == NATIVE_SR:
