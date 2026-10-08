@@ -33,7 +33,7 @@ from utils.shortening_backends import DEEPSEEK_VARIANTS, OPENAI_MODELS, LiveBack
 from utils.shortening_plan import CuePlan, PlannerConfig, plan_subtitles
 from utils.shortening_runner import ModelSpec, RunConfig, run_trial
 from utils.shortening_budget import BudgetPolicy
-from utils.shortening_resume import ResumeError, UnknownRequestsError, load_manifest_contract
+from utils.shortening_resume import ResumeError, UnknownRequestsError, load_manifest_contract, validate_inherited_evidence
 from utils.opencode_clean import CleanOpenCodeServer
 from utils.srt_to_json import SRTParseError, parse_srt_file
 from utils.vosk_calibration import (
@@ -409,6 +409,8 @@ def prepare_run(args: argparse.Namespace) -> PreparedRun:
     frozen_metadata = metadata
     if primary and resume:
         contract = load_manifest_contract(output_dir)
+        if isinstance(contract.get("report_metadata"), dict) and "migration" in contract["report_metadata"]:
+            validate_inherited_evidence(output_dir, contract["report_metadata"]["migration"])
         frozen_metadata_value = contract.get("report_metadata")
         if not isinstance(frozen_metadata_value, dict):
             raise ResumeError("primary resume manifest has no frozen report metadata")

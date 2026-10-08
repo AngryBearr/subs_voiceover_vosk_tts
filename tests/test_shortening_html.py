@@ -75,6 +75,23 @@ def test_loader_keeps_saved_model_and_redacts_error(tmp_path: Path) -> None:
     assert "Bearer secret" not in json.dumps(document)
 
 
+def test_trial_zero_fallback_labels_raw_cap_and_text_only_acceptance(tmp_path: Path) -> None:
+    _trial(tmp_path)
+    path = tmp_path / "report.json"
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["records"][0]["budget"] = {"max_chars": 20, "calibrated_max_chars": 0}
+    path.write_text(json.dumps(report), encoding="utf-8")
+    document = load_report_document(tmp_path)
+    row = document["rows"][0]
+    assert row["accepted"] is True
+    details = json.dumps(row["details"])
+    assert "calibrated_max_chars=0; max_chars=20" in details
+    assert "nominal_cps_fallback_zero_calibration" in details
+    assert "not measured audio fit" in details
+    assert "Audio timing is unverified" in details
+    assert not (tmp_path / "shortening.html").exists()
+
+
 def test_fake_report_is_rejected(tmp_path: Path) -> None:
     _trial(tmp_path, fake=True)
     with pytest.raises(ValueError, match="fake"):

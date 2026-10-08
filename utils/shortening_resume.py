@@ -200,6 +200,8 @@ def ensure_manifest(output_dir: Path, contract: dict[str, Any], *, resume: bool)
     """Create or validate the immutable run contract before any other writes."""
     output_dir = Path(output_dir)
     path = output_dir / "run_manifest.json"
+    if resume and (output_dir / ".migration-incomplete").exists():
+        raise ResumeError("migration is incomplete; preserve the directory")
     if not resume:
         if path.exists():
             raise ResumeError("run_manifest.json already exists; use resume and preserve the run directory")
@@ -805,3 +807,31 @@ def load_manifest_contract(output_dir: Path) -> dict[str, Any]:
     if stored["contract_hash"] != canonical_hash(contract):
         raise ResumeError("run manifest contract hash is corrupt; preserve the directory")
     return _require_dict(contract, "run manifest contract")
+
+
+def validate_inherited_evidence(output_dir: Path, migration: Any) -> None:
+    """Bind ancestral bytes before retry intent or any live request; suffixes may grow."""
+    if not isinstance(migration, dict) or migration.get("version") != "sol6-generation-v1":
+        raise ResumeError("unsupported inherited journal contract")
+    hashes = migration.get("source_files_sha256")
+    sizes = migration.get("inherited_file_sizes")
+    prefix = {"requests.jsonl", "calls.jsonl"}
+    immutable = {"resume_baseline.json", "preflight_audio/audio_report.json"}
+    if (not isinstance(hashes, dict) or not isinstance(sizes, dict)
+            or set(sizes) != prefix | immutable or not set(sizes).issubset(hashes)):
+        raise ResumeError("inherited evidence binding is incomplete")
+    for name, size in sizes.items():
+        digest = hashes[name]
+        if type(size) is not int or size < 1 or not isinstance(digest, str) or len(digest) != 64:
+            raise ResumeError("invalid inherited evidence length or digest")
+        path = output_dir / name
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size < size or (
+                    name in immutable and path.stat().st_size != size):
+                raise ResumeError(f"inherited evidence missing or changed: {name}")
+            with path.open("rb") as stream:
+                actual = hashlib.sha256(stream.read(size)).hexdigest()
+        except OSError as exc:
+            raise ResumeError(f"cannot read inherited evidence: {name}") from exc
+        if actual != digest:
+            raise ResumeError(f"inherited evidence hash mismatch: {name}")

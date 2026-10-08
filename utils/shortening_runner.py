@@ -55,6 +55,7 @@ from utils.shortening_resume import (
     ensure_manifest,
     load_baseline,
     save_baseline,
+    validate_inherited_evidence,
     RUNNER_ALGORITHM_VERSION,
 )
 from utils.shortening_review import build_review_state
@@ -751,8 +752,12 @@ def _forecast_plan(plan: CuePlan) -> CuePlan:
         severity=_severity(plan.reduction_fraction, classification.status),
         words_count=classification.words_count,
         repetition_candidate=classification.repetition_candidate,
-        short_timing_risk=classification.short_timing_risk,
-        reason=classification.reason,
+        short_timing_risk=classification.short_timing_risk or plan.calibrated_max_chars == 0,
+        reason=(
+            "calibrated_zero_budget"
+            if plan.calibrated_max_chars == 0 and classification.status == "fits"
+            else classification.reason
+        ),
     )
 
 
@@ -1020,6 +1025,8 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
         report_metadata, original_timing_verifier is not None, budget_policy,
     )
     ensure_manifest(output_dir, contract, resume=resume)
+    if resume and isinstance(report_metadata, dict) and "migration" in report_metadata:
+        validate_inherited_evidence(output_dir, report_metadata["migration"])
     source_copy = copy.deepcopy(items)
     baseline = load_baseline(output_dir) if resume else None
     journal_files = any((output_dir / name).exists() for name in ("requests.jsonl", "calls.jsonl", "resume_events.jsonl"))
@@ -1376,17 +1383,48 @@ async def _run_trial(*, items: list[dict[str, Any]], plans: list[CuePlan], targe
         return next_generation, next_review
 
     try:
+        # The one supported migration keeps the ancestral stage-major journal
+        # byte-for-byte. Consume its generation prefix before windowed work so
+        # replay order, prompts, receipts, and cue histories remain unchanged.
+        migration = report_metadata.get("migration") if isinstance(report_metadata, dict) else None
+        inherited_ids: set[str] = set()
+        inherited_repairs: list[str] = []
+        if migration is not None:
+            if (run_config.scheduling != "windowed" or not isinstance(migration, dict)
+                    or migration.get("version") != "sol6-generation-v1"):
+                raise ResumeError("unsupported migrated generation contract")
+            old_count = migration.get("inherited_generation_starts")
+            original_batches = make_batches(source_copy, plans, eligible_ids, planner_config,
+                                            run_config.gen_batch_size, run_config.max_context_chars)
+            if type(old_count) is not int or old_count < 1 or old_count > len(original_batches):
+                raise ResumeError("invalid inherited generation prefix")
+            prefix = original_batches[:old_count]
+            inherited_ids = {cue_id for batch in prefix for cue_id in batch}
+            await run_generation([cue_id for batch in prefix for cue_id in batch],
+                                 stage="generation", round_index=None)
+            # A replayed request cannot silently turn into a new billable POST.
+            if journal._cursor != old_count:
+                raise ResumeError("inherited generation prefix did not replay completely")
+            inherited_repairs = list(generation_queue)
         windows = ([eligible_ids] if run_config.scheduling == "stage_major" else
                    [eligible_ids[i:i + run_config.review_batch_size]
                     for i in range(0, len(eligible_ids), run_config.review_batch_size)])
         for window in windows:
-            generation_queue = []
+            generation_queue = [cue_id for cue_id in inherited_repairs if cue_id in window]
             review_queue = []
-            initial_review = await run_generation(window, stage="generation", round_index=None)
+            initial_review = [cue_id for cue_id in window if cue_id in inherited_ids
+                              and record_by_id[cue_id].get("candidate") is not None
+                              and record_by_id[cue_id].get("failure") != "protocol_misuse"]
+            initial_review += await run_generation([cue_id for cue_id in window if cue_id not in inherited_ids],
+                                                   stage="generation", round_index=None)
+            # Pre-migration transport/schema errors follow the same bounded
+            # repair queue as failures discovered within the current window.
+            prior_repairs = [cue_id for cue_id in generation_queue if cue_id in window]
+            generation_queue = [cue_id for cue_id in generation_queue if cue_id not in window]
             repair_from_review, review_recovery = await run_review(
                 initial_review, stage="review", initial=True, round_index=None,
             )
-            generation_queue = list(dict.fromkeys(generation_queue + repair_from_review))
+            generation_queue = list(dict.fromkeys(prior_repairs + generation_queue + repair_from_review))
             review_queue = list(dict.fromkeys(review_queue + review_recovery))
 
             for round_index in range(run_config.max_repairs):

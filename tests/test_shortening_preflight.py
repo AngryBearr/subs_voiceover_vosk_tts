@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ from utils.shortening_runner import (
     ModelSpec,
     RunConfig,
     _build_report,
+    _apply_preflight,
+    _forecast_plan,
+    _new_record,
     _validate_timing_evidence,
     run_trial,
 )
@@ -354,3 +358,70 @@ def test_verifier_rejects_mismatched_measured_rows(
         shortening_audio.verify_original_timing(
             [plan], tmp_path / field, model_path=tmp_path / "model", synthesis_fn=_wav_synth
         )
+
+
+def test_zero_fallback_risk_survives_runner_and_only_measurement_yields_actual_fit(tmp_path: Path) -> None:
+    config = _calibrated_planner()
+    assert config.calibration_profile is not None
+    profile = dict(config.calibration_profile, char_linear_guard_sec=1.0)
+    config = replace(config, calibration_profile=profile)
+    item = {"start": 0, "end": 158, "text": "Да."}
+    plan = _forecast_plan(plan_subtitles([item], config)[0])
+    assert plan.status == "fits" and plan.short_timing_risk
+    assert plan.reason == "calibrated_zero_budget"
+    assert plan.max_chars == 3 and plan.calibrated_max_chars == 0
+    record = _new_record(item, plan)
+    assert record["status"] != "actual_fits"
+
+    def verifier(selected: list[CuePlan], _: Path) -> dict[str, dict[str, Any]]:
+        assert selected == [plan]
+        return {plan.cue_id: {"original": plan.text, "available_ms": 158, "duration_sec": 0.1}}
+
+    effective, risk_ids = _apply_preflight([plan], {plan.cue_id: record}, verifier, tmp_path)
+    assert risk_ids == {plan.cue_id}
+    assert record["status"] == "actual_fits"
+    assert record["forecast"]["calibrated_max_chars"] == record["budget"]["calibrated_max_chars"] == 0
+    assert record["forecast"]["max_chars"] == record["budget"]["max_chars"] == 3
+    assert effective[plan.cue_id].estimate_source == "vosk_measurement"
+    assert analysis_for_text(effective[plan.cue_id], "Да!", config)["short_timing_risk"]
+
+
+def test_mocked_zero_fallback_acceptance_is_text_only_and_resume_preserves_raw_cap(tmp_path: Path) -> None:
+    config = _calibrated_planner()
+    assert config.calibration_profile is not None
+    config = replace(config, calibration_profile=dict(config.calibration_profile, char_linear_guard_sec=1.0))
+    items = [{"start": 0, "end": 158, "text": "да да да"}]
+    plans = plan_subtitles(items, config)
+    calls: list[str] = []
+
+    def verifier(_: list[CuePlan], __: Path) -> dict[str, dict[str, Any]]:
+        return {"cue-0": {"original": "да да да", "available_ms": 158, "duration_sec": 0.3}}
+
+    async def request(_: ModelSpec, __: str, ___: str, schema: dict[str, Any], ____: bool) -> DetailedResponse:
+        if "verdict" in json.dumps(schema):
+            calls.append("review")
+            result = {"cue_id": "cue-0", "verdict": "accept", "issues": [], "advice": ""}
+        else:
+            calls.append("generation")
+            result = {"cue_id": "cue-0", "text": "да", "status": "ok"}
+        return DetailedResponse(json.dumps({"results": [result]}), [])
+
+    generator, arbiter = _models()
+    kwargs = dict(
+        items=items, plans=plans, target_ids=["cue-0"], planner_config=config,
+        run_config=RunConfig(max_repairs=0), generator=generator, arbiter=arbiter,
+        output_dir=tmp_path / "fallback", request_fn=request, original_timing_verifier=verifier,
+    )
+    report = asyncio.run(run_trial(**kwargs))
+    record = report["records"][0]
+    assert record["status"] == "accepted" and record["final_text"] == "да"
+    assert report["summary"]["actual_fits_count"] == 0
+    assert record["budget"]["max_chars"] == record["forecast"]["max_chars"] == 3
+    assert record["budget"]["calibrated_max_chars"] == record["forecast"]["calibrated_max_chars"] == 0
+    saved = json.loads((tmp_path / "fallback/subtitles.json").read_text(encoding="utf-8"))[0]["analysis"]
+    assert saved["reason"] == "calibrated_zero_budget" and saved["short_timing_risk"]
+    assert saved["budget_basis"] == "nominal_cps_fallback_zero_calibration"
+    assert "Audio timing is unverified" in saved["timing_warning"]
+    resumed = asyncio.run(run_trial(**kwargs, resume=True))
+    assert resumed["records"][0]["budget"] == record["budget"]
+    assert calls == ["generation", "review"]  # Resume replays, without new mocked requests.

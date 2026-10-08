@@ -136,7 +136,7 @@ fit, operational, and cost evidence to justify a production-mode change. A
 small historical difference is not by itself a winner or a reason to make
 high the default.
 
-## Translation under the original duration
+## Direct English → Russian translation under aligned Russian timing
 
 **Status:** Deferred until the core pilots and production-path stability are
 complete.
@@ -149,10 +149,14 @@ preparation source is the exact
 `dc01852aff9032e713ab77da79babb6496057fdd97fdedd5323f93e5d9ade2f9`), not a
 copy of its contents.
 
-**Hold fixed:** Start with the original-language subtitle and full context,
-produce Russian under the constrained original duration, measure real TTS,
-then make only bounded text or timing adjustments for available gaps. Do not
-create overlap, cross speaker changes, or unverified meaning changes. The
+**Hold fixed:** Compare direct English→Russian translation from the English
+subtitle/full context with shortening the existing Russian subtitle on the same
+aligned IDs, frozen Russian cue windows, available gaps, voice/profile, review
+criteria and bounded repair policy. Preserve the aligned Russian timing; do not
+assume English cue boundaries or speech durations match it. Measure real Russian
+TTS only with separate authorization, then make only bounded text or timing
+adjustments for available gaps. Do not create overlap, cross speaker changes,
+or unverified meaning changes. The
 timing window differs from actual speech duration; the existing 1.4-second
 speech example must not be treated as the timing window. Direct translation is
 not guaranteed to be better than the existing Russian subtitle.

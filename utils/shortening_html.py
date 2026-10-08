@@ -833,6 +833,14 @@ def _has_final_audio_evidence(report: Mapping[str, Any]) -> bool:
 
 def _primary_notices(report: Mapping[str, Any]) -> list[str]:
     notices = []
+    metadata = report.get("metadata") if isinstance(report.get("metadata"), Mapping) else {}
+    migration = metadata.get("migration") if isinstance(metadata, Mapping) else None
+    if isinstance(migration, Mapping):
+        notices.append(
+            "Перенесённый частичный запуск: предложения и квитанции унаследованы из сохранённого журнала; "
+            "новых запросов при переносе не было. Неразрешённый запрос требует отдельного решения; "
+            "счётчики и резервы показывают текущий журнал, а не старый HTML-снимок."
+        )
     if not _has_final_audio_evidence(report):
         notices.append("Длительность финальной озвучки ещё не проверена; нерешённые реплики сохранены оригинальными.")
     budget = report.get("budget") if isinstance(report.get("budget"), Mapping) else {}
@@ -868,7 +876,15 @@ def _adapt_trial(root: Path, report: Mapping[str, Any]) -> dict[str, Any]:
         raw_status = _string(record.get("status"))
         status = "accepted" if valid else ("unresolved" if raw_status in {"accepted", "manual"} else "not_reviewed" if raw_status == "actual_fits" else _contract_status(raw_status, "pending"))
         start, end = _original_timing(record)
-        rows.append(_row(record.get("cue_id", record.get("case_id")), record.get("source_id", ""), record.get("original"), start=start, end=end, repetition=record.get("repetition"), arm="standard", generator=generator, generator_mode=generator_mode, arbiter=arbiter, arbiter_mode=arbiter_mode, candidates=candidates, initial_verdict=initial_verdict, verdict=verdict, accepted=valid, accepted_text=final_text if valid else None, status=status, issues=final.get("issues"), advice=final.get("advice", record.get("failure", "")), context=record.get("context"), receipt_ids=[event.get("receipt_id") for event in record.get("history", []) if isinstance(event, Mapping) and isinstance(event.get("receipt_id"), str)], details=[]))
+        details: list[dict[str, str]] = []
+        character_budget = record.get("budget")
+        if isinstance(character_budget, Mapping) and character_budget.get("calibrated_max_chars") == 0:
+            details.append(_detail("Character budget", f"calibrated_max_chars=0; max_chars={character_budget.get('max_chars')}"))
+            if isinstance(character_budget.get("max_chars"), int) and character_budget["max_chars"] > 0:
+                details.append(_detail("Budget basis", "nominal_cps_fallback_zero_calibration — text-only target, not measured audio fit"))
+            if raw_status != "actual_fits":
+                details.append(_detail("Timing warning", "Audio timing is unverified."))
+        rows.append(_row(record.get("cue_id", record.get("case_id")), record.get("source_id", ""), record.get("original"), start=start, end=end, repetition=record.get("repetition"), arm="standard", generator=generator, generator_mode=generator_mode, arbiter=arbiter, arbiter_mode=arbiter_mode, candidates=candidates, initial_verdict=initial_verdict, verdict=verdict, accepted=valid, accepted_text=final_text if valid else None, status=status, issues=final.get("issues"), advice=final.get("advice", record.get("failure", "")), context=record.get("context"), receipt_ids=[event.get("receipt_id") for event in record.get("history", []) if isinstance(event, Mapping) and isinstance(event.get("receipt_id"), str)], details=details))
     if not rows:
         raise ValueError("trial report contains no records")
     if _is_primary_trial(report):
@@ -1661,7 +1677,7 @@ def _valid_sidecar(root: Path) -> bool:
         return False
     try:
         value = _read_json(path)
-        return isinstance(value, Mapping) and value.get("schema") == SIDECAR_SCHEMA and value.get("schema_version") == 1 and value.get("root") == str(root) and value.get("execution_kind") in {"live_model_run", "explicit_user_confirmed_backfill"} and value.get("live_run") is True and HTML_MARKER in html.read_text(encoding="utf-8") and value.get("html_sha256") == _sha_bytes(html.read_bytes())
+        return isinstance(value, Mapping) and value.get("schema") == SIDECAR_SCHEMA and value.get("schema_version") == 1 and value.get("root") == str(root) and value.get("execution_kind") in {"live_model_run", "inherited_live_model_run", "explicit_user_confirmed_backfill"} and value.get("live_run") is True and HTML_MARKER in html.read_text(encoding="utf-8") and value.get("html_sha256") == _sha_bytes(html.read_bytes())
     except (OSError, ValueError, UnicodeError):
         return False
 
@@ -1712,7 +1728,8 @@ def _publish_safely(root: Path, *, confirmed_real_run: bool, raise_errors: bool 
             if HTML_MARKER not in existing:
                 raise FileExistsError("refusing to overwrite foreign shortening.html")
         _atomic_bytes(path, html.encode("utf-8"))
-        metadata = {"schema": SIDECAR_SCHEMA, "schema_version": 1, "execution_kind": "live_model_run" if not confirmed_real_run else "explicit_user_confirmed_backfill", "source": "explicit_live_entrypoint" if not confirmed_real_run else "explicit_user_confirmed_backfill", "live_run": True, "confirmed_real_run": confirmed_real_run, "root": str(root), "source_files_sha256": _artifact_files(root), "html_sha256": _sha_bytes(html.encode("utf-8")), "rowcount": len(document.get("rows", [])), "status": document.get("status", "partial")}
+        migrated = isinstance(_read_json(root / "report.json").get("metadata", {}).get("migration"), Mapping) if (root / "report.json").exists() else False
+        metadata = {"schema": SIDECAR_SCHEMA, "schema_version": 1, "execution_kind": "inherited_live_model_run" if migrated else "live_model_run" if not confirmed_real_run else "explicit_user_confirmed_backfill", "source": "validated_ancestral_journal" if migrated else "explicit_live_entrypoint" if not confirmed_real_run else "explicit_user_confirmed_backfill", "live_run": True, "confirmed_real_run": confirmed_real_run, "root": str(root), "source_files_sha256": _artifact_files(root), "html_sha256": _sha_bytes(html.encode("utf-8")), "rowcount": len(document.get("rows", [])), "status": document.get("status", "partial")}
         _atomic_bytes(root / SIDECAR_NAME, (_canonical(metadata) + "\n").encode("utf-8"))
         return path
     except Exception as exc:

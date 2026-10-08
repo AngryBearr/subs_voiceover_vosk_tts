@@ -67,6 +67,21 @@ def test_prepare_is_offline_and_preserves_source_fields(tmp_path: Path) -> None:
     assert "profile_hash" not in prepared.metadata["calibration"]
 
 
+def test_prepare_zero_calibration_keeps_forecast_and_excludes_already_short_text(tmp_path: Path) -> None:
+    args, source, profile_path = _fixture(tmp_path, text="Да.")
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["char_linear_guard_sec"] = 2.0
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    before = source.read_bytes()
+    prepared = prepare_run(args)
+    plan = prepared.plans[0]
+    assert plan.calibrated_max_chars == 0 and plan.max_chars == 19
+    assert plan.status == "fits" and plan.short_timing_risk
+    assert prepared.target_ids == []  # No forced generation for text already within target.
+    assert source.read_bytes() == before
+    assert not args.output_dir.exists()
+
+
 def test_dry_run_does_not_construct_live_components(tmp_path: Path, monkeypatch: Any) -> None:
     args, _, _ = _fixture(tmp_path)
     args.dry_run = True
