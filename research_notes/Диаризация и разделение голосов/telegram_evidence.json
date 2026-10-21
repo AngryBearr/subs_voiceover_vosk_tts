@@ -1,0 +1,1119 @@
+{
+  "archive": {
+    "source_root": "/home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11",
+    "format": "Telegram Desktop HTML; no result.json present",
+    "titles": [
+      "Распознавание и синтез речи"
+    ],
+    "HTML_files": [
+      {
+        "relative": "messages.html",
+        "bytes": 663441,
+        "mtime_ns": 1791736975135273969,
+        "sha256": "3aa7fdc9efac71701441e8c218ebb18e6bf0e5f82d26da228cf7de35b07c3cea"
+      },
+      {
+        "relative": "messages2.html",
+        "bytes": 723387,
+        "mtime_ns": 1791736979291350173,
+        "sha256": "b89e4ec4b72d65818c6d77f0a05f05ed749c6b2887ec48626d0980618d9a4de3"
+      },
+      {
+        "relative": "messages3.html",
+        "bytes": 673325,
+        "mtime_ns": 1791736982874378732,
+        "sha256": "405d7f61019d1c57f21eda6437cd6710c366ac6b2f73791e60f7ac7a68bf7936"
+      },
+      {
+        "relative": "messages4.html",
+        "bytes": 634474,
+        "mtime_ns": 1791736985806544444,
+        "sha256": "6490c64a4e89aa058d0d693b46eefa79db09460d2f2753143daed731bb5d410e"
+      },
+      {
+        "relative": "messages5.html",
+        "bytes": 649623,
+        "mtime_ns": 1791736988381733283,
+        "sha256": "8ac1d9bb53f128790ed74461c69f2cf762354329be6e30447121f2e42e438e7d"
+      },
+      {
+        "relative": "messages6.html",
+        "bytes": 667042,
+        "mtime_ns": 1791736992128452483,
+        "sha256": "d7521f623c62eeef89b885d016b44e4f1c02b8935607ebc6384bee7ccb69dc0a"
+      },
+      {
+        "relative": "messages7.html",
+        "bytes": 677139,
+        "mtime_ns": 1791736996538487625,
+        "sha256": "1e79dde1e86d8d173b3ac77ff6dd80c4ed732b406e6e6b71bc58647445e72a65"
+      },
+      {
+        "relative": "messages8.html",
+        "bytes": 697551,
+        "mtime_ns": 1791737004010547161,
+        "sha256": "2b705b7ee5d905bb46e9ec9b9fea920b18b3a212909aab498e40a8c934f637f4"
+      },
+      {
+        "relative": "messages9.html",
+        "bytes": 701673,
+        "mtime_ns": 1791737010192115153,
+        "sha256": "072de68543a87aa05a920ed38aae4ed1ccbbdfcd3507246cf6bc9ec09feeee44"
+      },
+      {
+        "relative": "messages10.html",
+        "bytes": 724212,
+        "mtime_ns": 1791737014057627204,
+        "sha256": "08b5ee26a258b6b84266d5b91b085113810d80f5fb8f6467abfe7672c13b46b9"
+      },
+      {
+        "relative": "messages11.html",
+        "bytes": 721416,
+        "mtime_ns": 1791737022552138341,
+        "sha256": "34d07aef33a0c33a8974e8653c80e93806d5ddc2a48d42d09eecd558f8bc5502"
+      },
+      {
+        "relative": "messages12.html",
+        "bytes": 691752,
+        "mtime_ns": 1791737026648866485,
+        "sha256": "032950a2c8e282ed73509901e97382c2be160d84c0ca3a378f3f36c550071fca"
+      },
+      {
+        "relative": "messages13.html",
+        "bytes": 687858,
+        "mtime_ns": 1791737032191771647,
+        "sha256": "17af5e193c057ef94e240cff5ba17360becbd49c712a1f2cbe4be85112f81fcb"
+      },
+      {
+        "relative": "messages14.html",
+        "bytes": 665696,
+        "mtime_ns": 1791737037243199037,
+        "sha256": "c9ae4d988a69989976b4527c3b7f69b7c2bf68858f781e940fc1158cd6cedf18"
+      },
+      {
+        "relative": "messages15.html",
+        "bytes": 669952,
+        "mtime_ns": 1791737042395852909,
+        "sha256": "aacaf11e1adf3939c46594980ce448692382c9a5f11f2e977dddceb2d6124513"
+      },
+      {
+        "relative": "messages16.html",
+        "bytes": 654701,
+        "mtime_ns": 1791737049019905657,
+        "sha256": "f0e7f910ddf7c5ce25aabbc4445a38c091f4149c3b423f8971e33ec463f3f33a"
+      },
+      {
+        "relative": "messages17.html",
+        "bytes": 730449,
+        "mtime_ns": 1791737055415956585,
+        "sha256": "040ab76ce486a60b4fcf611aedb52d36c26dc0902f39b0f89cd600dd859a65f1"
+      },
+      {
+        "relative": "messages18.html",
+        "bytes": 696188,
+        "mtime_ns": 1791737059536989397,
+        "sha256": "ce8dd4cb3a6aa304285f93083a9c5deceb0d8f470371a511c80cca38f3ac0c88"
+      },
+      {
+        "relative": "messages19.html",
+        "bytes": 727771,
+        "mtime_ns": 1791737064248026904,
+        "sha256": "4120aa86a46352b2061a2d6b36423a82ee8d13f6f8e534fcdad1eb93f8a1739e"
+      },
+      {
+        "relative": "messages20.html",
+        "bytes": 741060,
+        "mtime_ns": 1791737070456076327,
+        "sha256": "38856150bece7fc915b51ab4675ac5cfa56e2018dada36d79ac7b44edfbfff34"
+      },
+      {
+        "relative": "messages21.html",
+        "bytes": 654824,
+        "mtime_ns": 1791737076173606194,
+        "sha256": "bb4bc3ebcd6ba2c9a94886d22b0a4322a2a2952c5b1b15a5fed891e20f755454"
+      },
+      {
+        "relative": "messages22.html",
+        "bytes": 699760,
+        "mtime_ns": 1791737082824768582,
+        "sha256": "b1e1db9b991d810248b9740dd1cdb8f503587c0f0e4912a71c6e2b310cdfeba3"
+      },
+      {
+        "relative": "messages23.html",
+        "bytes": 700612,
+        "mtime_ns": 1791737086626205048,
+        "sha256": "9fbe7e163d898d33abb329da642bbf47b6bc61c1ad2be7a3e4e793ce3e442400"
+      },
+      {
+        "relative": "messages24.html",
+        "bytes": 687379,
+        "mtime_ns": 1791737091228794732,
+        "sha256": "3fa2e413b4ab68de0068a1fe8e78d264276db984a9c3d34b922e905b433ba964"
+      },
+      {
+        "relative": "messages25.html",
+        "bytes": 752675,
+        "mtime_ns": 1791737098527299774,
+        "sha256": "405fb601971eb189fa4677b2f6a712a3e1f9577ad28e5e8bd56e6ed5a208dbd4"
+      },
+      {
+        "relative": "messages26.html",
+        "bytes": 731640,
+        "mtime_ns": 1791737104206069305,
+        "sha256": "14c99a99a04969fe805f7d5c6c39d66ca36868e18b51eb36eaa6373656d70b55"
+      },
+      {
+        "relative": "messages27.html",
+        "bytes": 724711,
+        "mtime_ns": 1791737108843381878,
+        "sha256": "972554a5e45aef81c9a5d1616d238228cdab23d1af952f6998531910610d8162"
+      },
+      {
+        "relative": "messages28.html",
+        "bytes": 743295,
+        "mtime_ns": 1791737115977438653,
+        "sha256": "49886124ac601409510745e38599696d61a2a6b602e2e0fe27be5a75fdf982f4"
+      },
+      {
+        "relative": "messages29.html",
+        "bytes": 699558,
+        "mtime_ns": 1791737123314821613,
+        "sha256": "4cea027d0a47129f388d868dc726c446d3445bc682fdcc979bc2ca3de6b15c03"
+      },
+      {
+        "relative": "messages30.html",
+        "bytes": 746863,
+        "mtime_ns": 1791737130397553405,
+        "sha256": "cdb75f52f81519a7374568f6eef85c97eeded039a45abbb6141cdae7012508f8"
+      },
+      {
+        "relative": "messages31.html",
+        "bytes": 325344,
+        "mtime_ns": 1791737132315568668,
+        "sha256": "f61fd5a8ba4d68cbc28f3f5541c08003a2f00198fc50edd79d86a560a62c53a6"
+      }
+    ],
+    "message_count_including_service": 31167,
+    "ordinary_message_count": 28321,
+    "first_date": "2024-12-01",
+    "last_date": "2026-10-11",
+    "cutoff": "2026-01-31",
+    "ordinary_messages_at_or_before_cutoff": 20043,
+    "privacy": "Author names/profile pictures/service bodies not captured; later text not collected"
+  },
+  "selected_post_count": 15,
+  "selected_posts": [
+    {
+      "id": 73832,
+      "date": "2024-12-20",
+      "timestamp": "20.12.2024 11:59:29 UTC+02:00",
+      "html_file": "messages2.html",
+      "anchor": "message73832",
+      "links": [],
+      "reply_to": [],
+      "quote": "Доброе утро! Подскажите, не находили что-то приятное для разделения спикеров на русском?",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages2.html#message73832",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "Speaker-separation request in December 2024",
+      "test_type": "diarization question",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": []
+    },
+    {
+      "id": 74569,
+      "date": "2024-12-28",
+      "timestamp": "28.12.2024 16:27:26 UTC+02:00",
+      "html_file": "messages2.html",
+      "anchor": "message74569",
+      "links": [],
+      "reply_to": [],
+      "quote": "коллеги, всех с наступающим :) кому-нибудь удавалось (успешно) применить pyannote/segmentation-3.0 для сегментации спикеров на русском языке? я возможно как-то неправильно его готовил, но у меня на русском языке оно выдавало результаты, близкие к случайным: и разделяло спикеров там, где спикер вообще-то один, и двух спикеров принимало за одного при этом на английском языке всё +- ок работало. проверял на условно-случайных роликах с ютуба, т.е. звук нормальный, но лёгкий фоновый шум и приглушённая музыка в наличии была, может, конечно, и в этом дело. собственно, основной вопрос: оно реально для русского языка не очень, или я всё-таки что-то неправильно сделал? хочу понять,",
+      "quote_truncated": true,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages2.html#message74569",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "Russian pyannote/segmentation-3.0 failure anecdote",
+      "test_type": "diarization anecdote",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 74572,
+          "date": "2024-12-28",
+          "timestamp": "28.12.2024 16:38:05 UTC+02:00",
+          "html_file": "messages2.html",
+          "anchor": "message74572",
+          "links": [],
+          "reply_to": [
+            74571
+          ],
+          "quote": "WhisperX нормально работает, разделяет спикеров, работает на Nvidia (скорость зависит от мощности) и на CPU (очень медленно). А так делаю через assamblly ai или через gladia, быстро не дорого и удобно",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages2.html#message74572",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 75129,
+      "date": "2025-01-03",
+      "timestamp": "03.01.2025 21:17:14 UTC+02:00",
+      "html_file": "messages3.html",
+      "anchor": "message75129",
+      "links": [
+        "https://github.com/resemble-ai/resemble-enhance"
+      ],
+      "reply_to": [
+        75107
+      ],
+      "quote": "Можно использовать Ultimate Vocal Remover (UVR) для voice separation (отделения голоса от остальных звуков) Или Resemble enchance в режиме denoise (убирания шумов)",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages3.html#message75129",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "UVR / Resemble enhancement recommendation",
+      "test_type": "voice-vs-background/denoising",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": []
+    },
+    {
+      "id": 76476,
+      "date": "2025-01-20",
+      "timestamp": "20.01.2025 13:02:53 UTC+02:00",
+      "html_file": "messages3.html",
+      "anchor": "message76476",
+      "links": [],
+      "reply_to": [
+        61346
+      ],
+      "quote": "привет, решил попробовать wespeaker для диаризации, не до конца понимаю какие из моделей использовались в тесте, скрин из кода wespeaker для скачивания моделей ?",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages3.html#message76476",
+      "public_permalink": null,
+      "photos": [
+        "photos/photo_1333@20-01-2025_13-02-53.jpg"
+      ],
+      "summary": "Wespeaker model-list screenshot; reply says these were not tested",
+      "test_type": "code screenshot, not benchmark",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 76477,
+          "date": "2025-01-20",
+          "timestamp": "20.01.2025 13:44:50 UTC+02:00",
+          "html_file": "messages3.html",
+          "anchor": "message76477",
+          "links": [],
+          "reply_to": [
+            76476
+          ],
+          "quote": "Эти модели не использовались, но можете взять voxblinkp",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages3.html#message76477",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 77762,
+      "date": "2025-02-10",
+      "timestamp": "10.02.2025 00:17:38 UTC+02:00",
+      "html_file": "messages5.html",
+      "anchor": "message77762",
+      "links": [],
+      "reply_to": [
+        77759
+      ],
+      "quote": "Для разделения голосов мы рекомендуем библиотеку wespeaker с моделью voxblink/SimAMResNet100. У гугла всё распознавание так себе, но последнее внутри gemini-flash неплохо.",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages5.html#message77762",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "Wespeaker voxblink/SimAMResNet100 recommendation",
+      "test_type": "speaker embeddings/diarization",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": []
+    },
+    {
+      "id": 81241,
+      "date": "2025-04-05",
+      "timestamp": "05.04.2025 07:11:21 UTC+02:00",
+      "html_file": "messages8.html",
+      "anchor": "message81241",
+      "links": [],
+      "reply_to": [
+        81237
+      ],
+      "quote": "1 Виспер умеет определять язык 2 любая подходящая для вас asr 3 это задача диаризации на два спикера или speech separation если много перебиваний и люди говорят одновременно.",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages8.html#message81241",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "Explicit diarization vs simultaneous-speech separation distinction",
+      "test_type": "speech-overlap task guidance",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": []
+    },
+    {
+      "id": 82898,
+      "date": "2025-05-03",
+      "timestamp": "03.05.2025 05:18:41 UTC+02:00",
+      "html_file": "messages10.html",
+      "anchor": "message82898",
+      "links": [],
+      "reply_to": [
+        82870
+      ],
+      "quote": "Я юзаю mossformer2.",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages10.html#message82898",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "MossFormer2 recommendation in denoising context",
+      "test_type": "denoising recommendation, not 3-speaker test",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 82870,
+          "date": "2025-05-03",
+          "timestamp": "03.05.2025 04:56:43 UTC+02:00",
+          "html_file": "messages10.html",
+          "anchor": "message82870",
+          "links": [],
+          "reply_to": [
+            82869
+          ],
+          "quote": "Жаль просто хочу реализовать свою cnn для удаления шума в аудио с последующей классификаций но нашел пару статей с общей информацией, и поэтому хотел проконсультироваться с кем-то более умным в этой теме",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages10.html#message82870",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 82900,
+          "date": "2025-05-03",
+          "timestamp": "03.05.2025 05:20:20 UTC+02:00",
+          "html_file": "messages10.html",
+          "anchor": "message82900",
+          "links": [
+            "https://github.com/alibabasglab/MossFormer2"
+          ],
+          "reply_to": [
+            82899
+          ],
+          "quote": "https://github.com/alibabasglab/MossFormer2",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages10.html#message82900",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 82903,
+          "date": "2025-05-03",
+          "timestamp": "03.05.2025 05:22:49 UTC+02:00",
+          "html_file": "messages10.html",
+          "anchor": "message82903",
+          "links": [],
+          "reply_to": [],
+          "quote": "Есть ещё clear voice studio. Там получше должно быть (speech enhancement MossFormer)",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages10.html#message82903",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 84757,
+      "date": "2025-06-15",
+      "timestamp": "15.06.2025 23:52:48 UTC+02:00",
+      "html_file": "messages11.html",
+      "anchor": "message84757",
+      "links": [
+        "https://huggingface.co/pyannote/separation-ami-1.0"
+      ],
+      "reply_to": [],
+      "quote": "Кто то пробовал ? Я так пологаю ее нужно дообучать. https://huggingface.co/pyannote/separation-ami-1.0",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages11.html#message84757",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "pyannote AMI separation query; one-channel failure report",
+      "test_type": "speech-separation anecdote",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 84758,
+          "date": "2025-06-15",
+          "timestamp": "15.06.2025 23:53:50 UTC+02:00",
+          "html_file": "messages11.html",
+          "anchor": "message84758",
+          "links": [],
+          "reply_to": [
+            84757
+          ],
+          "quote": "А это разве не устаревший диаризатор?",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages11.html#message84758",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 84759,
+          "date": "2025-06-15",
+          "timestamp": "15.06.2025 23:54:23 UTC+02:00",
+          "html_file": "messages11.html",
+          "anchor": "message84759",
+          "links": [
+            "https://huggingface.co/pyannote/speech-separation-ami-1.0"
+          ],
+          "reply_to": [
+            84758
+          ],
+          "quote": "ну вот у них он ластовый, но как будто не делает то что должен. Получаю 1 канал аудио https://huggingface.co/pyannote/speech-separation-ami-1.0",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages11.html#message84759",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 84761,
+          "date": "2025-06-16",
+          "timestamp": "16.06.2025 00:07:42 UTC+02:00",
+          "html_file": "messages11.html",
+          "anchor": "message84761",
+          "links": [
+            "https://t.me/speech_recognition_ru/61346"
+          ],
+          "reply_to": [],
+          "quote": "Ну я сейчас pyannote юзаю, но тут Николай делал табличку: https://t.me/speech_recognition_ru/61346",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages11.html#message84761",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 88741,
+      "date": "2025-09-10",
+      "timestamp": "10.09.2025 11:51:42 UTC+02:00",
+      "html_file": "messages15.html",
+      "anchor": "message88741",
+      "links": [
+        "https://github.com/joonaskalda/PixIT"
+      ],
+      "reply_to": [
+        88738
+      ],
+      "quote": "для пересечений попробовать https://github.com/joonaskalda/PixIT",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages15.html#message88741",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "PixIT suggested for overlapping speakers",
+      "test_type": "overlap/separation research lead",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 88738,
+          "date": "2025-09-10",
+          "timestamp": "10.09.2025 11:50:17 UTC+02:00",
+          "html_file": "messages15.html",
+          "anchor": "message88738",
+          "links": [],
+          "reply_to": [],
+          "quote": "Да и в подкастах состав тоже плюс-минус постоянный.",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages15.html#message88738",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 88744,
+          "date": "2025-09-10",
+          "timestamp": "10.09.2025 11:54:01 UTC+02:00",
+          "html_file": "messages15.html",
+          "anchor": "message88744",
+          "links": [],
+          "reply_to": [
+            88743
+          ],
+          "quote": "Для детекции пересекающихся спикеров можно использовать модель диаризации. Запускаешь ее на рассматриваемом сегменте",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages15.html#message88744",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 88751,
+          "date": "2025-09-10",
+          "timestamp": "10.09.2025 11:56:48 UTC+02:00",
+          "html_file": "messages15.html",
+          "anchor": "message88751",
+          "links": [],
+          "reply_to": [
+            88744
+          ],
+          "quote": "Что-то, например, wespeaker не попадает. У него постоянно 1 спикер, вместо двух, где два спикера одновременно говорят",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages15.html#message88751",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 90971,
+      "date": "2025-10-30",
+      "timestamp": "30.10.2025 13:31:14 UTC+02:00",
+      "html_file": "messages17.html",
+      "anchor": "message90971",
+      "links": [],
+      "reply_to": [],
+      "quote": "Потестировал Pyannote4 на русской телефонии. Результаты хорошие у precision модели, но все эти ключи, регистрации и телеметрия и так далее немного озадачивают. В целом же библиотека больше ориентирована на подкасты, чем на живое общение, что CDER хорошо показывает. По-прежнему советуем wespeaker с voxblink2, может быть там нужно немного подкрутить, чтобы результаты были лучше.",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages17.html#message90971",
+      "public_permalink": null,
+      "photos": [
+        "photos/photo_1652@30-10-2025_13-31-14.jpg"
+      ],
+      "summary": "Pyannote4/Wespeaker comparison on Russian telephone speech",
+      "test_type": "diarization benchmark screenshot",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 90972,
+          "date": "2025-10-30",
+          "timestamp": "30.10.2025 14:03:24 UTC+02:00",
+          "html_file": "messages17.html",
+          "anchor": "message90972",
+          "links": [],
+          "reply_to": [
+            90971
+          ],
+          "quote": "wespeaker voxblink2 100 хорошо справляется с overlapped speech?",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages17.html#message90972",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 90973,
+          "date": "2025-10-30",
+          "timestamp": "30.10.2025 14:18:37 UTC+02:00",
+          "html_file": "messages17.html",
+          "anchor": "message90973",
+          "links": [],
+          "reply_to": [],
+          "quote": "не очень, там нет поддержки такого в моделях",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages17.html#message90973",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 90974,
+          "date": "2025-10-30",
+          "timestamp": "30.10.2025 14:25:20 UTC+02:00",
+          "html_file": "messages17.html",
+          "anchor": "message90974",
+          "links": [],
+          "reply_to": [
+            90972
+          ],
+          "quote": "не работает, можно pyannote глянуть, у них есть модельки для overalapp speech",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages17.html#message90974",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 90993,
+      "date": "2025-10-31",
+      "timestamp": "31.10.2025 01:06:51 UTC+02:00",
+      "html_file": "messages17.html",
+      "anchor": "message90993",
+      "links": [
+        "https://t.me/piunova_a",
+        "https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md"
+      ],
+      "reply_to": [],
+      "quote": "Diarizen https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md Лучше Pyannote по результатам. Чуть медленнее, но не критично. Можно пользоваться.",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages17.html#message90993",
+      "public_permalink": null,
+      "photos": [
+        "photos/photo_1654@31-10-2025_01-06-51.jpg"
+      ],
+      "summary": "Diarizen vs Pyannote test and screenshot",
+      "test_type": "diarization benchmark screenshot",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": []
+    },
+    {
+      "id": 93609,
+      "date": "2025-12-03",
+      "timestamp": "03.12.2025 12:57:31 UTC+02:00",
+      "html_file": "messages20.html",
+      "anchor": "message93609",
+      "links": [],
+      "reply_to": [
+        93607
+      ],
+      "quote": "или самому пройтись roformer моделькой",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message93609",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "RoFormer recommendation to remove music / extract voice",
+      "test_type": "music/vocal stems",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 93606,
+          "date": "2025-12-03",
+          "timestamp": "03.12.2025 12:34:25 UTC+02:00",
+          "html_file": "messages20.html",
+          "anchor": "message93606",
+          "links": [],
+          "reply_to": [],
+          "quote": "Убираешь всю музыку из трека и остается только голос, всё Типа Suno нужно я так понимаю, но который не генерит музыку, только голос",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message93606",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 93607,
+          "date": "2025-12-03",
+          "timestamp": "03.12.2025 12:34:59 UTC+02:00",
+          "html_file": "messages20.html",
+          "anchor": "message93607",
+          "links": [],
+          "reply_to": [],
+          "quote": "в suno можно сгенерить трек, а потом вытащить только голос, но в тарифе Pro",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message93607",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 93608,
+          "date": "2025-12-03",
+          "timestamp": "03.12.2025 12:35:12 UTC+02:00",
+          "html_file": "messages20.html",
+          "anchor": "message93608",
+          "links": [],
+          "reply_to": [],
+          "quote": "функция Get Stems",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message93608",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 94052,
+      "date": "2025-12-09",
+      "timestamp": "09.12.2025 17:04:28 UTC+02:00",
+      "html_file": "messages20.html",
+      "anchor": "message94052",
+      "links": [
+        "https://t.me/piunova_a",
+        "https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md"
+      ],
+      "reply_to": [],
+      "quote": "Diarizen https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md Лучше Pyannote по результатам. Чуть медленнее, но не критично. Можно пользоваться.",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message94052",
+      "public_permalink": null,
+      "photos": [
+        "photos/photo_1654@31-10-2025_01-06-51.jpg"
+      ],
+      "summary": "Diarizen screenshot repost; noncommercial-license warning",
+      "test_type": "diarization benchmark repost",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 94050,
+          "date": "2025-12-09",
+          "timestamp": "09.12.2025 16:56:40 UTC+02:00",
+          "html_file": "messages20.html",
+          "anchor": "message94050",
+          "links": [],
+          "reply_to": [
+            94046
+          ],
+          "quote": "Wespeaker лучше pyannote для диаризации русской речи?",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message94050",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 94053,
+          "date": "2025-12-09",
+          "timestamp": "09.12.2025 17:34:59 UTC+02:00",
+          "html_file": "messages20.html",
+          "anchor": "message94053",
+          "links": [],
+          "reply_to": [
+            94052
+          ],
+          "quote": "У нее оказалась некоммерческая лицензия, так что для прода не подойдет к сожалению",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message94053",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 94054,
+          "date": "2025-12-09",
+          "timestamp": "09.12.2025 17:36:08 UTC+02:00",
+          "html_file": "messages20.html",
+          "anchor": "message94054",
+          "links": [],
+          "reply_to": [],
+          "quote": "А для ресерча хорошо",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages20.html#message94054",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 94366,
+      "date": "2025-12-17",
+      "timestamp": "17.12.2025 08:06:33 UTC+02:00",
+      "html_file": "messages21.html",
+      "anchor": "message94366",
+      "links": [
+        "https://github.com/facebookresearch/sam-audio"
+      ],
+      "reply_to": [],
+      "quote": "Ох, что тут Meta выкатила: Segment Anything Model for Audio это как сегментация объектов на картинке, только на аудио. 1. можно текстом выделить нужное аудио(голос мужщины) 2. прямо на видео показываем объект, чтоб получить звуки которые издает этот объект(я так понял в том числе можно ткнуть персонажа и получить его голос, некая диаризация с учетом видео) 3. указать временные интервалы, где встречается целевой звук",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages21.html#message94366",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "Segment Anything Model for Audio announcement",
+      "test_type": "prompted audio extraction, not blind-three-speaker proof",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 94367,
+          "date": "2025-12-17",
+          "timestamp": "17.12.2025 09:38:26 UTC+02:00",
+          "html_file": "messages21.html",
+          "anchor": "message94367",
+          "links": [],
+          "reply_to": [
+            94366
+          ],
+          "quote": "Впечатляет, source separation и диаризация на максималках) потестить бы, я не очень понимаю что за метрика у них Статьи пока нет?",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages21.html#message94367",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 94368,
+          "date": "2025-12-17",
+          "timestamp": "17.12.2025 09:47:32 UTC+02:00",
+          "html_file": "messages21.html",
+          "anchor": "message94368",
+          "links": [],
+          "reply_to": [
+            94367
+          ],
+          "quote": "Демка была",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages21.html#message94368",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    },
+    {
+      "id": 96065,
+      "date": "2026-01-30",
+      "timestamp": "30.01.2026 20:39:47 UTC+02:00",
+      "html_file": "messages22.html",
+      "anchor": "message96065",
+      "links": [],
+      "reply_to": [
+        96063
+      ],
+      "quote": "Speaker separation на два канала и распознавали каждый из них? Все speaker separation, что я видела - очень плохи в этом",
+      "quote_truncated": false,
+      "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages22.html#message96065",
+      "public_permalink": null,
+      "photos": [],
+      "summary": "Speaker-separation question clarified as separate stereo-channel ASR",
+      "test_type": "already separated channels vs blind mono separation",
+      "three_simultaneous_blind_speaker_separation_demonstrated": false,
+      "claims_source": "archive participant claim, not independent primary-model verification or our benchmark",
+      "context": [
+        {
+          "id": 96067,
+          "date": "2026-01-30",
+          "timestamp": "30.01.2026 21:32:23 UTC+02:00",
+          "html_file": "messages22.html",
+          "anchor": "message96067",
+          "links": [],
+          "reply_to": [
+            96065
+          ],
+          "quote": "Нет, отдельно распознавание каждого канала и склейка по таймметкам расшифровки.",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages22.html#message96067",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 96069,
+          "date": "2026-01-30",
+          "timestamp": "30.01.2026 21:35:19 UTC+02:00",
+          "html_file": "messages22.html",
+          "anchor": "message96069",
+          "links": [],
+          "reply_to": [
+            96067
+          ],
+          "quote": "А если моно на вход с двумя спикерами?",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages22.html#message96069",
+          "public_permalink": null,
+          "photos": []
+        },
+        {
+          "id": 96070,
+          "date": "2026-01-30",
+          "timestamp": "30.01.2026 21:36:27 UTC+02:00",
+          "html_file": "messages22.html",
+          "anchor": "message96070",
+          "links": [],
+          "reply_to": [
+            96069
+          ],
+          "quote": "100% качества разделения все равно не будет, смотря как говорят. Может одного к другому прицеплять если перебивают и тд.",
+          "quote_truncated": false,
+          "local_reference": "file:///home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/messages22.html#message96070",
+          "public_permalink": null,
+          "photos": []
+        }
+      ]
+    }
+  ],
+  "images": [
+    {
+      "original_relative": "photos/photo_1333@20-01-2025_13-02-53.jpg",
+      "source_path": "/home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/photos/photo_1333@20-01-2025_13-02-53.jpg",
+      "source_bytes": 18904,
+      "source_mtime_ns": 1791736982666359455,
+      "sha256": "c6cd861ee132c81981a1a74bedc1976f76ed1a0a451fa70f25c53b624e58be3a",
+      "dimensions": [
+        481,
+        256
+      ],
+      "format": "JPEG",
+      "workspace_path": "research_notes/Диаризация и разделение голосов/images/post_76476_photo_1333@20-01-2025_13-02-53.jpg",
+      "workspace_absolute_path": "/home/vladimir-barbuta/.local/share/opencode/worktree/27b645de845b0093cddb503ef9bf581c09548f67/feat-stt-pipeline/research_notes/Диаризация и разделение голосов/images/post_76476_photo_1333@20-01-2025_13-02-53.jpg",
+      "post_ids": [
+        76476
+      ],
+      "status": "copied_byte_identical",
+      "conversion": "none; original full image retained",
+      "test_type": "code screenshot, not benchmark",
+      "visual_inspection": {
+        "status": "read via native image tool from copied workspace asset",
+        "description": "Code screenshot: class Hub, Assets mapping, language/Campplus/Res2Net/Voxblink2 archive names; not a test graph/table",
+        "visually_confirmed_asset_keys": [
+          "chinese",
+          "english",
+          "campplus",
+          "eres2net",
+          "vblinkp",
+          "vblinkf"
+        ],
+        "benchmark_numbers_present": false
+      },
+      "our_measured_GPU_or_CPU_benchmark": false
+    },
+    {
+      "original_relative": "photos/photo_1652@30-10-2025_13-31-14.jpg",
+      "source_path": "/home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/photos/photo_1652@30-10-2025_13-31-14.jpg",
+      "source_bytes": 87269,
+      "source_mtime_ns": 1791737053887599094,
+      "sha256": "0b461ca53954844f9b212ff0a0bfeca9ff6ddef1678a5fbf171b4e9083d423af",
+      "dimensions": [
+        906,
+        499
+      ],
+      "format": "JPEG",
+      "workspace_path": "research_notes/Диаризация и разделение голосов/images/post_90971_photo_1652@30-10-2025_13-31-14.jpg",
+      "workspace_absolute_path": "/home/vladimir-barbuta/.local/share/opencode/worktree/27b645de845b0093cddb503ef9bf581c09548f67/feat-stt-pipeline/research_notes/Диаризация и разделение голосов/images/post_90971_photo_1652@30-10-2025_13-31-14.jpg",
+      "post_ids": [
+        90971
+      ],
+      "status": "copied_byte_identical",
+      "conversion": "none; original full image retained",
+      "test_type": "diarization benchmark screenshot",
+      "visual_inspection": {
+        "status": "read via native image tool from copied workspace asset",
+        "description": "Full table headed Dataset: телефония, русский язык; DER/CDER/xRT columns, NeMo, Pyannote, Whisper Diarization, Wespeaker rows",
+        "dataset_label": "телефония, русский язык",
+        "metric_units_or_protocol": "not specified by image",
+        "selected_visually_read_rows": [
+          {
+            "label": "Pyannote4 Precision",
+            "DER": 14.96,
+            "CDER": 0.355,
+            "xRT": 0.039
+          },
+          {
+            "label": "Wespeaker Voxblink2 100",
+            "DER": 20.1,
+            "CDER": 0.115,
+            "xRT": 0.025
+          }
+        ],
+        "notes": "Bold highlight favors Precision DER and Voxblink2 CDER separately; not proof of three simultaneous voices or waveform stems"
+      },
+      "our_measured_GPU_or_CPU_benchmark": false
+    },
+    {
+      "original_relative": "photos/photo_1654@31-10-2025_01-06-51.jpg",
+      "source_path": "/home/vladimir-barbuta/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-11/photos/photo_1654@31-10-2025_01-06-51.jpg",
+      "source_bytes": 96374,
+      "source_mtime_ns": 1791737054214131037,
+      "sha256": "ed5f4be0646a01ebb3538f726a870349cfb7a47d3d474287bfdd0e34fa7b2577",
+      "dimensions": [
+        927,
+        534
+      ],
+      "format": "JPEG",
+      "workspace_path": "research_notes/Диаризация и разделение голосов/images/post_90993_photo_1654@31-10-2025_01-06-51.jpg",
+      "workspace_absolute_path": "/home/vladimir-barbuta/.local/share/opencode/worktree/27b645de845b0093cddb503ef9bf581c09548f67/feat-stt-pipeline/research_notes/Диаризация и разделение голосов/images/post_90993_photo_1654@31-10-2025_01-06-51.jpg",
+      "post_ids": [
+        90993,
+        94052
+      ],
+      "status": "copied_byte_identical",
+      "conversion": "none; original full image retained",
+      "test_type": "diarization benchmark screenshot",
+      "visual_inspection": {
+        "status": "read via native image tool from copied workspace asset",
+        "description": "Same Russian-telephone diarization table plus Diarizen Large MD bottom row, peach highlight; no music stems or separated waveforms",
+        "dataset_label": "телефония, русский язык",
+        "metric_units_or_protocol": "not specified by image",
+        "selected_visually_read_rows": [
+          {
+            "label": "Diarizen Large MD",
+            "DER": 13.64,
+            "CDER": 0.319,
+            "xRT": 0.083
+          },
+          {
+            "label": "Pyannote4 Precision",
+            "DER": 14.96,
+            "CDER": 0.355,
+            "xRT": 0.039
+          },
+          {
+            "label": "Wespeaker Voxblink2 100",
+            "DER": 20.1,
+            "CDER": 0.115,
+            "xRT": 0.025
+          }
+        ],
+        "notes": "Reused unchanged by post94052; smaller DER is not best CDER; no three-source test protocol or hardware shown"
+      },
+      "our_measured_GPU_or_CPU_benchmark": false
+    }
+  ],
+  "copied_image_count": 3,
+  "copied_bytes": 202547,
+  "channel_identification": {
+    "export_title": "Распознавание и синтез речи",
+    "public_handle_confirmed_from_header": false,
+    "observed_related_link": "https://t.me/speech_recognition_ru/61346",
+    "older_target_61346_present": false,
+    "note": "This exact older table is referenced by post84761; header lacks handle. Do not invent public permalinks for other posts; use verified local anchors."
+  },
+  "cutoff_policy": "<=2026-01-31; prioritize 2025 and older; later content not recommendation evidence",
+  "eligible_blind_three_speaker_shortlist": [],
+  "research_leads_not_yet_eligible": [
+    {
+      "model": "PixIT",
+      "post_id": 88741,
+      "link": "https://github.com/joonaskalda/PixIT",
+      "caveat": "Explicit overlap suggestion, no archived three-source metric/photo proof"
+    },
+    {
+      "model": "pyannote/speech-separation-ami-1.0",
+      "post_id": 84757,
+      "link": "https://huggingface.co/pyannote/speech-separation-ami-1.0",
+      "caveat": "Participant reports only one audio channel, not successful triple separation"
+    },
+    {
+      "model": "MossFormer2",
+      "post_id": 82898,
+      "link": "https://github.com/alibabasglab/MossFormer2",
+      "caveat": "Denoising thread; available 3-source checkpoint/task must be independently verified"
+    }
+  ],
+  "no_eligible_shortlist_reason": "No selected post/image demonstrates blind simultaneous 3-human waveform separation. Diarization tables and voice-vs-music are different tasks.",
+  "preservation": {
+    "HTML_baseline_sha_size_mtime_match": true,
+    "photo_source_hash_size_mtime_match": true,
+    "source_writes": 0,
+    "whole_backup_copied": false
+  },
+  "permissions": "Native source directory/file access succeeded for exact user-supplied export; no siblings/auth/config inspected",
+  "preprocessing": "Python stdlib HTMLParser+hash/copy, existing Pillow header inspection; no dependency installation, conversion, scripts from HTML, network or GPU action",
+  "checks": {
+    "import": "15 posts; 3 unique images, 202547 bytes, originals byte-identical",
+    "source_preservation": "31 HTML files SHA256/bytes/mtime and 3 photo source SHA256/bytes/mtime passed before/after",
+    "cutoff_context_quotes": "all <=2026-01-31; each excerpt <=100 whitespace-normalized words",
+    "anchors": "actual id=message<ID> present in corresponding HTML",
+    "image_read": "all 3 full copied images visually read; JPEG headers/Pillow verify passed",
+    "executed_commands": [
+      "source vosk_env/bin/activate; uv run --active -m temp.stt_telegram_archive scan",
+      "uv run --active -m temp.stt_telegram_archive inspect (bounded nearby/direct reply context)",
+      "uv run --active -m temp.stt_telegram_archive supplemental",
+      "uv run --active -m temp.stt_telegram_archive extract",
+      "uv run --active -m temp.stt_telegram_archive annotate (after 3 native copied-image reads)",
+      "uv run --active -m temp.stt_telegram_archive verify",
+      "uv run --active -m compileall -q temp/stt_telegram_archive.py",
+      "uv run --active -m json.tool research_notes/Диаризация и разделение голосов/telegram_evidence.json",
+      "git diff --no-index --check /dev/null <helper, notes, evidence JSON>"
+    ],
+    "compile_JSON_whitespace_image_links": "passed",
+    "broad_temporary_snippet_files": "removed; only bounded selected technical evidence retained",
+    "no_missing_selected_assets": true,
+    "no_external_upload_or_model_download_or_GPU_action": true
+  }
+}
