@@ -90,7 +90,8 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   its sentence; a majority correction is applied (`stress.json`: words, or single sentences for
   homographs). S29E01: 129 words checked, 1 name and 25 homograph uses corrected (пора́, по́сле,
   го́лоса/голоса́, О́строва, учи́тесь); cheap models were wrong more often than RUAccent, so the
-  defaults are gpt-6.1-sol, claude-sonnet-5.5 and gemini-4-argon (~$0.18 per episode).
+  defaults are gpt-6.1-sol, claude-sonnet-5.5 and gemini-4-argon (~$0.25-0.35 per episode;
+  off with `"stress_check": false` in `stt_config.json`).
 - **Speech check (after synthesis).** `voiceover.speech_check` transcribes every clip with
   GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
   abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.

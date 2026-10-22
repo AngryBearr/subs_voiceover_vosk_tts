@@ -15,7 +15,8 @@ applied to exactly those sentences after RUAccent.
 
 On S29E01 cheap models (gpt-6-luna-pro, claude-haiku-5.5, deepseek-v4.1-flash) were wrong more
 often than RUAccent (2-3 of 11 majority corrections right), strong ones (gpt-6.1-sol,
-claude-sonnet-5.5, gemini-4-argon) right in 8-9 of 10 (~$0.18 per episode for all three).
+claude-sonnet-5.5, gemini-4-argon) right in 8-9 of 10 (~$0.25-0.35 per episode for all three,
+every homograph sentence included).
 
     uv run -m voiceover.stress_check dub.ru.json --out stress.json [--config voiceover_config.json]
 """
