@@ -24,3 +24,9 @@ def test_check_clip_flags_mispronounced_and_drawn_out() -> None:
     slow = check_clip({**clip, "tts_text": "Мы н+а-а-а вост+оке."}, "мы на востоке",
                       [("мы", 0.0, 0.1), ("на", 0.2, 1.5), ("востоке", 1.6, 2.3)], 2.4)
     assert "drawn_out" in slow["flags"] and slow["stretched_word"] == "на"
+
+
+def test_spelled_abbreviation_matches_asr_spelling() -> None:
+    clip = {"unit_id": "u2", "start_ms": 0, "tempo": 1.0, "tts_text": "Ведомства Сэ-Ш+э-А.", "path": "x.wav"}
+    result = check_clip(clip, "ведомства сша", [("ведомства", 0.0, 0.6), ("сша", 0.7, 1.0)], 1.1)
+    assert result["diffs"] == [] and "pronunciation" not in result["flags"]

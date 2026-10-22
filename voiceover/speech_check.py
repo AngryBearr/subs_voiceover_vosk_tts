@@ -31,6 +31,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
+from voiceover.normalize import SPELLED
 from voiceover.text import syllables
 
 log = logging.getLogger("voiceover.speech_check")
@@ -124,7 +125,10 @@ class Recognizer:
 
 def check_clip(clip: dict[str, Any], heard: str, words: list[tuple[str, float, float]], speech_sec: float
                ) -> dict[str, Any]:
-    reference = plain_words(clip["tts_text"])
+    given = clip["tts_text"].replace("+", "")
+    for abbreviation, spelled in SPELLED.items():  # the ASR writes a spelled-out США as "сша"
+        given = given.replace(spelled, abbreviation)
+    reference = plain_words(given)
     hypothesis = plain_words(heard)
     cer = char_error_rate(" ".join(reference), " ".join(hypothesis))
     per_letter = [(end - start) / max(1, len(text)) for text, start, end in words if len(text) >= 2]

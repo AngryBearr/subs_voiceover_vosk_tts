@@ -12,6 +12,11 @@ def test_expand_numbers_and_abbreviations() -> None:
     assert expand("5 кг риса").text == "пять килограммов риса"
 
 
+def test_expand_spells_letter_abbreviations_with_vowels() -> None:
+    assert expand("Армия США и ФБР.").text == "Армия Сэ-Шэ-А и эф бэ эр."
+    assert expand("Сшалось.").text == "Сшалось."
+
+
 def test_expand_leaves_plain_russian_alone() -> None:
     for text in ["Я не нашла стену - в этом-то и проблема.", "Дженна-Луиза и Сэм у клетки.", "О-о-ох Сью.",
                  "Это Ро.", "Кэт, что ты по этому поводу чувствуешь?", "Э-э... я подслушал... ...разговор..."]:

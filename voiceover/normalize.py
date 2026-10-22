@@ -19,6 +19,10 @@ _TOKEN_RE = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*|[^\w\s]")
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]+(?:[-'’][А-Яа-яЁё]+)*")
 _NUMBER_RE = re.compile(r"\d")
 _GLUED_ELLIPSIS_RE = re.compile(r"(\.{3}|…)(?=[^\W\d_])")
+# Abbreviations read letter by letter although they hold a vowel; rutextnorm keeps such words as
+# they are and the TTS then says them as one syllable (США -> "ша"; found by voiceover.speech_check).
+SPELLED = {"США": "Сэ-Шэ-А", "НЛО": "Эн-Эл-О", "ЮАР": "Ю-А-Эр", "ОАЭ": "О-А-Э"}
+_SPELLED_RE = re.compile(r"(?<![А-Яа-яЁё])(" + "|".join(SPELLED) + r")(?![А-Яа-яЁё])")
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,7 @@ def space_after_ellipsis(text: str) -> str:
 
 def expand(text: str) -> Expanded:
     """Expand digits/abbreviations/Latin; raises ``ValueError`` if a plain word changed."""
+    text = _SPELLED_RE.sub(lambda match: SPELLED[match.group(1)], text)
     result = normalize_russian(text)
     guard(text, result)
     notes = tuple(f"{original!r}: {reason}" for _start, _end, original, reason in flag_uncertain(text))
