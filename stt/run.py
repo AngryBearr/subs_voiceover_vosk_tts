@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +53,10 @@ def dotenv(path: Path = REPO_ROOT / ".env") -> dict[str, str]:
             if match:
                 values[match.group(1)] = match.group(2).strip().strip("'\"")
     return values
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class Episode:
@@ -184,9 +190,23 @@ class Episode:
                                "voice": self._engine()["voices"]["male"]}
         config_path = self.out / f"voiceover.{self.engine}.config.json"
         save_json(config_path, vo_config)
+        self._reset_voiceover_dir()
         self._module(f"voiceover.{self.engine}", "voiceover.pipeline", [
             "run", str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str(self.vo_dir.resolve()),
             "--config", str(config_path.resolve())])
+
+    def _reset_voiceover_dir(self) -> None:
+        """A new dubbing script needs a fresh voice-over folder; manual overrides are kept."""
+        cues = self.vo_dir / "cues.json"
+        if not cues.exists() or load_json(cues).get("source_sha256") == _sha256(self.out / f"dub.ru.{self.engine}.json"):
+            return
+        overrides = self.vo_dir / "overrides.json"
+        kept = overrides.read_bytes() if overrides.exists() else None
+        shutil.rmtree(self.vo_dir)
+        if kept is not None:
+            self.vo_dir.mkdir(parents=True)
+            overrides.write_bytes(kept)
+        log.info("[%s] voiceover: dubbing script changed, started a fresh %s", self.media.stem, self.vo_dir.name)
 
     def check(self) -> None:
         if not self.config["voiceover"].get("speech_check", True):
