@@ -13,10 +13,12 @@ Corrections go to ``stress.json``, which the engines load through
 everywhere), ``sentences`` holds homograph fixes per sentence (два го́лоса / нужны голоса́),
 applied to exactly those sentences after RUAccent.
 
-On S29E01 cheap models (gpt-6-luna-pro, claude-haiku-5.5, deepseek-v4.1-flash) were wrong more
-often than RUAccent (2-3 of 11 majority corrections right), strong ones (gpt-6.1-sol,
-claude-sonnet-5.5, gemini-4-argon) right in 8-9 of 10 (~$0.25-0.35 per episode for all three,
-every homograph sentence included).
+On S29E01 cheap models alone do more harm than good: gpt-6-luna with high reasoning found 27 of
+the 31 corrections of three strong models (gpt-6.1-sol, claude-sonnet-5.5, gemini-4-argon; right
+in 8-9 of 10 checked by hand) but added 36 of its own, mostly wrong (волос -> во́лос, гвозди ->
+гвозди́); deepseek-v4.1-flash found 11 and added 75. So a cheap screener (``screen``) proposes,
+and the strong models only vote on its proposals: ~$0.02 + the strong models on ~1/4 of the
+sentences instead of ~$0.3 for all of them, at the cost of the few corrections the screener misses.
 
     uv run -m voiceover.stress_check dub.ru.json --out stress.json [--config voiceover_config.json]
 """
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from voiceover.engine import build_engine
-from voiceover.llm import LLMClient, LLMConfig
+from voiceover.llm import LLMClient, LLMConfig, LLMError
 from voiceover.text import join_lines
 
 log = logging.getLogger("voiceover.stress_check")
@@ -44,6 +46,7 @@ PROMPT_VERSION = "stress-v2"
 VOWELS = set("аеёиоуыэюя")
 _WORD = re.compile(r"[А-Яа-яЁё+]+")
 DEFAULT_MODELS = ("openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon")
+DEFAULT_SCREEN = {"model": "openai/gpt-6-luna", "reasoning": "high"}
 
 SYSTEM = """You are an expert in Russian pronunciation (orthoepy) checking word stress for a
 text-to-speech voice-over. Each item has an id, a word with its stress marked by "+" before the
@@ -118,18 +121,30 @@ def queries(suspects: list[Suspect]) -> list[tuple[Suspect, str]]:
 
 
 def ask(pairs: list[tuple[Suspect, str]], client: LLMClient, batch: int = 40) -> list[str | None]:
-    """One model's stress for every (word, sentence) pair; None where the answer is invalid."""
+    """One model's stress for every (word, sentence) pair; None where the answer is invalid or missing."""
     out: list[str | None] = []
     for offset in range(0, len(pairs), batch):
-        chunk = pairs[offset:offset + batch]
-        items = [{"id": i, "word": s.accented, "sentence": context, **({"variants": s.variants} if s.variants else {})}
-                 for i, (s, context) in enumerate(chunk)]
+        out += _ask_batch(pairs[offset:offset + batch], client, f"stress:{offset}")
+    return out
+
+
+def _ask_batch(chunk: list[tuple[Suspect, str]], client: LLMClient, tag: str) -> list[str | None]:
+    items = [{"id": i, "word": s.accented, "sentence": context, **({"variants": s.variants} if s.variants else {})}
+             for i, (s, context) in enumerate(chunk)]
+    try:
         result = client.complete_json(SYSTEM, json.dumps({"items": items}, ensure_ascii=False),
-                                      prompt_version=PROMPT_VERSION, tag=f"stress:{offset}")
-        answers = {a.get("id"): a for a in result.content.get("items", []) if isinstance(a, dict)}
-        for i, (suspect, _) in enumerate(chunk):
-            stressed = str((answers.get(i) or {}).get("stressed", "")).strip().lower()
-            out.append(stressed if valid_stress(suspect, stressed) else None)
+                                      prompt_version=PROMPT_VERSION, tag=tag)
+    except LLMError as error:  # a broken answer: ask again in halves, give up on single items
+        if len(chunk) == 1:
+            log.warning("stress: %s gave no usable answer for %s: %s", client.config.model, tag, str(error)[:120])
+            return [None]
+        half = len(chunk) // 2
+        return _ask_batch(chunk[:half], client, tag + "a") + _ask_batch(chunk[half:], client, tag + "b")
+    answers = {a.get("id"): a for a in result.content.get("items", []) if isinstance(a, dict)}
+    out: list[str | None] = []
+    for i, (suspect, _) in enumerate(chunk):
+        stressed = str((answers.get(i) or {}).get("stressed", "")).strip().lower()
+        out.append(stressed if valid_stress(suspect, stressed) else None)
     return out
 
 
@@ -142,8 +157,15 @@ def vote(suspect: Suspect, answers: list[str | None]) -> str | None:
     return stressed if votes > len(answers) / 2 else None
 
 
+def _client(llm_config: dict[str, Any], model: str, env_file: Path | None, **extra: Any) -> LLMClient:
+    # reasoning models spend part of max_tokens on thinking before the JSON answer
+    return LLMClient(LLMConfig.from_dict({**llm_config, "model": model, **extra,
+                                          "max_tokens": max(16000, int(llm_config.get("max_tokens", 0)))}),
+                     env_file=env_file)
+
+
 def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config: dict[str, Any],
-          models: list[str], env_file: Path | None = None) -> dict[str, Any]:
+          models: list[str], env_file: Path | None = None, screen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Accent the lines exactly as the engine will, then re-check guessed words and homographs."""
     engine = build_engine({**engine_config, "normalization": {
         **engine_config.get("normalization", {}), "stress_dict": None}})
@@ -154,22 +176,36 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
     counts = Counter(s.source for s in suspects)
     log.info("stress: %d lines, %d guessed words, %d homographs to check with %d models", len(lines),
              counts["guess"], counts["homograph"], len(models))
-    # reasoning models spend part of max_tokens on thinking before the JSON answer
-    clients = [LLMClient(LLMConfig.from_dict({**llm_config, "model": model,
-                                              "max_tokens": max(16000, int(llm_config.get("max_tokens", 0)))}),
-                         env_file=env_file) for model in models]
+    clients = [_client(llm_config, model, env_file) for model in models]
     pairs = queries(suspects)
+    screened: list[str | None] = [None] * len(pairs)
+    stats: dict[str, Any] = {}
+    if screen:  # the cheap model proposes, the strong ones vote only on its proposals
+        screener = _client(llm_config, str(screen["model"]), env_file,
+                           **{k: v for k, v in screen.items() if k != "model"})
+        screened = ask(pairs, screener)
+        stats[f"screen:{screen['model']}"] = screener.stats()
+        todo = [n for n, (s, _) in enumerate(pairs) if screened[n] and screened[n] != s.accented]
+        log.info("stress: the screener proposes %d changes in %d sentences", len(todo), len(pairs))
+    else:
+        todo = list(range(len(pairs)))
     with ThreadPoolExecutor(len(clients)) as pool:
-        answers = list(pool.map(lambda client: ask(pairs, client), clients))
+        partial = list(pool.map(lambda client: ask([pairs[n] for n in todo], client), clients))
+    answers: list[list[str | None]] = [[None] * len(pairs) for _ in clients]
+    for a, part in zip(answers, partial):
+        for n, value in zip(todo, part):
+            a[n] = value
+    checked = set(todo)
     verdicts: dict[str, dict[str, Any]] = {}
     guessed: dict[str, str] = {}
     sentences: dict[str, dict[str, str]] = {}
     for n, (s, context) in enumerate(pairs):
         votes = [a[n] for a in answers]
-        corrected = vote(s, votes)
+        corrected = vote(s, votes) if n in checked else None
         entry = verdicts.setdefault(s.word, {"word": s.word, "accented": s.accented, "source": s.source,
                                              "count": s.count, "variants": s.variants, "contexts": []})
-        entry["contexts"].append({"sentence": context, "answers": dict(zip(models, votes)), "corrected": corrected})
+        entry["contexts"].append({"sentence": context, "answers": dict(zip(models, votes)), "screen": screened[n],
+                                  "corrected": corrected})
         if corrected and s.source == "guess":
             guessed[s.word] = corrected
         elif corrected:
@@ -183,7 +219,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         "checked": dict(counts),
         "corrected": {"guess": len(guessed), "homograph_sentences": sum(len(v) for v in sentences.values())},
         "verdicts": list(verdicts.values()),
-        "llm": {model: client.stats() for model, client in zip(models, clients)},
+        "llm": {**stats, **{model: client.stats() for model, client in zip(models, clients)}},
     }
 
 
@@ -210,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("voiceover_config.json"))
     parser.add_argument("--engine", default=None, help="Override engine.name (vosk | teratts)")
     parser.add_argument("--models", default=None, help="Comma-separated OpenRouter models (default: config/built-in)")
+    parser.add_argument("--no-screen", action="store_true", help="Let the strong models check every sentence")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -217,8 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     stress = config.get("stress", {})
     llm_config = stress.get("llm") or config.get("verify", {}).get("llm") or config["llm"]
     models = args.models.split(",") if args.models else list(stress.get("models", DEFAULT_MODELS))
+    screen = None if args.no_screen else stress.get("screen", DEFAULT_SCREEN)
     lines = json.loads(args.source.read_text(encoding="utf-8"))
-    result = check(lines, engine_config, llm_config, models, env_file=Path(".env"))
+    result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log.info("stress: corrected %d guessed words, %d homographs in their sentences -> %s",
              result["corrected"]["guess"], result["corrected"]["homograph_sentences"], args.out)

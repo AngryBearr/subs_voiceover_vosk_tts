@@ -81,3 +81,14 @@ def test_tiny_collision_is_not_cheaper_than_a_small_shift() -> None:
     # Without a fixed penalty a 1 ms overlap would cost less than any shift or removal.
     placements = schedule([Line("a", 0, 2.0), Line("b", 2100, 1.0)], POLICY)
     assert all(p.collision_ms == 0 for p in placements)
+
+
+def test_preferred_lag_and_expensive_early_start() -> None:
+    from voiceover.timeline import Line, TimelinePolicy, schedule
+
+    policy = TimelinePolicy(base_rate=1.0, tempo_comfort_total=1.15, tempo_ceiling_total=1.25,
+                            target_lag_ms=250, weight_early=5.0)
+    free, squeezed, nxt = schedule([Line("a", 1000, 1.0), Line("b", 5000, 2.0), Line("c", 7100, 1.0)], policy)
+    assert free.start_ms == 1250 and free.status == "fits"
+    assert squeezed.start_ms <= 5000 + 250 and nxt.start_ms >= 7100
+    assert squeezed.end_ms + policy.gap_ms <= nxt.start_ms

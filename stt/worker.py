@@ -4,7 +4,8 @@ Internal entry point used by `stt.transcribe` and the benchmarks:
     python -m stt.worker asr --audio a.wav --chunks c.json --model whisper-large-v3 --out asr.json
     python -m stt.worker diarize --audio a.wav [a2.wav ...] --model pyannote-community-1 --out d.json
     python -m stt.worker voice --audio a.wav --diarization d.json --out voice.json
-    python -m stt.worker align --audio a.wav --asr asr.json --out asr.aligned.json   (stt_qwen_env)
+    python -m stt.worker align --audio a.wav --asr asr.json --out asr.aligned.json [--aligner ctc|qwen]
+                                                     (ctc: subs_env, qwen: stt_qwen_env)
     python -m stt.worker ocr --media ep.mkv --out ocr.json [--start S --duration D]
 """
 
@@ -129,9 +130,9 @@ def run_voice(audio_path: Path, diarization_path: Path, out: Path, device: str, 
     )
 
 
-def run_align(audio_path: Path, asr_path: Path, out: Path, device: str) -> None:
+def run_align(audio_path: Path, asr_path: Path, out: Path, device: str, kind: str = "ctc") -> None:
     """Add forced-alignment word times to an ASR result that has none."""
-    from stt.align import ALIGNER_MODEL, ForcedAligner
+    from stt.align import ALIGNER_MODEL, CTC_MODEL, CtcAligner, ForcedAligner
     from stt.audio import read_wav
     from stt.gpu import VramPeak
     from stt.types import Segment
@@ -139,7 +140,7 @@ def run_align(audio_path: Path, asr_path: Path, out: Path, device: str) -> None:
     audio = read_wav(audio_path)
     data = load_json(asr_path)
     segments = [Segment.from_dict(s) for s in data["segments"]]
-    aligner = ForcedAligner(device=device)
+    aligner: CtcAligner | ForcedAligner = CtcAligner(device=device) if kind == "ctc" else ForcedAligner(device=device)
     with VramPeak() as vram:
         t0 = time.perf_counter()
         aligner.load()
@@ -151,7 +152,7 @@ def run_align(audio_path: Path, asr_path: Path, out: Path, device: str) -> None:
         {
             **data,
             "segments": [s.to_dict() for s in aligned],
-            "aligned_by": ALIGNER_MODEL,
+            "aligned_by": CTC_MODEL if kind == "ctc" else ALIGNER_MODEL,
             "align_load_s": round(t1 - t0, 3),
             "align_s": round(t2 - t1, 3),
             "align_peak_vram_mb": _vram(vram.peak_mb),
@@ -215,6 +216,7 @@ def main(argv: list[str] | None = None) -> None:
     p_align.add_argument("--asr", required=True, help="ASR result JSON (stt.worker asr output)")
     p_align.add_argument("--out", required=True)
     p_align.add_argument("--device", default="cuda")
+    p_align.add_argument("--aligner", default="ctc", choices=["ctc", "qwen"])
 
     p_ocr = sub.add_parser("ocr")
     p_ocr.add_argument("--media", required=True)
@@ -241,7 +243,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "ocr":
         run_ocr(Path(args.media), Path(args.out), args.device, args.start, args.duration, args.fps)
     elif args.command == "align":
-        run_align(Path(args.audio), Path(args.asr), Path(args.out), args.device)
+        run_align(Path(args.audio), Path(args.asr), Path(args.out), args.device, args.aligner)
     elif args.command == "voice":
         run_voice(Path(args.audio), Path(args.diarization), Path(args.out), args.device, args.threshold)
 

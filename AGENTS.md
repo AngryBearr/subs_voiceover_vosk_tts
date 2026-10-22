@@ -36,8 +36,8 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
     - `subs_env` — всё: распознание (`stt/`), перевод, озвучка (`voiceover/`, Vosk, TeraTTS),
         проверка речи, Gradio, классические скрипты. Ставится из `requirements.txt` через uv с
         `overrides-onnxruntime.txt` (модуль `onnxruntime` даёт только `onnxruntime-gpu`).
-    - `stt_qwen_env` — только Qwen3-ASR и выравниватель (`qwen-asr` требует transformers 4.57);
-        стадии распознания сами запускаются в нём, вручную активировать не нужно.
+    - `stt_qwen_env` — необязательное, только для сравнений с Qwen3-ASR / Qwen3-ForcedAligner
+        (`qwen-asr` требует transformers 4.57); пайплайн по умолчанию его не использует.
 - **Видео → русская озвучка целиком**:
     `subs_env/bin/python -m stt.run <видео или маска>` — английские субтитры со спикерами,
     глоссарий, имена, перевод под тайминг, сценарий озвучки, voiceover, проверка речи, микс.

@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Create the virtual environments (Linux, NVIDIA driver with CUDA 12.8+), from the repo root:
-#   bash scripts/setup_envs.sh          # subs_env (everything) + stt_qwen_env
-#   bash scripts/setup_envs.sh main     # only subs_env
-#   bash scripts/setup_envs.sh qwen     # only stt_qwen_env (Qwen3-ASR + aligner, accurate STT mode)
-# subs_env runs every script of the repo; stt_qwen_env is needed only because qwen-asr pins
-# transformers 4.57 (the STT pipeline starts those stages in it by itself).
+#   bash scripts/setup_envs.sh          # subs_env: runs every script of the repo
+#   bash scripts/setup_envs.sh qwen     # optional stt_qwen_env: Qwen3-ASR / Qwen3-ForcedAligner, only for
+#                                       # benchmarks (`--fuse ...,qwen3-asr-1.7b`, `--aligner qwen`);
+#                                       # qwen-asr pins transformers 4.57
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export UV_HTTP_TIMEOUT=300
-targets=("${@:-main qwen}")
+targets=("${@:-main}")
 targets=(${targets[*]})
 
 has() { [[ " ${targets[*]} " == *" $1 "* ]]; }

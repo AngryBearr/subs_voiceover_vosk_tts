@@ -371,11 +371,18 @@ class AssembleTest(unittest.TestCase):
         words = [Word(i * 0.3, i * 0.3 + 0.2, t, speaker=sp) for i, (t, sp) in enumerate(spec)]
         self.assertEqual([w.speaker for w in sentence_majority(words)], ["A", "C", "C", "C", "C", "C", "A"])
 
-    def test_pause_inside_sentence_does_not_split(self) -> None:
-        spec = [(0.0, 0.3, "I"), (0.4, 0.8, "went"), (2.0, 2.4, "home."), (3.5, 3.8, "Bye.")]
+    def test_short_pause_inside_sentence_does_not_split(self) -> None:
+        spec = [(0.0, 0.3, "I"), (0.4, 0.8, "went"), (1.6, 2.0, "home."), (3.5, 3.8, "Bye.")]
         words = [Word(s, e, t, speaker="A") for s, e, t in spec]
         cues = build_cues(words, CueOptions())
         self.assertEqual([c.text for c in cues], ["I went home.", "Bye."])
+
+    def test_long_pause_inside_sentence_splits(self) -> None:
+        # the Russian line of one cue would be said in the pause, ahead of the English second half
+        spec = [(0.0, 0.3, "I"), (0.4, 0.8, "went"), (2.0, 2.4, "home."), (3.5, 3.8, "Bye.")]
+        words = [Word(s, e, t, speaker="A") for s, e, t in spec]
+        cues = build_cues(words, CueOptions())
+        self.assertEqual([c.text for c in cues], ["I went", "home.", "Bye."])
 
     def test_overlap_flag(self) -> None:
         words = assign_speakers(_words([(2.85, 3.0, "Wait"), (3.1, 3.3, "what")]), self.diarization, self.options)

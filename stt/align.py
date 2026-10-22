@@ -1,7 +1,12 @@
 """Forced alignment: word start/end times for ASR text that came without them.
 
-Uses Qwen3-ForcedAligner-0.6B (`qwen-asr` package, `stt_qwen_env`). Lets text-only models
-(Cohere, LLM-fused text) feed the speaker pipeline.
+Lets text-only models (Cohere, LLM-fused text) feed the speaker pipeline. Two aligners:
+
+- `ctc` (default): character-level CTC alignment with the English wav2vec2 model
+  WAV2VEC2_ASR_LARGE_LV60K_960H (torchaudio), as in WhisperX; runs in `subs_env`.
+- `qwen`: Qwen3-ForcedAligner-0.6B (`qwen-asr` package, `stt_qwen_env`). On reality TV it gave
+  7-11% zero-length words and moved ~8% of words by more than 0.5 s against Whisper's times,
+  which made Russian lines start before the English speech.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from stt.audio import SAMPLE_RATE
 from stt.types import Segment, Word
 
 ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
+CTC_MODEL = "WAV2VEC2_ASR_LARGE_LV60K_960H"
 
 _KEY = re.compile(r"[^\w']+")
 
@@ -84,4 +90,80 @@ class ForcedAligner:
                 aligned = [(str(it.text), float(it.start_time), float(it.end_time)) for it in result]
                 words = attach_times(seg.text.split(), aligned, seg.start)
                 out.append(Segment(start=seg.start, end=seg.end, text=seg.text, words=words, speaker=seg.speaker))
+        return out
+
+
+def _ctc_word(token: str, vocab: dict[str, int]) -> str:
+    """A token as the characters the CTC model knows; numbers are spelled out ("39" -> "THIRTY NINE")."""
+    text = token.replace("’", "'")
+    if re.search(r"\d", text):
+        from num2words import num2words
+
+        text = re.sub(r"\d+(?:[.,]\d+)?", lambda m: " " + num2words(float(m.group(0).replace(",", ""))
+                                                                       if "." in m.group(0) else int(m.group(0).replace(",", ""))) + " ", text)
+    return "|".join(w for w in ("".join(c for c in part.upper() if c in vocab and c not in "|-")
+                                for part in re.split(r"[\s-]+", text)) if w)
+
+
+class CtcAligner:
+    """Character CTC forced alignment of each segment's text to its audio (English wav2vec2)."""
+
+    def __init__(self, device: str = "cuda") -> None:
+        self.device = device
+
+    def load(self) -> None:
+        import torchaudio
+
+        bundle = getattr(torchaudio.pipelines, CTC_MODEL)
+        self.model = bundle.get_model().to(self.device).eval()
+        self.vocab = {label: i for i, label in enumerate(bundle.get_labels())}
+        self.rate = bundle.sample_rate
+
+    def align_segment(self, audio: np.ndarray, text: str) -> list[tuple[str, float, float]]:
+        """[(token, start, end)] in seconds from the segment start, for tokens the model can spell."""
+        import torch
+        import torchaudio.functional as F
+
+        tokens = [(t, _ctc_word(t, self.vocab)) for t in text.split()]
+        tokens = [(t, w) for t, w in tokens if w]
+        if not tokens or len(audio) < self.rate // 10:
+            return []
+        targets: list[int] = []
+        owner: list[int] = []
+        for k, (_, spelled) in enumerate(tokens):
+            if targets:
+                targets.append(self.vocab["|"])
+                owner.append(-1)
+            for ch in spelled:
+                targets.append(self.vocab[ch])
+                owner.append(k if ch != "|" else -1)
+        with torch.inference_mode():
+            wave = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))[None].to(self.device)
+            emission, _ = self.model(wave)
+            log_probs = torch.log_softmax(emission.float(), dim=-1)
+        if log_probs.shape[1] < len(targets):
+            return []  # more letters than frames: leave this segment to the even spread
+        aligned, scores = F.forced_align(log_probs, torch.tensor([targets], device=log_probs.device), blank=0)
+        spans = F.merge_tokens(aligned[0], scores[0].exp())
+        frame = len(audio) / self.rate / log_probs.shape[1]
+        bounds: dict[int, list[float]] = {}
+        for span, k in zip(spans, owner):
+            if k < 0:
+                continue
+            b = bounds.setdefault(k, [span.start * frame, span.end * frame])
+            b[0], b[1] = min(b[0], span.start * frame), max(b[1], span.end * frame)
+        return [(tokens[k][0], round(b[0], 3), round(b[1], 3)) for k, b in sorted(bounds.items())]
+
+    def align(self, audio: np.ndarray, segments: list[Segment]) -> list[Segment]:
+        """Return copies of `segments` with `words` filled from forced alignment."""
+        out: list[Segment] = []
+        for seg in segments:
+            if not seg.text.strip():
+                continue
+            piece = audio[int(seg.start * SAMPLE_RATE) : int(seg.end * SAMPLE_RATE)]
+            aligned = self.align_segment(piece, seg.text)
+            if not aligned:  # nothing alignable: spread the words evenly over the segment
+                aligned = [("", 0.0, seg.end - seg.start)]
+            words = attach_times(seg.text.split(), aligned, seg.start)
+            out.append(Segment(start=seg.start, end=seg.end, text=seg.text, words=words, speaker=seg.speaker))
         return out

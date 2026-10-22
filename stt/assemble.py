@@ -21,7 +21,7 @@ class CueOptions:
     """Cue segmentation limits (tuned for dubbing: one utterance per cue)."""
 
     max_gap_s: float = 0.8  # pause that starts a new cue after a finished sentence
-    max_gap_mid_s: float = 2.0  # pause that splits an unfinished sentence
+    max_gap_mid_s: float = 1.0  # pause that splits an unfinished sentence (the dub must not run ahead of it)
     max_duration_s: float = 7.0
     max_chars: int = 120
     sentence_split_s: float = 2.5  # close a cue at sentence end once it is this long

@@ -1,6 +1,7 @@
 """Elastic timeline solver.
 
-Every spoken line may start a little before or after its subtitle, may be
+Every spoken line may start a little before or after its subtitle (preferably
+``target_lag_ms`` after it, voice-over style; starting early costs ``weight_early`` extra), may be
 sped up within a comfort limit (and up to a hard ceiling at a higher price),
 and, as a last resort, may lose speech seconds (text shortening).  Lines may
 not collide: a line must end ``gap_ms`` before the next line starts.
@@ -44,9 +45,11 @@ class TimelinePolicy:
     weight_text: float = 100.0
     weight_collision: float = 1000.0
     weight_collision_fixed: float = 50.0
+    target_lag_ms: int = 0  # preferred start after the subtitle start (voice-over lags the original voice)
+    weight_early: float = 0.0  # extra price per second of starting before the subtitle start
 
     def __post_init__(self) -> None:
-        for name in ("lead_ms", "lag_ms", "gap_ms", "grid_ms"):
+        for name in ("lead_ms", "lag_ms", "gap_ms", "grid_ms", "target_lag_ms"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
@@ -56,6 +59,8 @@ class TimelinePolicy:
             raise ValueError("require 0 < base_rate <= tempo_comfort_total <= tempo_ceiling_total")
         if self.min_speech_sec < 0 or self.tempo_step <= 0:
             raise ValueError("min_speech_sec must be >= 0 and tempo_step > 0")
+        if self.target_lag_ms > self.lag_ms or self.weight_early < 0:
+            raise ValueError("require target_lag_ms <= lag_ms and weight_early >= 0")
 
     @property
     def comfort_factor(self) -> float:
@@ -197,7 +202,8 @@ def schedule(lines: list[Line], policy: TimelinePolicy) -> list[Placement]:
         natural_end = starts[:, None] + natural_ms[None, :]                   # (n_starts, n_factors)
         removable = np.maximum(0.0, natural_ms - min_speech_ms)[None, :]      # (1, n_factors)
         earliest_end = natural_end - removable
-        shift_cost = policy.weight_shift * np.abs(starts - line.start_ms) / 1000.0
+        shift_cost = (policy.weight_shift * np.abs(starts - line.start_ms - policy.target_lag_ms)
+                      + policy.weight_early * np.maximum(0, line.start_ms - starts)) / 1000.0
         combo_cost = (prev_best + shift_cost)[:, None] + tempo_cost[None, :]
 
         end_lo = int(np.floor(earliest_end.min() / grid) * grid)
@@ -258,7 +264,7 @@ def schedule(lines: list[Line], policy: TimelinePolicy) -> list[Placement]:
             target_base_sec=spoken_sec * factor,
             end_ms=int(round(actual_end)),
             collision_ms=collision_ms,
-            status=_status(shift, factor, removed_sec, collision_ms, policy),
+            status=_status(shift - policy.target_lag_ms, factor, removed_sec, collision_ms, policy),
         )
         previous_actual_end = int(round(actual_end))
     return [placement for placement in placements if placement is not None]

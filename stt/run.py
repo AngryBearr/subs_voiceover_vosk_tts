@@ -188,6 +188,8 @@ class Episode:
             normalization["stress_dict"] = str((self.out / "stress.json").resolve())
         vo_config["engine"] = {**vo_config["engine"], **engine, "name": self.engine, "normalization": normalization,
                                "voice": self._engine()["voices"]["male"]}
+        for section in ("policy", "units"):  # dub-specific timing (preferred lag, base tempo, no unit merging)
+            vo_config[section] = {**vo_config.get(section, {}), **cfg.get(section, {})}
         config_path = self.out / f"voiceover.{self.engine}.config.json"
         save_json(config_path, vo_config)
         self._reset_voiceover_dir()

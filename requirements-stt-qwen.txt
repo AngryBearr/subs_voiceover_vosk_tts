@@ -1,4 +1,5 @@
-# Qwen3-ASR environment `stt_qwen_env` (qwen-asr pins transformers 4.57); see scripts/setup_envs.sh.
+# Optional Qwen3-ASR environment `stt_qwen_env` (benchmarks only; qwen-asr pins transformers 4.57);
+# see scripts/setup_envs.sh.
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0+cu128
 torchaudio==2.11.0+cu128

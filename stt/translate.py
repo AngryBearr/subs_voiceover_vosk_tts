@@ -49,7 +49,8 @@ Rules:
   ("ты сделала" to a woman). Plural "you" to a group -> "вы".
 - Names: transliterate consistently (use "label_ru" when it is a name). Keep show-specific terms
   from the glossary.
-- Write numbers, units and symbols in words as they should be spoken ("сто десять килограммов").
+- Write numbers (ranges too: "три-четыре года"), units and symbols in words as they should be spoken,
+  in the right case ("сто десять килограммов", "с восемнадцатью участниками"); write "ё" where it is said.
 - Timing: the dub must fit the original timing. Each line has "max" = maximum number of Russian
   characters that fit its time window. Stay within it by rephrasing concisely: drop filler words,
   repetitions and redundant phrases first, never essential meaning. Very short interjections may

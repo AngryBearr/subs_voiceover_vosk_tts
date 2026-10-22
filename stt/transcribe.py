@@ -166,11 +166,11 @@ def transcribe(args: argparse.Namespace) -> Path:
         asr_data = load_json(asr_path)
     if asr_data["segments"] and not any(seg.get("words") for seg in asr_data["segments"]):
         # Text-only output (model or fusion): get word times from forced alignment.
-        aligned_path = asr_path.with_name(asr_path.stem + ".aligned.json")
+        aligned_path = asr_path.with_name(asr_path.stem + f".aligned.{args.aligner}.json")
         align_args = ["align", "--audio", audio, "--asr", str(asr_path), "--out", str(aligned_path),
-                      "--device", args.device]
-        asr_data = run_stage("align", "stt_qwen_env", align_args, aligned_path, logs,
-                             asr_forced or "align" in stages or "fuse" in stages)
+                      "--device", args.device, "--aligner", args.aligner]
+        asr_data = run_stage("align", "subs_env" if args.aligner == "ctc" else "stt_qwen_env", align_args,
+                             aligned_path, logs, asr_forced or "align" in stages or "fuse" in stages)
 
     ocr_data: dict[str, Any] | None = None
     if args.ocr:
@@ -188,7 +188,8 @@ def transcribe(args: argparse.Namespace) -> Path:
 
     # ---- assemble
     diarization = Diarization.from_dict(diar_data)
-    options = CueOptions(max_gap_s=args.max_gap, max_duration_s=args.max_cue_duration, max_chars=args.max_chars)
+    options = CueOptions(max_gap_s=args.max_gap, max_gap_mid_s=args.max_gap_mid, max_duration_s=args.max_cue_duration,
+                         max_chars=args.max_chars)
     segments, loop_words = collapse_repeats([Segment.from_dict(s) for s in asr_data["segments"]])
     if loop_words:
         log.info("Repetition guard removed %d looped words", loop_words)
@@ -283,10 +284,13 @@ def main(argv: list[str] | None = None) -> None:
                         help="Extra ASR models to fuse with --asr by an LLM, e.g. cohere-transcribe,qwen3-asr-1.7b")
     parser.add_argument("--fuse-model", default="openai/gpt-6-luna", help="OpenRouter model for --fuse")
     parser.add_argument("--glossary", default=None, help="glossary.txt (stt.glossary) used by --fuse")
+    parser.add_argument("--aligner", default="ctc", choices=["ctc", "qwen"],
+                        help="Word times for text-only ASR/fusion: wav2vec2 CTC (default) or Qwen3-ForcedAligner")
     parser.add_argument("--no-ocr", dest="ocr", action="store_false",
                         help="Skip on-screen text (captions for hard-to-hear speech, name cards)")
     parser.add_argument("--ocr-fps", type=float, default=2.0, help="Frames per second scanned for on-screen text")
-    parser.add_argument("--max-gap", type=float, default=0.8, help="Pause (s) that always starts a new cue")
+    parser.add_argument("--max-gap", type=float, default=0.8, help="Pause (s) after a sentence that starts a new cue")
+    parser.add_argument("--max-gap-mid", type=float, default=1.0, help="Pause (s) inside a sentence that starts a new cue")
     parser.add_argument("--max-cue-duration", type=float, default=7.0)
     parser.add_argument("--max-chars", type=int, default=120)
     parser.add_argument(

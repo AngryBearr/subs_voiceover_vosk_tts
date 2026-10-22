@@ -2,7 +2,7 @@
   "mode": "accurate",
   "modes": {
     "fast": {"asr": "whisper-large-v3", "fuse": []},
-    "accurate": {"asr": "cohere-transcribe", "fuse": ["whisper-large-v3", "qwen3-asr-1.7b"]}
+    "accurate": {"asr": "cohere-transcribe", "fuse": ["whisper-large-v3"]}
   },
   "diarizer": "pyannote-community-1",
   "ocr": {"enabled": true, "fps": 2.0},
@@ -21,9 +21,11 @@
     "engine": "vosk",
     "engines": {
       "vosk": {"voices": {"female": 49, "male": 56}},
-      "teratts": {"voices": {"female": "ru_f1", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.5,
+      "teratts": {"voices": {"female": "ru_f1", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.0,
                   "sample_rate": 44100}
     },
+    "policy": {"base_syl_per_sec": 5.0, "target_lag_ms": 250, "weight_early": 5.0},
+    "units": {"enabled": false},
     "stress_check": true,
     "speech_check": true
   },

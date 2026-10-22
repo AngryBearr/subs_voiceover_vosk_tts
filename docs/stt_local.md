@@ -8,7 +8,7 @@ track; `stt.mix` puts it over the ducked original and muxes a video copy.
 
 ```
 video ─► audio 16 kHz ─┬─► VAD chunks ─► Whisper  (fast)
-                       │               └► Cohere + Whisper + Qwen3 → LLM fusion → forced alignment (accurate)
+                       │               └► Cohere + Whisper → LLM fusion → CTC forced alignment (accurate)
                        └─► pyannote diarization (who speaks when) + gender/age per speaker
 video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.json
         words + captions → speakers (sentence-level smoothing) → cues subs.en.json
@@ -24,7 +24,7 @@ video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.js
 ## Quick start
 
 ```bash
-bash scripts/setup_envs.sh                      # subs_env + stt_qwen_env (once)
+bash scripts/setup_envs.sh                      # subs_env (once)
 subs_env/bin/hf auth login                      # once; accept the terms of pyannote community-1 and Cohere Transcribe
 # models/vosk-model-tts-ru-0.10-multi for Vosk; OPENROUTER_API_KEY and DEEPSEEK_API_KEY in .env
 
@@ -42,7 +42,7 @@ ones; `--mode fast` uses Whisper only.
 
 | Step | Where | What is sent out |
 |---|---|---|
-| Audio decoding, VAD, ASR (Whisper, Cohere, Qwen3), alignment, diarization, gender/age | local GPU | nothing |
+| Audio decoding, VAD, ASR (Whisper, Cohere), alignment, diarization, gender/age | local GPU | nothing |
 | On-screen text (RapidOCR: detection on GPU, recognition on CPU) | local | nothing |
 | ASR fusion (accurate mode only) | OpenRouter LLM | English ASR text of the three models per chunk + glossary |
 | Glossary, speaker names, translation, shortening, gender check | OpenRouter LLM | English transcript / cues, Russian drafts |
@@ -75,6 +75,20 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   speaker that talks most while they are shown; the speaker-naming LLM sees it.
 - `--no-ocr` (or `"ocr": {"enabled": false}`) skips the stage; `--force ocr` rescans.
 
+## Timing of the Russian lines
+
+A Russian line must not run ahead of the English speech. What keeps it in sync:
+
+- Word times come from CTC forced alignment (see Models); cue starts match hand-synced
+  subtitles within a few hundred ms (S10E01: median +0.19 s, 15 of 610 cues >1 s early).
+- A pause of 1 s inside a sentence, or 0.8 s after one, starts a new cue, so the Russian of the
+  second half is not said during the pause (S10E01 had 79 cues with such pauses).
+- The timeline solver prefers to start a line 250 ms after the English (voice-over style) and
+  prices an early start 6x a late one (`policy.target_lag_ms`, `policy.weight_early`); base
+  tempo 5.0 syllables/s, faster only where a line does not fit (`stt_config.json`).
+- Continuation cues are not merged into one spoken unit for dubs (`units.enabled: false`): a
+  merged unit placed at its first cue ran its later parts 1-4 s ahead of the speaker.
+
 ## Voices, stress and the speech check
 
 - **Engines.** Vosk (CPU, 4 workers; voices 49 female / 56 male) or TeraTTSv2 (GPU, ~0.35 s per
@@ -86,12 +100,14 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
 - **Stress (before synthesis).** RUAccent is right for dictionary words; errors come from
   homographs and words it guesses. Judging stress from the audio does not work (three detectors
   on 160 phrases with deliberately wrong stress scored ~40%, chance level), so
-  `voiceover.stress_check` asks three strong LLMs about each guessed word and each homograph in
-  its sentence; a majority correction is applied (`stress.json`: words, or single sentences for
-  homographs). S29E01: 129 words checked, 1 name and 25 homograph uses corrected (пора́, по́сле,
-  го́лоса/голоса́, О́строва, учи́тесь); cheap models were wrong more often than RUAccent, so the
-  defaults are gpt-6.1-sol, claude-sonnet-5.5 and gemini-4-argon (~$0.25-0.35 per episode;
-  off with `"stress_check": false` in `stt_config.json`).
+  `voiceover.stress_check` re-checks each guessed word and each homograph in its sentence:
+  gpt-6-luna (high reasoning) proposes changes and three strong LLMs (gpt-6.1-sol,
+  claude-sonnet-5.5, gemini-4-argon) vote on them; a majority correction is applied
+  (`stress.json`: words, or single sentences for homographs). S29E01: 244 sentences checked,
+  28 corrections (пора́, по́сле, О́строва, учи́тесь, начался́...), ~$0.14 per episode; the strong
+  models on every sentence (`--no-screen`, ~$0.3) found 31. Cheap models alone are worse than
+  RUAccent (luna: 36 extra changes, mostly wrong; deepseek-v4.1-flash: 75). Off with
+  `"stress_check": false` in `stt_config.json`.
 - **Speech check (after synthesis).** `voiceover.speech_check` transcribes every clip with
   GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
   abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.
@@ -118,7 +134,7 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
 | venv | Python / torch | Used for |
 |---|---|---|
 | `subs_env` | 3.12 / 2.11 cu128 | everything: orchestration, Whisper, Cohere, pyannote 4, gender/age, OCR, RUAccent/RUNorm, Vosk, TeraTTS, GigaAM, mixing, Gradio |
-| `stt_qwen_env` | 3.12 / 2.11 cu128 | Qwen3-ASR + Qwen3-ForcedAligner only (`qwen-asr` pins transformers 4.57) |
+| `stt_qwen_env` (optional) | 3.12 / 2.11 cu128 | benchmarks with Qwen3-ASR / Qwen3-ForcedAligner (`qwen-asr` pins transformers 4.57) |
 
 Model stages run as subprocesses in their venv automatically. `onnxruntime-gpu` is the only
 onnxruntime (`overrides-onnxruntime.txt` drops the CPU wheel that vosk-tts/ruaccent ask for). No system ffmpeg is needed
@@ -127,9 +143,15 @@ onnxruntime (`overrides-onnxruntime.txt` drops the CPU wheel that vosk-tts/ruacc
 ## Models
 
 ASR (`stt/asr.py`): `whisper-large-v3` (fast mode), `whisper-large-v3-turbo` (half the VRAM),
-`cohere-transcribe` + `qwen3-asr-1.7b` (accurate mode, fused with Whisper by an LLM).
+`cohere-transcribe` fused with `whisper-large-v3` by an LLM (accurate mode). `qwen3-asr-1.7b` stays
+available as a third fusion input but adds nothing measurable (whole episodes: S10E01 13.37% with
+it vs 13.65% without, S29E01 18.26% vs 18.17%, within the run-to-run spread of the LLM).
+Word times of the fused text: character CTC forced alignment with the English wav2vec2
+`WAV2VEC2_ASR_LARGE_LV60K_960H` (11 s per hour of audio). Qwen3-ForcedAligner (`--aligner qwen`)
+gave 7-11% zero-length words on these shows; with CTC, cues starting >1 s before the speech in
+S10E01 (against hand-synced subtitles) went from 25 to 15.
 Diarization: `pyannote-community-1`. Gender/age: `audeering/wav2vec2-large-robust-24-ft-age-gender`
-(CC-BY-NC-SA-4.0, abstains below 0.7). Alignment: `Qwen/Qwen3-ForcedAligner-0.6B`.
+(CC-BY-NC-SA-4.0, abstains below 0.7).
 
 Benchmarked and dropped (summary below): Parakeet v2/v3/Unified/TDT 1.1B, Canary 1B v2/180M/Qwen
 2.5B, Granite Speech 4.1 (+plus), Voxtral Mini 3B/Realtime 4B, Kyutai STT 2.6B, Moonshine v2,
@@ -149,7 +171,7 @@ subs_env/bin/python -m stt.compare_translations output/stt/ep --variants a b --a
 ```
 
 Why these models (Australian Survivor S10, three 10-minute clips, WER against English SDH
-subtitles): LLM fusion of Cohere + Whisper + Qwen3 ~17%, Cohere 19.6%, Whisper large-v3 20.2%,
+subtitles): LLM fusion of Cohere + Whisper (+ Qwen3) ~17%, Cohere 19.6%, Whisper large-v3 20.2%,
 Qwen3-ASR 20.5%, the other 15 models 21–27% (Canary 180M loops). pyannote vs DiariZen on a real
 episode: equal speaker purity, pyannote 2.5x faster. Full tables: `output/stt_bench/RESULTS.md`
 (local report, not committed).
