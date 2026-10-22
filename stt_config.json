@@ -32,5 +32,6 @@
   "mix": {
     "duck_db": 12.0,
     "mux": true
-  }
+  },
+  "crowd": {"enabled": false, "voices": 3, "gain_db": -4.0}
 }

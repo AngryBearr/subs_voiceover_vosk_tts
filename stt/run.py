@@ -232,6 +232,12 @@ class Episode:
                 "--duck-db", str(cfg["duck_db"])]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
+        crowd = self.config.get("crowd", {})
+        if crowd.get("enabled"):  # experimental: cheers/chants by several voices, under the voice-over
+            from stt import crowd as crowd_layer
+
+            crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 3))])
+            argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -4.0)}"]
         if cfg.get("mux") and not self.args.start:
             argv += ["--mux", str(self.out / f"{self.media.stem}.ru.{self.engine}.mkv"),
                      "--srt", str(self.out / "subs.ru.srt")]

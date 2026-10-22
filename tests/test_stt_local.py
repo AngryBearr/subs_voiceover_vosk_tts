@@ -407,3 +407,23 @@ class VoiceWindowsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrowdTest(unittest.TestCase):
+    def test_groups_voices_and_render(self) -> None:
+        import numpy as np
+
+        from stt.crowd import groups, pick_voices, render
+
+        skipped = [{"start": 1000, "end": 1500, "text": ["Давай!"], "gender": "male", "speaker": "S01"},
+                   {"start": 2500, "end": 3200, "text": ["Давай, давай!"], "gender": "female", "speaker": "S02"},
+                   {"start": 9000, "end": 9400, "text": ["Боже мой!"], "gender": "male", "speaker": "S03"}]
+        found = groups(skipped)
+        self.assertEqual([(g["start"], g["end"], g["text"], g["crowd"]) for g in found],
+                         [(1000, 3200, "Давай, давай!", True), (9000, 9400, "Боже мой!", False)])
+        pool = {"female": [49, 38], "male": [56, 12]}
+        self.assertEqual(pick_voices(["male", "female", "male"], pool), [56, 49, 12])
+        found[0]["voices"], found[1]["voices"] = [56, 49], [56]
+        clip = np.ones(100, dtype=np.float32)
+        track = render(found, {(0, 56): clip, (0, 49): clip, (1, 56): clip}, 1000, 10.0, offset_ms=50, gain_db=0.0)
+        self.assertEqual((track[1000], track[1060], track[9000]), (1.0, 2.0, 1.0))

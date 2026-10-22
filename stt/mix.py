@@ -57,14 +57,16 @@ def speech_envelope(voice: np.ndarray, sample_rate: int, *, threshold_db: float 
 
 
 def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: float = 12.0,
-        voice_gain_db: float = 0.0) -> np.ndarray:
-    """Stereo mix: original * ducking gain + voice (centered)."""
-    length = max(len(original), len(voice))
+        voice_gain_db: float = 0.0, extra: list[tuple[np.ndarray, float]] | None = None) -> np.ndarray:
+    """Stereo mix: original * ducking gain + voice (centered) + `extra` layers (not ducking)."""
+    length = max([len(original), len(voice)] + [len(e) for e, _ in extra or []])
     original = np.pad(original, ((0, length - len(original)), (0, 0)))
     voice = np.pad(voice, (0, length - len(voice)))
     env = speech_envelope(voice, sample_rate)
     duck = 1.0 - (1.0 - 10 ** (-duck_db / 20)) * env
     out = original * duck[:, None] + (voice * 10 ** (voice_gain_db / 20))[:, None]
+    for layer, gain_db in extra or []:
+        out += (np.pad(layer, (0, length - len(layer))) * 10 ** (gain_db / 20))[:, None]
     peak = float(np.max(np.abs(out))) if len(out) else 0.0
     if peak > 0.99:  # simple safety scaling instead of hard clipping
         out *= 0.99 / peak
@@ -112,6 +114,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mp3", action="store_true", help="Also write an MP3 next to the WAV")
     parser.add_argument("--mux", default=None, help="Write a video copy with the mix as the first audio track")
     parser.add_argument("--srt", default=None, help="Russian subtitles to add when muxing")
+    parser.add_argument("--extra", action="append", default=[], metavar="WAV[:GAIN_DB]",
+                        help="Another layer on the voice timeline, added after ducking (e.g. stt.crowd)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
@@ -121,7 +125,14 @@ def main(argv: list[str] | None = None) -> None:
     voice = _resample(voice, voice_sr, args.sample_rate)
     duration = len(voice) / args.sample_rate
     original = load_audio(args.media, start=args.start, duration=duration, sample_rate=args.sample_rate, channels=2)
-    out = mix(original, voice, args.sample_rate, duck_db=args.duck_db, voice_gain_db=args.voice_gain_db)
+    layers: list[tuple[np.ndarray, float]] = []
+    for spec in args.extra:
+        path, _, gain = spec.partition(":")
+        layer, layer_sr = sf.read(path, dtype="float32", always_2d=False)
+        layers.append((_resample(layer.mean(axis=1) if layer.ndim == 2 else layer, layer_sr, args.sample_rate),
+                       float(gain or 0.0)))
+    out = mix(original, voice, args.sample_rate, duck_db=args.duck_db, voice_gain_db=args.voice_gain_db,
+              extra=layers)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), out, args.sample_rate, subtype="PCM_16")

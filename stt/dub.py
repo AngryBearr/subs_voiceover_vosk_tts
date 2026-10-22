@@ -79,7 +79,8 @@ def plan(
             elif dense:
                 reason = "interjection in a rapid exchange"
         if reason:
-            skipped.append({"index": rec["index"], "start": rec["start"], "speaker": rec.get("speaker"),
+            skipped.append({"index": rec["index"], "start": rec["start"], "end": rec["end"],
+                            "speaker": rec.get("speaker"), "gender": rec.get("gender"),
                             "text_en": text_en, "text": rec["text"], "reason": reason})
             continue
         gender = rec.get("gender", "unknown")
