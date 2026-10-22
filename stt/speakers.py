@@ -1,6 +1,6 @@
 """Speaker naming and gender reconciliation with an LLM over the diarized transcript.
 
-    stt_env/bin/python -m stt.speakers output/stt/ep01 [--model anthropic/claude-sonnet-5.5]
+    subs_env/bin/python -m stt.speakers output/stt/ep01 [--model anthropic/claude-sonnet-5.5]
 
 Reads `speakers.json` + `subs.en.json` from the transcription folder, asks the LLM for
 real names (only when evident), a short Russian label, role and gender (voice estimate

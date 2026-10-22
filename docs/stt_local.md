@@ -1,10 +1,10 @@
-# Local GPU STT → Russian voice-over
+# English video → Russian voice-over
 
 Package `stt/` turns an English episode into speaker-attributed English subtitles, names the
 speakers, determines their gender (Russian grammar, voice choice), translates to Russian fitted
-to the timing and prepares the dubbing script for the `voiceover` package of the
-subtitle-shortening branch, which synthesises (Vosk), fits the lines to the timeline and
-exports the voice track. `stt.mix` puts it over the ducked original and muxes a video copy.
+to the timing and prepares the dubbing script. The `voiceover` package synthesises it (Vosk or
+TeraTTS, a voice per speaker gender), fits the lines to the timeline and exports the voice
+track; `stt.mix` puts it over the ducked original and muxes a video copy.
 
 ```
 video ─► audio 16 kHz ─┬─► VAD chunks ─► Whisper  (fast)
@@ -14,27 +14,29 @@ video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.js
         words + captions → speakers (sentence-level smoothing) → cues subs.en.json
         LLM: season glossary, speaker names, gender check             glossary.json, speakers.json
         LLM: EN → RU per cue time window, shortening, gender fix      subs.ru.json
-        dubbing script: voiced lines, voices                          dub.ru.json
-        voiceover (other branch): Vosk + timeline solver + shortening voiceover/export/track.wav
-        mix: voice over ducked original, mkv with Russian + original  <name>.ru.wav / .ru.mkv
+        dubbing script: voiced lines, a voice per line                dub.ru.<engine>.json
+        stress: guessed words / homographs re-checked by 3 LLMs       stress.json
+        voiceover: TTS + timeline solver + shortening                 voiceover.<engine>/export/track.wav
+        check: Russian ASR (GigaAM-v3) of every spoken clip           voiceover.<engine>/speech_check.md
+        mix: voice over ducked original, mkv with Russian + original  <name>.ru.<engine>.wav / .mkv
 ```
 
 ## Quick start
 
 ```bash
-bash scripts/setup_stt_envs.sh                  # stt_env + stt_qwen_env (once)
-stt_env/bin/hf auth login                       # once; accept the terms of pyannote community-1 and Cohere Transcribe
-# OPENROUTER_API_KEY (and DEEPSEEK_API_KEY for voiceover shortening) in .env
+bash scripts/setup_envs.sh                      # subs_env + stt_qwen_env (once)
+subs_env/bin/hf auth login                      # once; accept the terms of pyannote community-1 and Cohere Transcribe
+# models/vosk-model-tts-ru-0.10-multi for Vosk; OPENROUTER_API_KEY and DEEPSEEK_API_KEY in .env
 
-# whole season, up to the Russian dubbing script (no TTS needed):
-stt_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --until dub
-# with the voice-over and the final mix (path to a checkout of the shortening branch with its
-# subs_env and models/vosk-model-tts-ru-0.10-multi):
-stt_env/bin/python -m stt.run ep01.mkv --voiceover /path/to/shortening-checkout
+# whole season, up to the Russian dubbing script (no TTS):
+subs_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --until dub
+# one episode end to end (voice-over, checks, mix); --engine teratts for TeraTTS voices:
+subs_env/bin/python -m stt.run ep01.mkv
 ```
 
-Defaults live in `stt_config.json` (mode, models, OCR, LLM, voices, ducking). Stages already done
-are skipped; `--force STAGE` recomputes it and the following ones; `--mode fast` uses Whisper only.
+Defaults live in `stt_config.json` (mode, models, OCR, LLM, TTS engine and voices, checks,
+ducking). Stages already done are skipped; `--force STAGE` recomputes it and the following
+ones; `--mode fast` uses Whisper only.
 
 ## What runs where
 
@@ -44,8 +46,9 @@ are skipped; `--force STAGE` recomputes it and the following ones; `--mode fast`
 | On-screen text (RapidOCR: detection on GPU, recognition on CPU) | local | nothing |
 | ASR fusion (accurate mode only) | OpenRouter LLM | English ASR text of the three models per chunk + glossary |
 | Glossary, speaker names, translation, shortening, gender check | OpenRouter LLM | English transcript / cues, Russian drafts |
-| Voice-over shortening + meaning check (other branch) | DeepSeek / OpenRouter | Russian lines |
-| TTS (Vosk), timeline fitting, mixing, muxing | local CPU/GPU | nothing |
+| Stress re-check of guessed words / homographs | OpenRouter (3 LLMs) | Russian lines with those words |
+| Voice-over shortening + meaning check | DeepSeek / OpenRouter | Russian lines |
+| TTS (Vosk on CPU, TeraTTS on GPU), timeline fitting, Russian ASR check, mixing, muxing | local | nothing |
 
 No audio ever leaves the machine. No manual corrections are applied anywhere; the only human
 inputs are optional files: `speakers.override.json`, an edited `glossary.txt`, and the
@@ -72,6 +75,26 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   speaker that talks most while they are shown; the speaker-naming LLM sees it.
 - `--no-ocr` (or `"ocr": {"enabled": false}`) skips the stage; `--force ocr` rescans.
 
+## Voices, stress and the speech check
+
+- **Engines.** Vosk (CPU, 4 workers; voices 49 female / 56 male) or TeraTTSv2 (GPU, ~0.35 s per
+  line; ru_f1 / ru_m5, also ru_f2, ru_m1). Every line gets the voice of its speaker's gender;
+  continuation cues are never merged across voices. TeraTTS predicts only the total length of a
+  phrase and stretches the speech to fill it (S10E01 scene: median 4.3 syllables/s, slowest
+  2.1); the engine re-synthesises lines off the target tempo by more than 15% (median 5.4,
+  slowest 4.1). Vosk is not faster on the GPU, so it stays on the CPU.
+- **Stress (before synthesis).** RUAccent is right for dictionary words; errors come from
+  homographs and words it guesses. Judging stress from the audio does not work (three detectors
+  on 160 phrases with deliberately wrong stress scored ~40%, chance level), so
+  `voiceover.stress_check` asks three strong LLMs about each guessed word and each homograph in
+  its sentence; a majority correction is applied (`stress.json`: words, or single sentences for
+  homographs). S29E01: 129 words checked, 1 name and 25 homograph uses corrected (пора́, по́сле,
+  го́лоса/голоса́, О́строва, учи́тесь); cheap models were wrong more often than RUAccent, so the
+  defaults are gpt-6.1-sol, claude-sonnet-5.5 and gemini-4-argon (~$0.18 per episode).
+- **Speech check (after synthesis).** `voiceover.speech_check` transcribes every clip with
+  GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
+  abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.
+
 ## Simultaneous speech
 
 1. ASR yields one stream of words: the dominant voice is transcribed, quieter voices under it
@@ -87,17 +110,17 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
 5. The original track stays under the voice, lowered by 12 dB only while the voice speaks, so
    crowd noise and overlapping voices remain audible.
 
-`dub.ru.json` carries a `voice` per line (female 49, male 56 by default) for a two-voice dub;
-the current `voiceover` engine uses one voice per run (`voiceover.voice` in `stt_config.json`).
+`dub.ru.<engine>.json` carries a `voice` per line (by speaker gender); the voice-over uses it.
 
 ## Environments
 
 | venv | Python / torch | Used for |
 |---|---|---|
-| `stt_env` | 3.12 / 2.11 cu128 | orchestration, Whisper (CTranslate2), Cohere, pyannote 4, gender/age, mixing |
-| `stt_qwen_env` | 3.12 / 2.11 cu128 | Qwen3-ASR + Qwen3-ForcedAligner (`qwen-asr` pins transformers 4.57) |
+| `subs_env` | 3.12 / 2.11 cu128 | everything: orchestration, Whisper, Cohere, pyannote 4, gender/age, OCR, RUAccent/RUNorm, Vosk, TeraTTS, GigaAM, mixing, Gradio |
+| `stt_qwen_env` | 3.12 / 2.11 cu128 | Qwen3-ASR + Qwen3-ForcedAligner only (`qwen-asr` pins transformers 4.57) |
 
-Model stages run as subprocesses in their venv automatically. No system ffmpeg is needed
+Model stages run as subprocesses in their venv automatically. `onnxruntime-gpu` is the only
+onnxruntime (`overrides-onnxruntime.txt` drops the CPU wheel that vosk-tts/ruaccent ask for). No system ffmpeg is needed
 (PyAV decodes; `imageio-ffmpeg` provides ffmpeg for muxing).
 
 ## Models
@@ -115,13 +138,13 @@ Whisper medium.en, Distil-Whisper large-v3.5, Qwen3-ASR 0.6B, DiariZen, TeraAnal
 
 ```bash
 # ASR vs English subtitles (clip snapped to subtitle gaps, SDH markup removed)
-stt_env/bin/python -m stt.bench asr --media ep.mkv --srt ep.en.srt --start 600 --duration 600 --out output/stt_bench/ep_10m
-stt_env/bin/python -m stt.bench summary output/stt_bench/ep_10m ...
+subs_env/bin/python -m stt.bench asr --media ep.mkv --srt ep.en.srt --start 600 --duration 600 --out output/stt_bench/ep_10m
+subs_env/bin/python -m stt.bench summary output/stt_bench/ep_10m ...
 # diarization: VoxConverse DER, or SDH speaker labels of a real episode
-stt_env/bin/python -m stt.bench_diar --parquet voxconverse-test.parquet --out output/stt_bench/diar
-stt_env/bin/python -m stt.sdh_eval --srt ep.en.srt output/stt/ep/diarization.*.json
+subs_env/bin/python -m stt.bench_diar --parquet voxconverse-test.parquet --out output/stt_bench/diar
+subs_env/bin/python -m stt.sdh_eval --srt ep.en.srt output/stt/ep/diarization.*.json
 # translations side by side
-stt_env/bin/python -m stt.compare_translations output/stt/ep --variants a b --ass ep.ru.ass
+subs_env/bin/python -m stt.compare_translations output/stt/ep --variants a b --ass ep.ru.ass
 ```
 
 Why these models (Australian Survivor S10, three 10-minute clips, WER against English SDH
@@ -136,11 +159,13 @@ episode: equal speaker purity, pyannote 2.5x faster. Full tables: `output/stt_be
   in ms, `text: list[str]`, `gender`) plus `speaker`, `speaker_name`, `overlap`; the Russian
   file adds `text_en`, `budget_chars`, `window_ms`. `.srt` copies; `subs.en.speakers.srt` shows
   `[S03] text` for review.
-- `dub.ru.json` / `dub.report.json` — voiced lines with `voice`, skipped lines with reasons.
+- `dub.ru.<engine>.json` / `dub.report.json` — voiced lines with `voice`, skipped lines with reasons.
+- `stress.json` — checked words, the votes of each LLM, applied corrections.
 - `speakers.json` — ID, talk time, voice gender/confidence, age, LLM name/label/role/evidence,
   `gender_source` (`voice`, `voice+text`, `text`, `manual`), speaker embedding.
 - `glossary.json/.txt`, `hotwords.txt`; the season glossary sits next to the episode folders.
-- `voiceover/` (other branch's run), `<name>.ru.wav`, `<name>.ru.mkv`.
+- `voiceover.<engine>/` (voice-over run: `export/track.wav`, `report.md`, `speech_check.md`),
+  `<name>.ru.<engine>.wav`, `<name>.ru.<engine>.mkv`.
 - `ocr.json` — captions, name cards and all text events with times and boxes.
 - `words.json`, `diarization.*.json`, `asr.*.json`, `voice.*.json`, `timings.json`, `logs/`.
 
@@ -150,5 +175,5 @@ then `stt.run ... --force speakers`; edit `glossary.txt` and use `--force transl
 ## Tests
 
 ```bash
-stt_env/bin/python -m unittest tests.test_stt_local -v
+subs_env/bin/python -m unittest tests.test_stt_local -v
 ```

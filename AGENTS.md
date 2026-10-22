@@ -1,106 +1,52 @@
-# AGENT Instructions for `vosk` TTS repo
+# AGENTS.md
 
-Этот файл имеет приоритет над другими инструкциями для агента.
-Он описывает, как работать с проектом, какие паттерны
-сохранять и как расширять пайплайн SRT → JSON → RUNorm + RUAccent →
-Vosk TTS → микс.
+Этот файл имеет приоритет над другими инструкциями для агента (`CLAUDE.md` — ссылка на него).
+Он описывает, как работать с проектом: английское видео → распознание и перевод (`stt/`) →
+русская озвучка с подгонкой под время (`voiceover/`), а также классический пайплайн
+SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
 
-## 1. Среда, запуск скриптов и установка зависимостей
+## 1. Общие правила
 
-- **Python и окружение**
-    - Использовать Python 3.
-    - Всегда активировать виртуальное окружение `vosk_env` перед
-        запуском любых скриптов или установкой/удалением пакетов.
-    - В PowerShell из корня репозитория:
+- Репозиторий работает в Linux.
+- Основное виртуальное окружение — `subs_env`; перед запуском скриптов всегда активируй его.
+- Скрипты запускай из корня репозитория через `uv` в виде модулей, например:
+    `uv run -m utils.srt_to_json ...` (или `subs_env/bin/python -m ...`).
+- Пакеты ставь через `uv pip install <package>` / `uv pip uninstall <package>`, только после
+    активации `subs_env`. Новые зависимости добавляй в `requirements.txt` с точной версией.
+- Всегда типизируй код. Тестируй код после того, как написал (`uv run -m pytest tests`).
+- В git попадает только код, конфиги и документация. Отчёты, результаты прогонов, аудио и
+    модели лежат в `output/` и `models/` (они в `.gitignore`) и не коммитятся.
 
-        ```powershell
-        cd d:\tts_projects\vosk
-        .\vosk_env\Scripts\Activate.ps1
-        ```
+## 2. Язык общения
 
-- **Запуск скриптов**
-    - Скрипты запускать из корня репозитория через `uv` в виде модулей:
+- Отвечать на русском языке, если не указано иное.
+- Документацию и комментарии писать на английском языке, если не указано иное.
+- Use plain, conversational language. Avoid unexplained jargon, acronyms, and unnecessary internal
+    details; explain any necessary technical term immediately.
+- For work summaries, lead with what was done, how it was tested, what the results mean, and the
+    recommended next step. Use short sections only when helpful, not as a mandatory template for
+    every reply.
+- Clearly distinguish completed work from plans, real checks from simulations, and observations
+    from guarantees. Mention limitations plainly; include technical details, logs, and identifiers
+    only when needed or requested.
 
-        ```powershell
-        uv run -m utils.srt_to_json ...
-        uv run -m utils.text_normalizer ...
-        uv run -m synthesize.synthesize_cli ...
-        uv run -m utils.audio_mixer ...
-        ```
+## 3. Окружения и основные пайплайны
 
-    - Примеры типичных команд:
-        - SRT → JSON:
+- **Окружения** (создание: `bash scripts/setup_envs.sh`):
+    - `subs_env` — всё: распознание (`stt/`), перевод, озвучка (`voiceover/`, Vosk, TeraTTS),
+        проверка речи, Gradio, классические скрипты. Ставится из `requirements.txt` через uv с
+        `overrides-onnxruntime.txt` (модуль `onnxruntime` даёт только `onnxruntime-gpu`).
+    - `stt_qwen_env` — только Qwen3-ASR и выравниватель (`qwen-asr` требует transformers 4.57);
+        стадии распознания сами запускаются в нём, вручную активировать не нужно.
+- **Видео → русская озвучка целиком**:
+    `subs_env/bin/python -m stt.run <видео или маска>` — английские субтитры со спикерами,
+    глоссарий, имена, перевод под тайминг, сценарий озвучки, voiceover, проверка речи, микс.
+    Настройки в `stt_config.json`, подробности в `docs/stt_local.md`.
+- **Озвучка готовых русских субтитров**: `uv run -m voiceover.pipeline run <subs.json> --out <dir>`
+    (настройки в `voiceover_config.json`).
+- Ключи API (`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`) лежат в `.env`; никогда не выводить их.
 
-            ```powershell
-            uv run -m utils.srt_to_json input.srt -o subs.json
-            ```
-
-        - Нормализация + акцентирование JSON сабов (RUNorm + RUAccent):
-
-            ```powershell
-            uv run -m utils.text_normalizer subs.json accentized.json 20 \
-                --accent-device CPU --norm-device cpu
-            ```
-
-        - Синтез TTS (единый CLI):
-            - Single-line:
-
-                ```powershell
-                uv run -m synthesize.synthesize_cli \
-                    --text "Привет!" \
-                    --model models/vosk-model-tts-ru-0.10-multi \
-                    --voice 0 \
-                    --speech-rate 1.0 \
-                    --device cpu
-                ```
-
-            - Batch из JSON сабов:
-
-                ```powershell
-                uv run -m synthesize.synthesize_cli \
-                    --json .\accentized.json \
-                    --model models/vosk-model-tts-ru-0.10-multi \
-                    --voice 0 \
-                    --speech-rate 1.0 \
-                    --device cpu \
-                    --output-folder .\tts_out \
-                    --file-prefix tts_
-                ```
-
-        - Быстрый микс сегментов:
-
-            ```powershell
-            uv run -m utils.audio_mixer subs.json tts_out output/mix \
-                --sr 48000 --channels 1
-            ```
-
-- **Установка и удаление пакетов**
-    - Любые `pip`-операции выполнять только после активации `vosk_env`.
-    - Использовать `uv pip`:
-
-        ```powershell
-        # установка
-        uv pip install <package>
-
-        # удаление
-        uv pip uninstall <package>
-        ```
-
-    - Не писать команды установки без явного указания, что окружение
-        уже активировано.
-
-- **Исключение: локальный GPU STT (пакет `stt/`)**
-    - Использует собственные окружения, а не `vosk_env`: `stt_env` (основное) и
-        `stt_qwen_env` (Qwen3-ASR и выравниватель) — у моделей несовместимые
-        версии transformers. Создание: `bash scripts/setup_stt_envs.sh`.
-    - Запуск из корня репозитория интерпретатором `stt_env`; всё целиком
-        (видео → английские субтитры со спикерами → перевод → сценарий озвучки →
-        voiceover → микс): `stt_env/bin/python -m stt.run <видео или маска>`.
-        Стадии моделей сами запускаются в нужном окружении; настройки в
-        `stt_config.json`.
-    - Подробности: `docs/stt_local.md`.
-
-## 2. Общий пайплайн данных
+## 4. Классический пайплайн SRT → JSON → RUNorm + RUAccent → Vosk → микс
 
 - **SRT → JSON**
     - Вход: SRT-файл сабов.
@@ -156,7 +102,7 @@ Vosk TTS → микс.
         - `overlay_audio(silence.wav, tts_out, subs.json, mixed.mp3)` —
             наложить TTS-сегменты на тишину.
 
-## 3. RUNorm / RUAccent и устройства
+## 5. RUNorm / RUAccent и устройства
 
 - **Загрузка моделей**
     - RUNorm:
@@ -181,7 +127,7 @@ Vosk TTS → микс.
     - Уважать эти флаги и не менять их смысл: они управляют устройствами
         RUAccent и RUNorm соответственно.
 
-## 4. Vosk TTS и ONNXRuntime
+## 6. Vosk TTS и ONNXRuntime
 
 - **Единый CLI**
     - Всегда использовать `synthesize.synthesize_cli` как точку входа для
@@ -195,7 +141,7 @@ Vosk TTS → микс.
         **не** патчить `Model.__init__` и не создавать модель до входа в
         контекст.
 
-## 5. Стиль кода, модульность и переиспользование
+## 7. Стиль кода, модульность и переиспользование
 
 - **Общий стиль**
     - Импорты: стандартная библиотека → сторонние пакеты → локальные
@@ -234,7 +180,7 @@ Vosk TTS → микс.
     - Имена файлов, публичных функций и ключевых структур (полей JSON)
         по возможности сохранять стабильными.
 
-## 6. Производительность и надёжность
+## 8. Производительность и надёжность
 
 - **Модели и кэширование**
     - Тяжёлые модели (RUNorm, RUAccent, Vosk TTS) загружать один раз и
@@ -254,7 +200,7 @@ Vosk TTS → микс.
     - Не вводить крупные рефакторинги и новые фреймворки без явного
         запроса.
 
-## 7. Приоритеты и связь с другими инструкциями
+## 9. Приоритеты и связь с другими инструкциями
 
 - Этот файл (`AGENTS.md`) имеет приоритет над другими наборами
     инструкций для агента.
@@ -262,6 +208,3 @@ Vosk TTS → микс.
     правилам из `AGENTS.md`, сохраняя при этом общий пайплайн
     (SRT → JSON → RUNorm + RUAccent → Vosk TTS → mix/export).
 
-## 8. Язык инструкции
-    - Отвечать на русском языке, если не указано иное.
-    - Документацию и комментарии писать на английском языке, если не указано иное.

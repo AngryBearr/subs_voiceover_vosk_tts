@@ -25,7 +25,7 @@ class DiarSpec:
 
     kind: str
     model_id: str
-    env: str = "stt_env"
+    env: str = "subs_env"
     note: str = ""
 
 

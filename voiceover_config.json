@@ -1,0 +1,88 @@
+{
+  "engine": {
+    "name": "vosk",
+    "model_path": "models/vosk-model-tts-ru-0.10-multi",
+    "device": "cpu",
+    "voice": 49,
+    "normalization": {
+      "enabled": true,
+      "norm_device": "cpu",
+      "accent_device": "cpu",
+      "batch_size": 10
+    },
+    "trim": {
+      "edge_enabled": true,
+      "edge_dbfs": -40.0,
+      "edge_pad_ms": 30,
+      "pauses_enabled": true,
+      "silence_dbfs": -35.0,
+      "threshold_sec": 0.5,
+      "target_sec": 0.2
+    }
+  },
+  "policy": {
+    "lead_ms": 360,
+    "lag_ms": 500,
+    "gap_ms": 150,
+    "base_syl_per_sec": 5.5,
+    "comfort_syl_per_sec": 6.3,
+    "ceiling_syl_per_sec": 6.7,
+    "min_speech_sec": 0.6,
+    "grid_ms": 10,
+    "tempo_step": 0.02,
+    "weight_shift": 1.0,
+    "weight_tempo": 20.0,
+    "weight_tempo_over": 200.0,
+    "weight_text": 100.0,
+    "weight_collision": 1000.0,
+    "weight_collision_fixed": 50.0
+  },
+  "units": {
+    "enabled": true,
+    "max_gap_ms": 300,
+    "max_cues": 3,
+    "max_span_ms": 8000,
+    "scene_gap_ms": 1500
+  },
+  "synthesis": {
+    "workers": 4,
+    "cache_dir": "output/tts_cache"
+  },
+  "llm": {
+    "provider": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "temperature": 0.0,
+    "max_tokens": 4096,
+    "cache_dir": "output/llm_cache",
+    "reasoning": "off"
+  },
+  "compression": {
+    "bands": [
+      "easy",
+      "medium",
+      "hard"
+    ],
+    "context_units": 2,
+    "prompt_version": "v2",
+    "fit_slack_sec": 0.0,
+    "workers": 6
+  },
+  "verify": {
+    "enabled": true,
+    "prompt_version": "v2",
+    "workers": 6,
+    "llm": {
+      "provider": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "openai/gpt-6-luna",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "reasoning": "default",
+      "max_tokens": 4096
+    }
+  },
+  "export": {
+    "sample_rate": 22050
+  }
+}

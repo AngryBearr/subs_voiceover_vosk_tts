@@ -1,7 +1,7 @@
 """Episode transcription: diarization + ASR + voice profiles -> speaker-attributed subtitles.
 
 Run from the repo root (each model stage runs in its own venv, results are cached):
-    stt_env/bin/python -m stt.transcribe EPISODE.mkv --out output/stt/ep01 \
+    subs_env/bin/python -m stt.transcribe EPISODE.mkv --out output/stt/ep01 \
         --asr whisper-large-v3 --diarizer pyannote-community-1
 
 Outputs in --out:
@@ -177,12 +177,12 @@ def transcribe(args: argparse.Namespace) -> Path:
         ocr_args = ["ocr", "--media", str(media.resolve()), "--out", str(ocr_path), "--device", args.device,
                     "--start", str(args.start), "--fps", str(args.ocr_fps)]
         ocr_args += ["--duration", str(args.duration)] if args.duration else []
-        ocr_data = run_stage("ocr", "stt_env", ocr_args, ocr_path, logs, all_forced or "ocr" in stages)
+        ocr_data = run_stage("ocr", "subs_env", ocr_args, ocr_path, logs, all_forced or "ocr" in stages)
 
     voice_path = out / f"voice.{args.diarizer}.json"
     voice_args = ["voice", "--audio", audio, "--diarization", str(diar_path), "--out", str(voice_path),
                   "--device", args.device, "--threshold", str(args.gender_threshold)]
-    voice_data = run_stage("voice", "stt_env", voice_args, voice_path, logs,
+    voice_data = run_stage("voice", "subs_env", voice_args, voice_path, logs,
                            all_forced or "voice" in stages or "diarize" in stages)
 
     # ---- assemble

@@ -1,6 +1,6 @@
 """EN -> RU subtitle translation for voice-over with an LLM (speaker-, gender- and timing-aware).
 
-    stt_env/bin/python -m stt.translate output/stt/ep01 [--model ...] [--cps 14 | --tts-profile p.json]
+    subs_env/bin/python -m stt.translate output/stt/ep01 [--model ...] [--cps 14 | --tts-profile p.json]
 
 Reads `subs.en.json` + `speakers.json` (after `stt.speakers`), writes `subs.ru.json`
 in the project subtitle schema (ready for utils.text_normalizer -> TTS) and `subs.ru.srt`.

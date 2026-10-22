@@ -1,0 +1,3 @@
+# Drop the CPU onnxruntime wheel that vosk-tts, ruaccent and gigaam ask for:
+# onnxruntime-gpu provides the same module (with the CPU provider).
+onnxruntime; sys_platform == "never"

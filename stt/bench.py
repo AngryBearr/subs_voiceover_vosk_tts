@@ -4,9 +4,9 @@ Each model runs in its own subprocess (optionally from its own venv), so peak VR
 is measured per model and one crash/OOM does not stop the comparison.
 
 Examples (from repo root):
-    stt_env/bin/python -m stt.bench asr --media ep01.mkv --srt ep01.en.srt \
+    subs_env/bin/python -m stt.bench asr --media ep01.mkv --srt ep01.en.srt \
         --start 600 --duration 600 --models all --out output/stt_bench/ep01_10m
-    stt_env/bin/python -m stt.bench summary output/stt_bench/ep01_10m output/stt_bench/ep02_10m
+    subs_env/bin/python -m stt.bench summary output/stt_bench/ep01_10m output/stt_bench/ep02_10m
 """
 
 from __future__ import annotations

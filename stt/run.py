@@ -1,16 +1,17 @@
 """One command from an English video to a Russian voice-over (whole season at once if needed).
 
-    stt_env/bin/python -m stt.run "Season 10/*.mkv" [--mode fast|accurate] [--until translate]
+    subs_env/bin/python -m stt.run "Season 10/*.mkv" [--mode fast|accurate] [--until translate]
 
 Per episode, in `<out-root>/<video name>/`:
     transcribe  English subtitles with speakers (stt.transcribe)       subs.en.json
     glossary    season glossary: names/terms + Russian renderings     glossary.json
     speakers    names, Russian labels, final gender (LLM)             speakers.llm.json
     translate   timing-aware EN -> RU translation (LLM)               subs.ru.json
-    dub         voiced lines and voices                               dub.ru.json
-    voiceover   synthesis + timeline fitting (`voiceover` package of the
-                subtitle-shortening work, run from its own checkout)  voiceover/export/track.wav
-    mix         voice over the ducked original (+ mkv with tracks)    <name>.ru.wav, <name>.ru.mkv
+    dub         voiced lines and a voice per line (speaker gender)    dub.ru.json
+    stress      stress of guessed words/homographs re-checked (LLMs)  stress.json
+    voiceover   synthesis (Vosk or TeraTTS) + timeline fitting        voiceover.<engine>/export/track.wav
+    check       Russian ASR check of the spoken clips                 voiceover.<engine>/speech_check.md
+    mix         voice over the ducked original (+ mkv with tracks)    <name>.ru.<engine>.wav / .mkv
 
 Finished stages are skipped (no repeated LLM costs); `--force STAGE` recomputes it and
 everything after it. Defaults come from `stt_config.json`. Episodes in the same folder share a
@@ -34,7 +35,7 @@ from stt.runner import REPO_ROOT, load_json, save_json
 
 log = logging.getLogger("stt.run")
 
-STAGES = ["transcribe", "glossary", "speakers", "translate", "dub", "voiceover", "mix"]
+STAGES = ["transcribe", "glossary", "speakers", "translate", "dub", "stress", "voiceover", "check", "mix"]
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -61,6 +62,9 @@ class Episode:
         default_season = out_root / f"{media.parent.name}.glossary.json"
         self.season = Path(args.season_glossary) if args.season_glossary else default_season
         self.forced_from: int | None = STAGES.index(args.force) if args.force else None
+        vo = config.get("voiceover", {})
+        self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk"))
+        self.vo_dir = self.out / f"voiceover.{self.engine}"
 
     def needed(self, stage: str, outputs: list[Path]) -> bool:
         if self.forced_from is not None and STAGES.index(stage) >= self.forced_from:
@@ -74,9 +78,11 @@ class Episode:
             "glossary": (self.glossary, [self.out / "glossary.json"]),
             "speakers": (self.speakers, [self.out / "speakers.llm.json"]),
             "translate": (self.translate, [self.out / "subs.ru.json"]),
-            "dub": (self.dub, [self.out / "dub.ru.json"]),
-            "voiceover": (self.voiceover, [self.out / "voiceover" / "export" / "track.wav"]),
-            "mix": (self.mix, [self.out / f"{self.media.stem}.ru.wav"]),
+            "dub": (self.dub, [self.out / f"dub.ru.{self.engine}.json"]),
+            "stress": (self.stress, [self.out / "stress.json"]),
+            "voiceover": (self.voiceover, [self.vo_dir / "export" / "track.wav"]),
+            "check": (self.check, [self.vo_dir / "speech_check.json"]),
+            "mix": (self.mix, [self.out / f"{self.media.stem}.ru.{self.engine}.wav"]),
         }
         for position, stage in enumerate(STAGES[: until + 1]):
             func, outputs = steps[stage]
@@ -131,44 +137,76 @@ class Episode:
             argv += ["--tts-profile", str(REPO_ROOT / cfg["tts_profile"])]
         translate.main(argv)
 
+    def _engine(self) -> dict[str, Any]:
+        cfg = self.config["voiceover"]
+        engine = dict(cfg.get("engines", {}).get(self.engine, {}))
+        if "voices" not in engine:
+            raise SystemExit(f"voiceover.engines.{self.engine}.voices missing in the config")
+        return engine
+
     def dub(self) -> None:
         from stt import dub
 
-        cfg = self.config["dub"]
-        dub.main([str(self.out), "--voices", cfg["voices"], "--interjections", cfg["interjections"]])
+        voices = ",".join(f"{k}={v}" for k, v in self._engine()["voices"].items())
+        dub.main([str(self.out), "--voices", voices, "--interjections", self.config["dub"]["interjections"],
+                  "--output", f"dub.ru.{self.engine}.json"])
+
+    def _module(self, name: str, module: str, args: list[str]) -> None:
+        """Run a module of this repo in the current interpreter, logging to logs/<name>.log."""
+        env = {**os.environ, **dotenv(), "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+        log_path = self.out / "logs" / f"{name}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8") as log_file:
+            code = subprocess.run([sys.executable, "-m", module, *args], cwd=REPO_ROOT, env=env, stdout=log_file,
+                                  stderr=subprocess.STDOUT).returncode
+        if code != 0:
+            raise SystemExit(f"{name} failed (exit {code}), see {log_path}")
+
+    def stress(self) -> None:
+        cfg = self.config["voiceover"]
+        if not cfg.get("stress_check", True):
+            save_json(self.out / "stress.json", {"schema": "voiceover-stress-v3", "skipped": True})
+            return
+        self._module("stress", "voiceover.stress_check", [
+            str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str((self.out / "stress.json").resolve()),
+            "--config", str(REPO_ROOT / cfg.get("config", "voiceover_config.json"))])
 
     def voiceover(self) -> None:
         cfg = self.config["voiceover"]
-        repo = Path(self.args.voiceover or cfg.get("repo") or "")
-        if not repo or not (repo / "voiceover" / "pipeline.py").exists():
-            raise SystemExit("voiceover: set --voiceover PATH (a checkout of the subtitle-shortening branch "
-                             "with its venv and Vosk model) or voiceover.repo in stt_config.json")
-        python = repo / cfg["python"]
-        vo_config = load_json(repo / cfg["config"])
-        vo_config["engine"]["voice"] = int(cfg["voice"])
-        config_path = self.out / "voiceover.config.json"
+        vo_config = load_json(REPO_ROOT / cfg.get("config", "voiceover_config.json"))
+        engine = {k: v for k, v in self._engine().items() if k != "voices"}
+        if "sample_rate" in engine:  # export rate of the track (TeraTTS speaks at 44.1 kHz)
+            vo_config["export"] = {**vo_config.get("export", {}), "sample_rate": int(engine.pop("sample_rate"))}
+        normalization = {**vo_config["engine"].get("normalization", {}), **engine.pop("normalization", {})}
+        if (self.out / "stress.json").exists():
+            normalization["stress_dict"] = str((self.out / "stress.json").resolve())
+        vo_config["engine"] = {**vo_config["engine"], **engine, "name": self.engine, "normalization": normalization,
+                               "voice": self._engine()["voices"]["male"]}
+        config_path = self.out / f"voiceover.{self.engine}.config.json"
         save_json(config_path, vo_config)
-        env = {**os.environ, **dotenv(), "PATH": f"{python.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
-        cmd = [str(python), "-m", "voiceover.pipeline", "run", str((self.out / "dub.ru.json").resolve()),
-               "--out", str((self.out / "voiceover").resolve()), "--config", str(config_path.resolve())]
-        log_path = self.out / "logs" / "voiceover.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", encoding="utf-8") as log_file:
-            code = subprocess.run(cmd, cwd=repo, env=env, stdout=log_file, stderr=subprocess.STDOUT).returncode
-        if code != 0:
-            raise SystemExit(f"voiceover failed (exit {code}), see {log_path}")
+        self._module(f"voiceover.{self.engine}", "voiceover.pipeline", [
+            "run", str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str(self.vo_dir.resolve()),
+            "--config", str(config_path.resolve())])
+
+    def check(self) -> None:
+        if not self.config["voiceover"].get("speech_check", True):
+            save_json(self.vo_dir / "speech_check.json", {"schema": "voiceover-speech-check-v1", "skipped": True})
+            return
+        self._module(f"check.{self.engine}", "voiceover.speech_check", [str(self.vo_dir.resolve()),
+                                                                         "--root", str(REPO_ROOT)])
 
     def mix(self) -> None:
         from stt import mix
 
         cfg = self.config["mix"]
-        out_wav = self.out / f"{self.media.stem}.ru.wav"
-        argv = [str(self.media), str(self.out / "voiceover" / "export" / "track.wav"), "--out", str(out_wav),
+        out_wav = self.out / f"{self.media.stem}.ru.{self.engine}.wav"
+        argv = [str(self.media), str(self.vo_dir / "export" / "track.wav"), "--out", str(out_wav),
                 "--duck-db", str(cfg["duck_db"])]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
         if cfg.get("mux") and not self.args.start:
-            argv += ["--mux", str(self.out / f"{self.media.stem}.ru.mkv"), "--srt", str(self.out / "subs.ru.srt")]
+            argv += ["--mux", str(self.out / f"{self.media.stem}.ru.{self.engine}.mkv"),
+                     "--srt", str(self.out / "subs.ru.srt")]
         mix.main(argv)
 
 
@@ -181,7 +219,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--until", choices=STAGES, default="mix", help="Last stage to run")
     parser.add_argument("--force", choices=STAGES, default=None, help="Recompute this stage and the ones after it")
     parser.add_argument("--season-glossary", default=None, help="Default: <out-root>/<folder>.glossary.json")
-    parser.add_argument("--voiceover", default=None, help="Checkout of the subtitle-shortening branch")
+    parser.add_argument("--engine", default=None, help="TTS engine (voiceover.engines in the config: vosk | teratts)")
     parser.add_argument("--start", type=float, default=None, help="Process from this time (tests), seconds")
     parser.add_argument("--duration", type=float, default=None, help="Process this many seconds (tests)")
     args = parser.parse_args(argv)

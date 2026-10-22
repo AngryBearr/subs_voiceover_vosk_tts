@@ -14,14 +14,18 @@
     "parallel": 4
   },
   "dub": {
-    "voices": "female=49,male=56",
     "interjections": "dense"
   },
   "voiceover": {
-    "repo": null,
-    "python": "subs_env/bin/python",
     "config": "voiceover_config.json",
-    "voice": 56
+    "engine": "vosk",
+    "engines": {
+      "vosk": {"voices": {"female": 49, "male": 56}},
+      "teratts": {"voices": {"female": "ru_f1", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.5,
+                  "sample_rate": 44100}
+    },
+    "stress_check": true,
+    "speech_check": true
   },
   "mix": {
     "duck_db": 12.0,

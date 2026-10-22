@@ -1,6 +1,6 @@
 """Mix the Russian voice-over track over the original audio, ducking the original under the voice.
 
-    stt_env/bin/python -m stt.mix EPISODE.mkv VOICE.wav --out ep.ru.wav [--duck-db 12] [--mux ep.ru.mkv --srt ep.ru.srt]
+    subs_env/bin/python -m stt.mix EPISODE.mkv VOICE.wav --out ep.ru.wav [--duck-db 12] [--mux ep.ru.mkv --srt ep.ru.srt]
 
 The original stays audible (music, crowd, overlapping voices) and is lowered only while the
 voice-over speaks, with a smooth attack/release. `--mux` writes a video copy (video stream is
@@ -86,7 +86,7 @@ def find_ffmpeg() -> str | None:
 def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None) -> None:
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        raise RuntimeError("ffmpeg not found: install it or `uv pip install imageio-ffmpeg` in stt_env")
+        raise RuntimeError("ffmpeg not found: install it or `uv pip install imageio-ffmpeg` in subs_env")
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(video), "-i", str(mixed_wav)]
     if srt:
         cmd += ["-i", str(srt)]

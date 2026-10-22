@@ -31,7 +31,7 @@ class AsrSpec:
     kind: str
     model_id: str
     options: dict[str, Any] = field(default_factory=dict)
-    env: str = "stt_env"
+    env: str = "subs_env"
     batch_size: int = 8
     note: str = ""
 

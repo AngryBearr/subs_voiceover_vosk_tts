@@ -1,5 +1,6 @@
 import json
 import ast
+import re
 from typing import List, Dict, Any
 
 from ruaccent import RUAccent
@@ -20,8 +21,61 @@ cust_dict = {
 }
 
 
+class ProtectedNameRUNorm(RUNorm):
+    """Protect Кэт and ellipsis boundaries only during abbreviation expansion."""
+
+    def proccess_abbr(self, text: str) -> str:
+        parts = re.split(r"(\.{2,}|…)", text)
+        if len(parts) > 1:
+            # Ellipses are punctuation boundaries, not learned abbreviations.
+            return "".join(part if i % 2 or not part.strip() else self.proccess_abbr(part)
+                           for i, part in enumerate(parts))
+        punctuation = '.,!?;:«»"\'…()[]{}'
+        spans: List[tuple[int, int]] = []
+        for match in re.finditer(r"(?<!\w)кэт(?!\w)", text, flags=re.IGNORECASE):
+            start, end = match.span()
+            while start > 0 and text[start - 1] in punctuation:
+                start -= 1
+            while end < len(text) and text[end] in punctuation:
+                end += 1
+            spans.append((start, end))
+        if not spans:
+            return super().proccess_abbr(text)
+
+        tags = [dict(tag) for tag in self.tagger(text)]
+        previous_end = 0
+        for tag in tags:
+            start, end, word = tag.get("start"), tag.get("end"), tag.get("word")
+            if (type(start) is not int or type(end) is not int
+                    or not previous_end <= start < end <= len(text) or not isinstance(word, str)
+                    or re.sub(r"\s+", "", word.removeprefix("##")).casefold()
+                    != re.sub(r"\s+", "", text[start:end]).casefold()):
+                raise ValueError("RUNorm name protection requires valid source-bound tag offsets/words")
+            previous_end = end
+            overlaps = [(left, right) for left, right in spans if start < right and end > left]
+            if overlaps:
+                if not any(left <= start < end <= right for left, right in overlaps):
+                    raise ValueError("RUNorm tag crosses protected name and unrelated source text")
+                tag["entity_group"] = "PLAIN"
+                tag["word"] = text[start:end]
+            elif tag["entity_group"] not in {"PLAIN", "TIME"}:
+                tag["entity_group"] = "TAG"
+
+        prompt, current, counter = "", 0, 0
+        for tag in self.process_tags(tags):
+            prompt += text[current:tag["start"]]
+            if tag["entity_group"] == "TAG":
+                prompt += f"[{tag['word']}]<extra_id_{counter}>"
+                counter += 1
+            else:
+                prompt += text[tag["start"]:tag["end"]]
+            current = tag["end"]
+        prompt += text[current:]
+        return self.construct_answer(prompt, self.predict_abbr(prompt)) if counter else text
+
+
 def _load_runorm(device: str = "cpu") -> RUNorm:
-    normalizer = RUNorm()
+    normalizer = ProtectedNameRUNorm()
     normalizer.load(workdir="./runorm_cache", model_size="big", device=device)
     return normalizer
 
@@ -34,15 +88,40 @@ def _load_ruaccent(device: str = "cpu") -> RUAccent:
         custom_dict=cust_dict,
         device=device,
     )
+    # transformers 5 tokenizers return only the inputs they declare; the stress model's ONNX
+    # graph also needs token_type_ids, which its character tokenizer does not declare.
+    tokenizer = accentizer.accent_model.tokenizer
+    if "token_type_ids" not in tokenizer.model_input_names:
+        tokenizer.model_input_names = [*tokenizer.model_input_names, "token_type_ids"]
     return accentizer
 
 
+def _word_tokens(text: str) -> List[str]:
+    plain = text.replace("+", "").replace("\u0301", "").casefold().replace("ё", "е")
+    return re.findall(r"[^\W\d_]+|\d+(?:[.,]\d+)*", plain)
+
+
+def _check_lexical_invariant(before: str, after: str, *, stage: str, cue_index: Any) -> None:
+    """Fail closed on letter changes, not a general semantic/number validator.
+
+    RUNorm may expand digits/Latin input; already-written Russian words must stay
+    unchanged. RUAccent may only change stress, case, punctuation and e/yo.
+    """
+    if not isinstance(after, str):
+        raise ValueError(f"{stage} returned non-text at cue index {cue_index}")
+    if stage == "RUNorm" and re.search(r"[A-Za-z]|\d", before):
+        return
+    old, new = _word_tokens(before), _word_tokens(after)
+    if old != new:
+        raise ValueError(f"{stage} lexical change at cue index {cue_index}: {old!r} -> {new!r}")
+
+
 def replace_ellipsis(text: str) -> str:
-    return text.replace("...", "..")
+    return text.replace("…", "...")
 
 
 def restore_ellipsis(text: str) -> str:
-    return text.replace("..", "...")
+    return text.replace("…", "...")
 
 
 def normalize_subtitles_runorm_only(
@@ -72,7 +151,8 @@ def normalize_subtitles_runorm_only(
         if len(parts) != len(chunk):
             parts = [normalizer.norm(t) for t in original_texts]
 
-        for sub, norm_text in zip(chunk, parts):
+        for sub, original_text, norm_text in zip(chunk, original_texts, parts):
+            _check_lexical_invariant(original_text, norm_text, stage="RUNorm", cue_index=sub.get("index"))
             new_sub = dict(sub)
             new_sub["text"] = [norm_text]
             processed.append(new_sub)
@@ -99,6 +179,7 @@ def runorm_pass(
 
         no_ellipsis = replace_ellipsis(joined)
         norm_text = normalizer.norm(no_ellipsis)
+        _check_lexical_invariant(joined, norm_text, stage="RUNorm", cue_index=item.get("index"))
 
         new_item = dict(item)
         new_item["_normalized_text"] = norm_text
@@ -117,6 +198,8 @@ def ruaccent_pass(
     Ожидает, что в элементах есть поле _normalized_text (как после runorm_pass).
     """
     items = [dict(it) for it in subtitles]
+    if any(not isinstance(it.get("_normalized_text"), str) for it in items):
+        raise ValueError("RUAccent requires each cue's bound RUNorm text")
 
     for i in range(0, len(items), batch_size):
         batch = items[i : i + batch_size]
@@ -130,10 +213,14 @@ def ruaccent_pass(
         except (SyntaxError, ValueError):
             processed_texts = [accentizer.process_all(t) for t in batch_texts]
 
+        if (not isinstance(processed_texts, list) or len(processed_texts) != len(batch)
+                or any(not isinstance(text, str) for text in processed_texts)):
+            raise ValueError(f"RUAccent malformed batch output for cue indices {[it.get('index') for it in batch]}")
+
         for j, processed_text in enumerate(processed_texts):
-            if j >= len(batch):
-                break
             text_with_ellipsis = restore_ellipsis(processed_text)
+            _check_lexical_invariant(batch_texts[j], text_with_ellipsis,
+                                     stage="RUAccent", cue_index=batch[j].get("index"))
             batch[j]["text"] = [text_with_ellipsis]
 
     # чистим временное поле и возвращаем итоговый список
@@ -219,4 +306,3 @@ if __name__ == "__main__":
         norm_device=args.norm_device,
         accent_device=args.accent_device,
     )
-

@@ -5,7 +5,7 @@ Data: one or more parquet shards of `diarizers-community/voxconverse` (test spli
         --repo-type dataset --local-dir output/stt_data/voxconverse
 
 Run (from repo root):
-    stt_env/bin/python -m stt.bench_diar --parquet output/stt_data/voxconverse/data/test-00006-of-00011.parquet \
+    subs_env/bin/python -m stt.bench_diar --parquet output/stt_data/voxconverse/data/test-00006-of-00011.parquet \
         --models pyannote-community-1 --out output/stt_bench/diar_voxconverse
 """
 

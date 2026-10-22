@@ -1,0 +1,51 @@
+{
+  "analysis": {
+    "avg_chars_per_sec": 13.0,
+    "max_mismatch_ratio": 1.5,
+    "fail_on_critical": false
+  },
+  "normalization": {
+    "norm_device": "cpu",
+    "accent_device": "cpu",
+    "batch_size": 10
+  },
+  "tts": {
+    "model_path": "models/vosk-model-tts-ru-0.10-multi",
+    "device": "cpu",
+    "voice": 8,
+    "use_analysis_speech_rate": false,
+    "base_speech_rate": 1.25,
+    "max_total_speed": 1.5,
+    "output_sample_rate": null
+  },
+  "segments": {
+    "output_naming": "index",
+    "file_prefix": "",
+    "ext": ".wav"
+  },
+  "reduce_silence": {
+    "enabled": true,
+    "silence_dbfs": -35.0,
+    "threshold_sec": 0.5,
+    "target_sec": 0.2
+  },
+  "silero_pauses": {
+    "enabled": true
+  },
+  "silero_edges": {
+    "enabled": true
+  },
+  "mix": {
+    "enabled": true,
+    "sample_rate": 44100,
+    "channels": 1
+  },
+  "audio_analysis": {
+    "enabled": true,
+    "prefer_ffmpeg": true
+  },
+  "resample": {
+    "enabled": true,
+    "target_sr": 44100
+  }
+}

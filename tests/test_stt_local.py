@@ -1,6 +1,6 @@
 """Pure-logic tests for the local GPU STT package (no models, no GPU).
 
-Run: stt_env/bin/python -m unittest tests.test_stt_local -v
+Run: subs_env/bin/python -m unittest tests.test_stt_local -v
 """
 
 from __future__ import annotations
@@ -109,6 +109,15 @@ class OcrTest(unittest.TestCase):
         self.assertIn("descriptor: SEASON 6 FINALIST  VILLAINS", events[2].variants)
         caps = captions(events)
         self.assertEqual([(c.label, c.text) for c in caps], [("Shonee", "I love your tattoo, George.")])
+
+    def test_credits_roll_is_not_dialogue(self) -> None:
+        box = (0.3, 0.8, 0.7, 0.86)
+        events = [self._event(3819.3 + i, text, box, end=3820.3 + i) for i, text in enumerate(
+            ["Wardrobe Supervisor", "Best Boy Grip", "I hope Natalie wins it all.", "Standby Props Art Department Buyer",
+             "Dive Supervisor", "Editorial olutions by"])]
+        events.append(self._event(100.0, "Back in the day", box))
+        kinds = [e.kind for e in classify(events, 3900.0)]
+        self.assertEqual(kinds, ["credits"] * 6 + ["caption"])
 
     def test_merge_captions_keeps_good_asr_and_replaces_missed(self) -> None:
         words = [Word(1.0, 1.3, "I"), Word(1.3, 1.6, "love"), Word(1.6, 1.9, "your"), Word(1.9, 2.4, "tattoo."),

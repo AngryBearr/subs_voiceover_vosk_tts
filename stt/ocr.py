@@ -205,6 +205,15 @@ def group_events(detections: list[Detection], step: float, *, max_gap: float = 1
 
 
 _URL = re.compile(r"(www\.|https?://|\b\w+\.(com|au|net|org|tv|c)\b)", re.IGNORECASE)
+_TITLE_WORD = re.compile(r"^([A-Z][A-Za-z'&.-]*|by|of|and|the|for|&)$")
+_ENDS_SENTENCE = re.compile(r"[.!?,…\"']$")
+
+
+def title_case(text: str) -> bool:
+    """"Wardrobe Supervisor", "Art Department Buyer": a credit/title line, not dialogue."""
+    words = text.split()
+    return (len(words) >= 2 and not _ENDS_SENTENCE.search(text.strip())
+            and sum(bool(_TITLE_WORD.match(w)) for w in words) >= 0.75 * len(words))
 _SPEAKER_PREFIX = re.compile(r"^([A-Z][A-Za-z'-]{1,20}):\s+(.+)$")
 
 
@@ -215,6 +224,7 @@ def classify(events: list[TextEvent], total_s: float) -> list[TextEvent]:
     name_card   lower-third name of the person on screen (left, large) - the descriptor line
                 under it ("NEWS ANCHOR  VILLAINS") becomes `descriptor`;
     title       one huge upper-case word held for 2+ s (contestant intro titles; may be a place);
+    credits     a roll of short caption-like lines (4+ within a few seconds, mostly titles);
     overlay     the same text recurring through the episode (hashtags, logos);
     scene       everything else (signs, props, clothes, written votes).
     """
@@ -232,7 +242,7 @@ def classify(events: list[TextEvent], total_s: float) -> list[TextEvent]:
         if recurring[_norm(ev.text)] > max(60.0, 0.03 * total_s):
             ev.kind = "overlay"
         elif (y0 > 0.74 and abs(centre - 0.5) < 0.18 and sentence_like and not _URL.search(ev.text)
-              and (len(words) >= 2 or re.search(r"[.!?]$", ev.text))):
+              and (len(words) >= 2 or re.search(r"[.!?]$", ev.text)) and not title_case(ev.text)):
             ev.kind = "caption"
         elif upper and x0 < 0.15 and 0.66 < y0 < 0.8 and 0.09 <= height <= 0.18 and len(words) <= 3:
             ev.kind = "name_card"
@@ -240,6 +250,7 @@ def classify(events: list[TextEvent], total_s: float) -> list[TextEvent]:
             ev.kind = "title"
         else:
             ev.kind = "scene"
+    _mark_credits([ev for ev in events if ev.kind == "caption" or (ev.kind == "scene" and title_case(ev.text))])
     titles = [ev for ev in events if ev.kind == "title"]
     for ev in titles:  # logo variants ("AUSTRALIAN", "SURVYVOR") recur; real names appear once or twice
         if sum(1 for other in titles if similar(ev.text, other.text) >= 0.7) >= 3:
@@ -253,6 +264,21 @@ def classify(events: list[TextEvent], total_s: float) -> list[TextEvent]:
                 ev.variants = [*ev.variants, f"descriptor: {other.text}"]
                 other.kind = "name_card_descriptor"
     return events
+
+
+def _mark_credits(lines: list[TextEvent], max_gap: float = 3.0, min_run: int = 4) -> None:
+    """Runs of short lines a few seconds apart, mostly without sentence punctuation, are credits."""
+    lines = sorted(lines, key=lambda e: e.start)
+    run: list[TextEvent] = []
+    for ev in lines + [None]:  # type: ignore[list-item]
+        if ev is not None and run and ev.start - run[-1].start <= max_gap:
+            run.append(ev)
+            continue
+        if len(run) >= min_run and sum(title_case(e.text) or not _ENDS_SENTENCE.search(e.text.strip())
+                                       for e in run) >= 0.6 * len(run):
+            for e in run:
+                e.kind = "credits"
+        run = [ev] if ev is not None else []
 
 
 @dataclass

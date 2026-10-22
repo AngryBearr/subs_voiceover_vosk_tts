@@ -5,10 +5,14 @@ __pycache__/
 models
 tts_out
 temp
-vosk_env/
 .env
 .env.*
 !.env.example
-stt_env/
-stt_*_env/
 output/
+/artifacts/
+# virtual environments
+subs_env/
+stt_qwen_env/
+vosk_env/
+stt_env/
+.venv/

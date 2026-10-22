@@ -5,7 +5,7 @@ ambiguous voices. For every named person we measure which predicted speaker cove
 labelled lines. Purity = share of a label's time on its main predicted speaker;
 merges = named people whose main predicted speaker is also another person's.
 
-    stt_env/bin/python -m stt.sdh_eval --srt ep.en.srt output/stt/ep/diarization.*.json
+    subs_env/bin/python -m stt.sdh_eval --srt ep.en.srt output/stt/ep/diarization.*.json
 """
 
 from __future__ import annotations
