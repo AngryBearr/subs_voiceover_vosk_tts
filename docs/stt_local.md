@@ -126,6 +126,10 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
    −360/+500 ms, speeds them up to a comfort limit and asks for shorter text only when needed.
 5. The original track stays under the voice, lowered by 12 dB only while the voice speaks, so
    crowd noise and overlapping voices remain audible.
+6. Experimental crowd layer (`"crowd": {"enabled": true}`, `stt.crowd`): skipped interjections of
+   two or more speakers within 2 s, or chants ("Go, go, go!"), are said by three TTS voices at
+   once with 70 ms offsets, 4 dB under the voice-over, and added to the mix without ducking the
+   original. One person's "Oh my God!" stays in the original only.
 
 `dub.ru.<engine>.json` carries a `voice` per line (by speaker gender); the voice-over uses it.
 
