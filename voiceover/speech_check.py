@@ -37,6 +37,7 @@ log = logging.getLogger("voiceover.speech_check")
 
 ASR_RATE = 16_000
 _LETTERS = re.compile(r"[а-яё]+")
+_SOUND = str.maketrans({"ё": "е", "э": "е", "ь": None, "ъ": None})
 CER_FLAG = 0.15  # a clip above this character error rate is listed for review
 WORD_SIMILARITY_FLAG = 0.6  # ...and so is one with a word heard this differently or not heard at all
 STRETCH_FLAG = 2.5  # a word this many times longer per letter than the clip median is "drawn out"
@@ -45,8 +46,10 @@ FAST_FLAG = 8.0
 
 
 def plain_words(text: str) -> list[str]:
-    """Lower-case words without stress marks and punctuation; ё = е (the ASR alphabet)."""
-    return _LETTERS.findall(text.lower().replace("+", "").replace("ё", "е"))
+    """Lower-case words without stress marks and punctuation, spelled by sound: ё/э = е, no ь/ъ,
+    no doubled letters (the ASR spells names as it hears them: Вэл - велл, Дейл - дэйл)."""
+    text = text.lower().replace("+", "").translate(_SOUND)
+    return [re.sub(r"(.)\1+", r"\1", word) for word in _LETTERS.findall(text)]
 
 
 def char_error_rate(reference: str, hypothesis: str) -> float:

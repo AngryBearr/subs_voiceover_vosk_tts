@@ -7,6 +7,7 @@ from voiceover.speech_check import char_error_rate, check_clip, plain_words, wor
 
 def test_plain_words_drop_stress_punctuation_and_yo() -> None:
     assert plain_words("Ещё р+аз, на вост+оке США!") == ["еще", "раз", "на", "востоке", "сша"]
+    assert plain_words("Вэл и Дж+ереми") == plain_words("велл и джерреми")
 
 
 def test_char_error_rate_and_word_diffs() -> None:

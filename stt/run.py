@@ -7,7 +7,7 @@ Per episode, in `<out-root>/<video name>/`:
     glossary    season glossary: names/terms + Russian renderings     glossary.json
     speakers    names, Russian labels, final gender (LLM)             speakers.llm.json
     translate   timing-aware EN -> RU translation (LLM)               subs.ru.json
-    dub         voiced lines and a voice per line (speaker gender)    dub.ru.json
+    dub         voiced lines and a voice per line (speaker gender)    dub.ru.<engine>.json
     stress      stress of guessed words/homographs re-checked (LLMs)  stress.json
     voiceover   synthesis (Vosk or TeraTTS) + timeline fitting        voiceover.<engine>/export/track.wav
     check       Russian ASR check of the spoken clips                 voiceover.<engine>/speech_check.md
