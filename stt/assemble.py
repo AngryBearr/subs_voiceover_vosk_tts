@@ -288,10 +288,12 @@ def merge_captions(
     return out, stats
 
 
-def on_screen_hints(ocr: dict[str, Any], words: list[Word], diarization: Diarization) -> dict[str, list[str]]:
+def on_screen_hints(ocr: dict[str, Any], words: list[Word], diarization: Diarization,
+                    max_hints: int = 8) -> dict[str, list[str]]:
     """Per diarizer speaker: names shown on screen while they talked and caption labels of their lines.
 
-    Repeated hints are counted ("title: SHAUN x3"); OCR spacing variants count as one.
+    Repeated hints are counted ("title: SHAUN x3"); OCR spacing variants count as one; the
+    `max_hints` most frequent are kept.
     """
     index = _TurnIndex(diarization.exclusive or diarization.turns)
     found: dict[str, list[str]] = {}
@@ -316,7 +318,7 @@ def on_screen_hints(ocr: dict[str, Any], words: list[Word], diarization: Diariza
             key = re.sub(r"\s+", "", item)
             counts[key] += 1
             shown.setdefault(key, " ".join(item.split()))
-        hints[speaker] = [shown[k] + (f" x{n}" if n > 1 else "") for k, n in counts.items()]
+        hints[speaker] = [shown[k] + (f" x{n}" if n > 1 else "") for k, n in counts.most_common(max_hints)]
     return hints
 
 

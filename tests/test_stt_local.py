@@ -103,9 +103,11 @@ class OcrTest(unittest.TestCase):
             self._event(30.0, "THE LEGEND.", (0.38, 0.82, 0.51, 0.89)),
             self._event(40.0, "Enter at 10play.com.au/win", (0.24, 0.84, 0.76, 0.95)),
             self._event(50.0, "SHAUN", (0.07, 0.46, 0.39, 0.71), end=52.7),
+            self._event(60.0, "CURRENTLY IN 7TH PLACE", (0.3, 0.8, 0.7, 0.86)),
         ]
         kinds = [e.kind for e in classify(events, 600.0)]
-        self.assertEqual(kinds, ["caption", "caption", "name_card", "name_card_descriptor", "scene", "scene", "title"])
+        self.assertEqual(kinds, ["caption", "caption", "name_card", "name_card_descriptor", "lower_third", "scene",
+                                 "title", "lower_third"])
         self.assertIn("descriptor: SEASON 6 FINALIST  VILLAINS", events[2].variants)
         caps = captions(events)
         self.assertEqual([(c.label, c.text) for c in caps], [("Shonee", "I love your tattoo, George.")])

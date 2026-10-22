@@ -86,6 +86,7 @@ def run_stage(name: str, env: str, args: list[str], out_path: Path, log_dir: Pat
 
 def transcribe(args: argparse.Namespace) -> Path:
     from stt.asr import ASR_MODELS
+    from stt.ocr import reclassify
     from stt.assemble import (
         CueOptions,
         assign_speakers,
@@ -193,6 +194,7 @@ def transcribe(args: argparse.Namespace) -> Path:
         log.info("Repetition guard removed %d looped words", loop_words)
     words = collect_words(segments)
     if ocr_data:
+        ocr_data = reclassify(ocr_data)  # rules may have changed since the (slow) scan
         words, ocr_stats = merge_captions(words, ocr_data["captions"])
         log.info("On-screen captions: %s", ocr_stats)
     words = assign_speakers(words, diarization, options)

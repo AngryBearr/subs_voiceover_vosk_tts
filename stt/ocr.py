@@ -220,7 +220,9 @@ _SPEAKER_PREFIX = re.compile(r"^([A-Z][A-Za-z'-]{1,20}):\s+(.+)$")
 def classify(events: list[TextEvent], total_s: float) -> list[TextEvent]:
     """Label events.
 
-    caption     centred in the lower band, sentence-like (lower-case letters or 4+ words), no URLs;
+    caption     centred in the lower band, sentence-like: mixed case, not a Title Case line, no URLs;
+    lower_third an upper-case line of 2+ words low on screen ("ARMY WIFE & COMBAT PILOT",
+                "CURRENTLY IN 1ST PLACE", "THE LEGEND."): a graphic, not speech;
     name_card   lower-third name of the person on screen (left, large) - the descriptor line
                 under it ("NEWS ANCHOR  VILLAINS") becomes `descriptor`;
     title       one huge upper-case word held for 2+ s (contestant intro titles; may be a place);
@@ -237,8 +239,9 @@ def classify(events: list[TextEvent], total_s: float) -> list[TextEvent]:
         height = y1 - y0
         words = _WORD.findall(ev.text)
         centre = (x0 + x1) / 2
-        upper = ev.text.upper() == ev.text and any(c.isalpha() for c in ev.text)
-        sentence_like = bool(re.search(r"[a-z]", ev.text)) or len(words) >= 4
+        letters = [c for c in ev.text if c.isalpha()]
+        upper = bool(letters) and sum(c.isupper() for c in letters) >= 0.8 * len(letters)  # OCR may miss a few
+        sentence_like = bool(re.search(r"[a-z]", ev.text)) and not upper
         if recurring[_norm(ev.text)] > max(60.0, 0.03 * total_s):
             ev.kind = "overlay"
         elif (y0 > 0.74 and abs(centre - 0.5) < 0.18 and sentence_like and not _URL.search(ev.text)
@@ -248,6 +251,8 @@ def classify(events: list[TextEvent], total_s: float) -> list[TextEvent]:
             ev.kind = "name_card"
         elif upper and height >= 0.2 and len(words) == 1 and len(words[0]) >= 3 and ev.end - ev.start >= 2.0:
             ev.kind = "title"
+        elif upper and len(words) >= 2 and y0 > 0.6:
+            ev.kind = "lower_third"
         else:
             ev.kind = "scene"
     _mark_credits([ev for ev in events if ev.kind == "caption" or (ev.kind == "scene" and title_case(ev.text))])
@@ -313,23 +318,33 @@ def captions(events: list[TextEvent]) -> list[Caption]:
     return out
 
 
+def summarize(events: list[TextEvent], total_s: float) -> dict[str, Any]:
+    """Classify timed text events into captions (speech) and cards (names, titles, lower thirds)."""
+    for ev in events:  # descriptors are re-derived by classify
+        ev.variants = [v for v in ev.variants if not v.startswith("descriptor: ")]
+    events = classify(events, max(total_s, 1.0))
+    cards = [
+        {"start": ev.start, "end": ev.end, "kind": ev.kind, "text": ev.text,
+         "descriptor": next((v.split(": ", 1)[1] for v in ev.variants if v.startswith("descriptor: ")), None)}
+        for ev in events if ev.kind in ("name_card", "title", "lower_third")
+    ]
+    return {"captions": [c.to_dict() for c in captions(events)], "cards": cards,
+            "events": [ev.to_dict() for ev in events]}
+
+
+def reclassify(data: dict[str, Any]) -> dict[str, Any]:
+    """Apply the current rules to the events of a saved scan (no new video pass needed)."""
+    events = [TextEvent(**{**e, "box": tuple(e["box"])}) for e in data.get("events", [])]
+    total = max((e.end for e in events), default=0.0)
+    return {**data, **summarize(events, total)}
+
+
 def run_ocr(path: str | Path, ocr: FrameOcr, *, start: float = 0.0, duration: float | None = None,
             fps: float = 2.0) -> dict[str, Any]:
     """Scan a media interval; times in the result are relative to `start` (the audio timeline)."""
     detections, stats = scan_video(path, ocr, start=start, duration=duration, fps=fps)
     total = duration if duration is not None else max((d.time for d in detections), default=0.0) - start
-    events = classify(group_events(detections, 1.0 / fps), max(total, 1.0))
+    events = group_events(detections, 1.0 / fps)
     for ev in events:
         ev.start, ev.end = round(ev.start - start, 3), round(ev.end - start, 3)
-    cards = [
-        {"start": ev.start, "end": ev.end, "kind": ev.kind, "text": ev.text,
-         "descriptor": next((v.split(": ", 1)[1] for v in ev.variants if v.startswith("descriptor: ")), None)}
-        for ev in events if ev.kind in ("name_card", "title")
-    ]
-    return {
-        "fps": fps,
-        "stats": stats,
-        "captions": [c.to_dict() for c in captions(events)],
-        "cards": cards,
-        "events": [ev.to_dict() for ev in events if ev.kind != "scene"],
-    }
+    return {"fps": fps, "stats": stats, **summarize(events, total)}
