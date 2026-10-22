@@ -92,6 +92,8 @@ def transcribe(args: argparse.Namespace) -> Path:
         build_cues,
         collect_words,
         mark_overlaps,
+        merge_captions,
+        on_screen_hints,
         smooth_speakers,
         speaker_ids,
         subtitle_records,
@@ -169,6 +171,14 @@ def transcribe(args: argparse.Namespace) -> Path:
         asr_data = run_stage("align", "stt_qwen_env", align_args, aligned_path, logs,
                              asr_forced or "align" in stages or "fuse" in stages)
 
+    ocr_data: dict[str, Any] | None = None
+    if args.ocr:
+        ocr_path = out / "ocr.json"
+        ocr_args = ["ocr", "--media", str(media.resolve()), "--out", str(ocr_path), "--device", args.device,
+                    "--start", str(args.start), "--fps", str(args.ocr_fps)]
+        ocr_args += ["--duration", str(args.duration)] if args.duration else []
+        ocr_data = run_stage("ocr", "stt_env", ocr_args, ocr_path, logs, all_forced or "ocr" in stages)
+
     voice_path = out / f"voice.{args.diarizer}.json"
     voice_args = ["voice", "--audio", audio, "--diarization", str(diar_path), "--out", str(voice_path),
                   "--device", args.device, "--threshold", str(args.gender_threshold)]
@@ -181,8 +191,13 @@ def transcribe(args: argparse.Namespace) -> Path:
     segments, loop_words = collapse_repeats([Segment.from_dict(s) for s in asr_data["segments"]])
     if loop_words:
         log.info("Repetition guard removed %d looped words", loop_words)
-    words = assign_speakers(collect_words(segments), diarization, options)
+    words = collect_words(segments)
+    if ocr_data:
+        words, ocr_stats = merge_captions(words, ocr_data["captions"])
+        log.info("On-screen captions: %s", ocr_stats)
+    words = assign_speakers(words, diarization, options)
     words = smooth_speakers(words, options)
+    hints = on_screen_hints(ocr_data, words, diarization) if ocr_data else {}
     cues = build_cues(words, options)
     mark_overlaps(cues, diarization)
     ids = speaker_ids(cues)
@@ -222,6 +237,7 @@ def transcribe(args: argparse.Namespace) -> Path:
                 "words": sum(len(c.words) for c in own),
                 "first_seen": round(own[0].start + offset, 3) if own else None,
                 "sample": own[0].text[:120] if own else None,
+                "on_screen": hints.get(label, []),
                 "embedding": diarization.embeddings.get(label),
             }
         )
@@ -265,13 +281,16 @@ def main(argv: list[str] | None = None) -> None:
                         help="Extra ASR models to fuse with --asr by an LLM, e.g. cohere-transcribe,qwen3-asr-1.7b")
     parser.add_argument("--fuse-model", default="openai/gpt-6-luna", help="OpenRouter model for --fuse")
     parser.add_argument("--glossary", default=None, help="glossary.txt (stt.glossary) used by --fuse")
+    parser.add_argument("--no-ocr", dest="ocr", action="store_false",
+                        help="Skip on-screen text (captions for hard-to-hear speech, name cards)")
+    parser.add_argument("--ocr-fps", type=float, default=2.0, help="Frames per second scanned for on-screen text")
     parser.add_argument("--max-gap", type=float, default=0.8, help="Pause (s) that always starts a new cue")
     parser.add_argument("--max-cue-duration", type=float, default=7.0)
     parser.add_argument("--max-chars", type=int, default=120)
     parser.add_argument(
         "--force",
         nargs="*",
-        choices=["all", "audio", "diarize", "asr", "fuse", "align", "voice"],
+        choices=["all", "audio", "diarize", "asr", "fuse", "align", "ocr", "voice"],
         help="Recompute these cached stages (bare --force: all)",
     )
     args = parser.parse_args(argv)

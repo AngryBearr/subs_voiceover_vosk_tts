@@ -29,7 +29,9 @@ but clustering can split a person into two IDs or merge similar voices.
 
 For EVERY speaker ID return:
 - "name": the person's real name ONLY if the transcript makes it evident (self-introduction,
-  "my name is", being addressed by name and answering, others clearly referring to them). Else null.
+  "my name is", being addressed by name and answering, others clearly referring to them) or the
+  speaker's "on_screen" evidence names them: a name card/title shown while they talked or a caption
+  label of their line (OCR, may contain misreadings, props or place names). Else null.
   Never guess celebrities from style alone.
 - "name_evidence": short quote/reason for the name, or null.
 - "role": short English role (host, narrator, contestant, interviewer, interviewee, reporter, ...).
@@ -63,6 +65,7 @@ def build_prompt(
             "voice_age": s.get("age"),
             "child_prob": s.get("p_child"),
             "speech_seconds": s.get("speech_s"),
+            "on_screen": s.get("on_screen") or [],
             "lines": s.get("cues"),
         }
         for s in speakers

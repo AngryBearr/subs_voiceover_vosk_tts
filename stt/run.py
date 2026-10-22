@@ -99,6 +99,8 @@ class Episode:
             argv += ["--fuse", ",".join(mode["fuse"]), "--fuse-model", self.config["llm_model"]]
             if (self.season.with_suffix(".txt")).exists():
                 argv += ["--glossary", str(self.season.with_suffix(".txt"))]
+        ocr = self.config.get("ocr", {})
+        argv += ["--ocr-fps", str(ocr.get("fps", 2.0))] if ocr.get("enabled", True) else ["--no-ocr"]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
         if self.args.duration:

@@ -17,6 +17,8 @@ from stt.assemble import (
     assign_speakers,
     build_cues,
     mark_overlaps,
+    merge_captions,
+    on_screen_hints,
     sentence_majority,
     snap_speaker_boundaries,
     speaker_ids,
@@ -26,6 +28,7 @@ from stt.diarize import Diarization, Turn
 from stt.dub import is_interjection, plan
 from stt.fusion import chunk_texts, fuse
 from stt.mix import mix, speech_envelope
+from stt.ocr import TextEvent, captions, classify
 from stt.run import STAGES, Episode, dotenv
 from stt.reference import Cue, clean_caption_line, load_ass_cues, snap_window, window_reference
 from stt.textfix import collapse_repeats, repeat_keep_indices
@@ -84,6 +87,75 @@ class MixTest(unittest.TestCase):
         self.assertAlmostEqual(float(out[100, 0]), 0.5, places=3)  # before speech: untouched
         self.assertLess(float(out[1600, 0]) - 0.1, 0.5 * 0.3)  # under speech: about -12 dB
         self.assertEqual(speech_envelope(voice, sr).shape, voice.shape)
+
+
+class OcrTest(unittest.TestCase):
+    def _event(self, start: float, text: str, box: tuple[float, float, float, float], end: float | None = None
+               ) -> TextEvent:
+        return TextEvent(start, end if end is not None else start + 2.0, text, "", box, 0.99, 4, [text])
+
+    def test_classify_and_join_caption_lines(self) -> None:
+        events = [
+            self._event(10.0, "Shonee: I love your", (0.31, 0.79, 0.69, 0.85)),
+            self._event(10.0, "tattoo, George.", (0.35, 0.84, 0.65, 0.91)),
+            self._event(20.0, "GEORGE", (0.09, 0.73, 0.2, 0.86)),
+            self._event(20.0, "SEASON 6 FINALIST  VILLAINS", (0.09, 0.84, 0.46, 0.9)),
+            self._event(30.0, "THE LEGEND.", (0.38, 0.82, 0.51, 0.89)),
+            self._event(40.0, "Enter at 10play.com.au/win", (0.24, 0.84, 0.76, 0.95)),
+            self._event(50.0, "SHAUN", (0.07, 0.46, 0.39, 0.71), end=52.7),
+        ]
+        kinds = [e.kind for e in classify(events, 600.0)]
+        self.assertEqual(kinds, ["caption", "caption", "name_card", "name_card_descriptor", "scene", "scene", "title"])
+        self.assertIn("descriptor: SEASON 6 FINALIST  VILLAINS", events[2].variants)
+        caps = captions(events)
+        self.assertEqual([(c.label, c.text) for c in caps], [("Shonee", "I love your tattoo, George.")])
+
+    def test_merge_captions_keeps_good_asr_and_replaces_missed(self) -> None:
+        words = [Word(1.0, 1.3, "I"), Word(1.3, 1.6, "love"), Word(1.6, 1.9, "your"), Word(1.9, 2.4, "tattoo."),
+                 Word(5.0, 5.4, "Soul."), Word(5.4, 5.8, "He's"), Word(5.8, 6.0, "there.")]
+        caps = [{"start": 0.9, "end": 2.5, "text": "I love your tattoo."},
+                {"start": 5.0, "end": 6.2, "text": "There's already three of us."},
+                {"start": 9.0, "end": 9.8, "text": "Is it me?"}]
+        merged, stats = merge_captions(words, caps)
+        self.assertEqual(stats, {"captions": 3, "kept_asr": 1, "replaced": 1, "added": 1, "under_speech": 0})
+        texts = " ".join(w.text for w in merged)
+        self.assertEqual(texts, "I love your tattoo. There's already three of us. Is it me?")
+        self.assertEqual([w.source for w in merged][-3:], ["ocr", "ocr", "ocr"])
+
+    def test_merge_captions_aligns_shifted_back_to_back_captions(self) -> None:
+        def timed(text: str, start: float) -> list[Word]:
+            return [Word(round(start + 0.3 * i, 2), round(start + 0.3 * i + 0.25, 2), t)
+                    for i, t in enumerate(text.split())]
+
+        words = (timed("Does that hurt as you do that?", 46.0)
+                 + timed("I'm excited you're here, Gerry.", 60.0)
+                 + timed("I'm here to see a frickin' thing.", 61.6)
+                 + timed("And I think you're probably gonna take on some of those big boys.", 63.8))
+        caps = [{"start": 47.0, "end": 49.0, "text": "Does that hurt once you do that?"},
+                {"start": 60.1, "end": 61.7, "text": "I'm excited you're here Gerry."},
+                {"start": 61.7, "end": 63.8, "text": "I think you're going to be a friggin' hoot..."},
+                {"start": 63.9, "end": 67.5, "text": "and I think you're probably going to take on some of those big boys"}]
+        merged, stats = merge_captions(words, caps)
+        self.assertEqual(stats, {"captions": 4, "kept_asr": 3, "replaced": 1, "added": 0, "under_speech": 0})
+        self.assertEqual(" ".join(w.text for w in merged),
+                         "Does that hurt as you do that? I'm excited you're here, Gerry. "
+                         "I think you're going to be a friggin' hoot... "
+                         "And I think you're probably gonna take on some of those big boys.")
+
+    def test_merge_captions_skips_caption_under_other_speech(self) -> None:
+        words = [Word(10.0 + 0.8 * i, 10.6 + 0.8 * i, t)
+                 for i, t in enumerate("Sam hands it off to Shaun, who climbs up.".split())]
+        merged, stats = merge_captions(words, [{"start": 12.8, "end": 13.8, "text": "Someone swap over."}])
+        self.assertEqual(stats["under_speech"], 1)
+        self.assertEqual(merged, words)
+
+    def test_on_screen_hints(self) -> None:
+        diarization = Diarization(turns=[Turn(0.0, 5.0, "A"), Turn(5.0, 9.0, "B")])
+        words = [Word(6.0, 6.5, "Hi", speaker="B"), Word(6.5, 7.0, "there.", speaker="B")]
+        ocr = {"cards": [{"start": 1.0, "end": 3.0, "kind": "name_card", "text": "GEORGE", "descriptor": "VILLAINS"}],
+               "captions": [{"start": 6.0, "end": 7.0, "text": "Hi there.", "label": "Stevie"}]}
+        self.assertEqual(on_screen_hints(ocr, words, diarization),
+                         {"A": ["name_card: GEORGE (VILLAINS)"], "B": ["caption label: Stevie"]})
 
 
 class RunTest(unittest.TestCase):

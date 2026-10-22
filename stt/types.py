@@ -15,6 +15,7 @@ class Word:
     text: str
     score: float | None = None
     speaker: str | None = None
+    source: str | None = None  # None: ASR; "ocr": on-screen caption
 
 
 @dataclass

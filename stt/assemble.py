@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import bisect
+import difflib
+import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -123,7 +125,8 @@ def sentence_majority(words: list[Word], max_words: int = 15) -> list[Word]:
 
     Word-level assignment flickers between speakers at turn edges (`What's`=A `your`=B
     `game`=B `plan,`=A `then?`=B); a sentence of up to `max_words` words is almost always
-    said by one person. Longer sentences are left to `snap_speaker_boundaries`.
+    said by one person. Words outside diarization turns take the sentence's speaker too.
+    Longer sentences are left to `snap_speaker_boundaries`.
     """
     words = list(words)
     start = 0
@@ -132,7 +135,8 @@ def sentence_majority(words: list[Word], max_words: int = 15) -> list[Word]:
             continue
         sentence = words[start : i + 1]
         votes = Counter(w.speaker for w in sentence if w.speaker is not None)
-        if votes and len(votes) > 1 and len(sentence) <= max_words:
+        mixed = len(votes) > 1 or (votes and any(w.speaker is None for w in sentence))
+        if mixed and len(sentence) <= max_words:
             winner = votes.most_common(1)[0][0]
             for j in range(start, i + 1):
                 words[j] = replace(words[j], speaker=winner)
@@ -143,6 +147,177 @@ def sentence_majority(words: list[Word], max_words: int = 15) -> list[Word]:
 def smooth_speakers(words: list[Word], options: CueOptions) -> list[Word]:
     """Sentence-level speaker clean-up: majority for short sentences, boundary snapping otherwise."""
     return snap_speaker_boundaries(sentence_majority(words, options.majority_words), options.snap_words)
+
+
+_TOKEN = re.compile(r"[a-z0-9']+")
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN.findall(text.lower())
+
+
+def _caption_groups(captions: list[dict[str, Any]], max_gap_s: float) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    for cap in sorted(captions, key=lambda c: c["start"]):
+        if groups and cap["start"] - groups[-1][-1]["end"] <= max_gap_s:
+            groups[-1].append(cap)
+        else:
+            groups.append([cap])
+    return groups
+
+
+def _spread(texts: list[str], start: float, end: float) -> list[Word]:
+    """Caption words over [start, end], each taking time proportional to its length."""
+    weights = [len(t) + 1 for t in texts]
+    step = (end - start) / sum(weights)
+    words, t = [], start
+    for text, weight in zip(texts, weights):
+        words.append(Word(start=round(t, 3), end=round(t + weight * step, 3), text=text, source="ocr"))
+        t += weight * step
+    return words
+
+
+def merge_captions(
+    words: list[Word],
+    captions: list[dict[str, Any]],
+    *,
+    keep_ratio: float = 0.7,
+    before_s: float = 2.5,
+    after_s: float = 1.0,
+    group_gap_s: float = 1.5,
+    lead_s: float = 0.25,
+    tail_s: float = 0.6,
+    min_word_s: float = 0.12,
+    max_shift_s: float = 1.5,
+) -> tuple[list[Word], dict[str, int]]:
+    """Put on-screen captions where the ASR missed or garbled them.
+
+    Captions appear about `lead_s` before the speech and stay `tail_s` after it, while ASR
+    word times may be off by a second or two. Back-to-back captions are therefore aligned as
+    one token stream against the ASR words from `before_s` before to `after_s` after them, so
+    every caption finds its own ASR words without taking its neighbours'. Single-word matches
+    count only near the caption's speech time, runs of 2+ words within the same margins.
+
+    A caption with at least `keep_ratio` of its words found keeps the ASR words (exact timing).
+    Otherwise its ASR version is replaced in place by the caption text (`source="ocr"`): the
+    matched words, the words between them, the rest of their ASR sentences, and ASR sentences
+    said entirely while the caption was shown. A caption the ASR missed completely goes to the
+    nearest ASR sentence boundary, unless that is more than `max_shift_s` away: then it is a
+    quieter voice under transcribed speech and stays only in the original audio.
+    """
+    stats = {"captions": len(captions), "kept_asr": 0, "replaced": 0, "added": 0, "under_speech": 0}
+    words = sorted(words, key=lambda w: (w.start, w.end))
+    mids = [(w.start + w.end) / 2 for w in words]
+    sentence, first, last = [], {}, {}  # sentence id per word; first/last word index per sentence
+    for i, word in enumerate(words):
+        sid = sentence[-1] + _ends_sentence(words[i - 1]) if i else 0
+        sentence.append(sid)
+        first.setdefault(sid, i)
+        last[sid] = i
+    dropped: set[int] = set()
+    inserts: list[tuple[int, float, float, list[str]]] = []  # (position, speech start, end, words)
+    for group in _caption_groups(captions, group_gap_s):
+        lo, hi = group[0]["start"] - before_s, group[-1]["end"] + after_s
+        near = [i for i, w in enumerate(words) if lo <= mids[i] <= hi and w.source != "ocr" and i not in dropped]
+        asr_owner = [i for i in near for _ in _tokens(words[i].text)]
+        asr_tokens = [t for i in near for t in _tokens(words[i].text)]
+        cap_tokens = [_tokens(cap["text"]) for cap in group]
+        cap_owner = [k for k, tokens in enumerate(cap_tokens) for _ in tokens]
+        speech = [(cap["start"] - lead_s, max(cap["start"] - lead_s + 0.25 * len(cap["text"].split()),
+                                              cap["end"] - tail_s)) for cap in group]
+        matched: list[set[int]] = [set() for _ in group]
+        found = [0] * len(group)
+        matcher = difflib.SequenceMatcher(a=[t for ts in cap_tokens for t in ts], b=asr_tokens, autojunk=False)
+        for block in matcher.get_matching_blocks():
+            owners = [cap_owner[block.a + j] for j in range(block.size)]
+            for j, k in enumerate(owners):
+                i = asr_owner[block.b + j]
+                t0, t1 = speech[k]
+                if (t0 - 0.5 <= mids[i] <= t1 + 0.5
+                        or ((owners.count(k) >= 2 or len(cap_tokens[k]) == 1) and t0 - before_s <= mids[i] <= t1 + after_s)):
+                    matched[k].add(i)
+                    found[k] += 1
+        territory = [set(range(min(m), max(m) + 1)) if m else set() for m in matched]
+        for k, cap in enumerate(group):
+            texts = cap["text"].split()
+            if not cap_tokens[k] or not texts:
+                continue
+            if found[k] / len(cap_tokens[k]) >= keep_ratio:
+                stats["kept_asr"] += 1
+                continue
+            t0, t1 = speech[k]
+            others = set().union(*(t for j, t in enumerate(territory) if j != k))
+            own = {sentence[i] for i in territory[k]}
+            span = {
+                i for i in near if i not in others and (
+                    i in territory[k]
+                    or (sentence[i] in own and t0 - 1.5 <= mids[i] <= t1 + 1.5)
+                    or (words[first[sentence[i]]].start >= t0 - 0.5 and words[last[sentence[i]]].end <= cap["end"] + 0.3))
+            }
+            if span:
+                t0, t1 = min(t0, min(words[i].start for i in span)), max(t1, max(words[i].end for i in span))
+                position = min(span)
+            else:
+                position = bisect.bisect_left(mids, t0)
+                if 0 < position < len(words) and sentence[position - 1] == sentence[position]:
+                    sid = sentence[position]  # said under an ASR sentence: move to its nearer edge
+                    shift_back, shift_on = t1 - words[first[sid]].start, words[last[sid]].end - t0
+                    if min(shift_back, shift_on) > max_shift_s:
+                        stats["under_speech"] += 1  # a quieter voice under the transcribed one
+                        continue
+                    position = first[sid] if shift_back <= shift_on else last[sid] + 1
+            stats["replaced" if span else "added"] += 1
+            dropped |= span
+            inserts.append((position, t0, t1, texts))
+
+    # Place captions in sequence order; their times never run back past the previous word.
+    out: list[Word] = []
+    pending = sorted(inserts, key=lambda x: (x[0], x[1]))
+    kept = [i for i in range(len(words)) if i not in dropped]
+    for position in range(len(words) + 1):
+        while pending and pending[0][0] == position:
+            _, t0, t1, texts = pending.pop(0)
+            j = bisect.bisect_left(kept, position)
+            prev_end = out[-1].end if out else t0
+            t0, t1 = max(t0, prev_end), max(t1, prev_end)
+            if j < len(kept) and t1 > words[kept[j]].start:  # shift back before the next word
+                t0, t1 = max(prev_end, t0 - (t1 - words[kept[j]].start)), words[kept[j]].start
+            out += _spread(texts, t0, max(t1, t0 + min_word_s * len(texts)))
+        if position < len(words) and position not in dropped:
+            out.append(words[position])
+    return out, stats
+
+
+def on_screen_hints(ocr: dict[str, Any], words: list[Word], diarization: Diarization) -> dict[str, list[str]]:
+    """Per diarizer speaker: names shown on screen while they talked and caption labels of their lines.
+
+    Repeated hints are counted ("title: SHAUN x3"); OCR spacing variants count as one.
+    """
+    index = _TurnIndex(diarization.exclusive or diarization.turns)
+    found: dict[str, list[str]] = {}
+    for card in ocr.get("cards", []):
+        talk: dict[str, float] = {}
+        for t in index.overlapping(card["start"], card["end"]):
+            talk[t.speaker] = talk.get(t.speaker, 0.0) + min(card["end"], t.end) - max(card["start"], t.start)
+        if talk:
+            label = card["text"] + (f" ({card['descriptor']})" if card.get("descriptor") else "")
+            found.setdefault(max(talk, key=talk.__getitem__), []).append(f"{card['kind']}: {label}")
+    for cap in ocr.get("captions", []):
+        if not cap.get("label"):
+            continue
+        owners = [w.speaker for w in words if w.speaker and cap["start"] <= (w.start + w.end) / 2 <= cap["end"]]
+        if owners:
+            found.setdefault(max(set(owners), key=owners.count), []).append(f"caption label: {cap['label']}")
+    hints: dict[str, list[str]] = {}
+    for speaker, items in found.items():
+        counts: Counter[str] = Counter()
+        shown: dict[str, str] = {}
+        for item in items:
+            key = re.sub(r"\s+", "", item)
+            counts[key] += 1
+            shown.setdefault(key, " ".join(item.split()))
+        hints[speaker] = [shown[k] + (f" x{n}" if n > 1 else "") for k, n in counts.items()]
+    return hints
 
 
 def _split_point(words: list[Word]) -> int:
@@ -238,6 +413,7 @@ def subtitle_records(
                 "gender": genders.get(speaker, "unknown") if speaker else "unknown",
                 "speaker": speaker,
                 "overlap": cue.overlap,
+                "ocr": any(w.source == "ocr" for w in cue.words),
             }
         )
     return records

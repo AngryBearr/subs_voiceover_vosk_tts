@@ -18,6 +18,9 @@ librosa==1.0.0
 sentencepiece==0.2.2
 # Diarization
 pyannote.audio==4.0.7
+# On-screen captions (OCR)
+rapidocr==3.10.0
+opencv-python-headless==5.0.0.93
 # Benchmarks
 jiwer==4.0.0
 whisper-normalizer==0.1.15

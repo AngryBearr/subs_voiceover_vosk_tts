@@ -5,6 +5,7 @@
     "accurate": {"asr": "cohere-transcribe", "fuse": ["whisper-large-v3", "qwen3-asr-1.7b"]}
   },
   "diarizer": "pyannote-community-1",
+  "ocr": {"enabled": true, "fps": 2.0},
   "llm_model": "openai/gpt-6-luna",
   "translate": {
     "cps": 14.0,

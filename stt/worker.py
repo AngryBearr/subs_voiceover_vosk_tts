@@ -5,6 +5,7 @@ Internal entry point used by `stt.transcribe` and the benchmarks:
     python -m stt.worker diarize --audio a.wav [a2.wav ...] --model pyannote-community-1 --out d.json
     python -m stt.worker voice --audio a.wav --diarization d.json --out voice.json
     python -m stt.worker align --audio a.wav --asr asr.json --out asr.aligned.json   (stt_qwen_env)
+    python -m stt.worker ocr --media ep.mkv --out ocr.json [--start S --duration D]
 """
 
 from __future__ import annotations
@@ -158,6 +159,20 @@ def run_align(audio_path: Path, asr_path: Path, out: Path, device: str) -> None:
     )
 
 
+def run_ocr(media: Path, out: Path, device: str, start: float, duration: float | None, fps: float) -> None:
+    """On-screen captions and name cards (times relative to `start`)."""
+    from stt.gpu import VramPeak
+    from stt.ocr import FrameOcr, run_ocr as scan
+
+    ocr = FrameOcr(device=device)
+    with VramPeak() as vram:
+        t0 = time.perf_counter()
+        ocr.load()
+        result = scan(media, ocr, start=start, duration=duration, fps=fps)
+        elapsed = time.perf_counter() - t0
+    save_json(out, {**result, "ocr_s": round(elapsed, 1), "peak_vram_mb": _vram(vram.peak_mb)})
+
+
 def call(env: str, args: list[str], out: Path, log_path: Path) -> dict[str, Any]:
     """Run a worker command in `env`; return its JSON output or raise with the log tail."""
     code, tail = run_module(env, "stt.worker", args, log_path)
@@ -201,6 +216,14 @@ def main(argv: list[str] | None = None) -> None:
     p_align.add_argument("--out", required=True)
     p_align.add_argument("--device", default="cuda")
 
+    p_ocr = sub.add_parser("ocr")
+    p_ocr.add_argument("--media", required=True)
+    p_ocr.add_argument("--out", required=True)
+    p_ocr.add_argument("--device", default="cuda")
+    p_ocr.add_argument("--start", type=float, default=0.0)
+    p_ocr.add_argument("--duration", type=float, default=None)
+    p_ocr.add_argument("--fps", type=float, default=2.0)
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     if args.command == "asr":
@@ -215,6 +238,8 @@ def main(argv: list[str] | None = None) -> None:
             "max_speakers": args.max_speakers,
         }
         run_diarize([Path(p) for p in args.audio], args.model, [Path(p) for p in args.out], args.device, speakers)
+    elif args.command == "ocr":
+        run_ocr(Path(args.media), Path(args.out), args.device, args.start, args.duration, args.fps)
     elif args.command == "align":
         run_align(Path(args.audio), Path(args.asr), Path(args.out), args.device)
     elif args.command == "voice":

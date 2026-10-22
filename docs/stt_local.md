@@ -10,7 +10,8 @@ exports the voice track. `stt.mix` puts it over the ducked original and muxes a 
 video ─► audio 16 kHz ─┬─► VAD chunks ─► Whisper  (fast)
                        │               └► Cohere + Whisper + Qwen3 → LLM fusion → forced alignment (accurate)
                        └─► pyannote diarization (who speaks when) + gender/age per speaker
-        words → speakers (sentence-level smoothing) → cues            subs.en.json
+video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.json
+        words + captions → speakers (sentence-level smoothing) → cues subs.en.json
         LLM: season glossary, speaker names, gender check             glossary.json, speakers.json
         LLM: EN → RU per cue time window, shortening, gender fix      subs.ru.json
         dubbing script: voiced lines, voices                          dub.ru.json
@@ -32,7 +33,7 @@ stt_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --until dub
 stt_env/bin/python -m stt.run ep01.mkv --voiceover /path/to/shortening-checkout
 ```
 
-Defaults live in `stt_config.json` (mode, models, LLM, voices, ducking). Stages already done
+Defaults live in `stt_config.json` (mode, models, OCR, LLM, voices, ducking). Stages already done
 are skipped; `--force STAGE` recomputes it and the following ones; `--mode fast` uses Whisper only.
 
 ## What runs where
@@ -40,6 +41,7 @@ are skipped; `--force STAGE` recomputes it and the following ones; `--mode fast`
 | Step | Where | What is sent out |
 |---|---|---|
 | Audio decoding, VAD, ASR (Whisper, Cohere, Qwen3), alignment, diarization, gender/age | local GPU | nothing |
+| On-screen text (RapidOCR: detection on GPU, recognition on CPU) | local | nothing |
 | ASR fusion (accurate mode only) | OpenRouter LLM | English ASR text of the three models per chunk + glossary |
 | Glossary, speaker names, translation, shortening, gender check | OpenRouter LLM | English transcript / cues, Russian drafts |
 | Voice-over shortening + meaning check (other branch) | DeepSeek / OpenRouter | Russian lines |
@@ -48,6 +50,27 @@ are skipped; `--force STAGE` recomputes it and the following ones; `--mode fast`
 No audio ever leaves the machine. No manual corrections are applied anywhere; the only human
 inputs are optional files: `speakers.override.json`, an edited `glossary.txt`, and the
 `voiceover` overrides. Reference subtitles are used only by the benchmarks, never by the pipeline.
+
+## On-screen text
+
+The show burns in English captions for quiet or hard-to-hear speech (whispers, distant or
+overlapping voices, medics, hidden-camera moments) and shows name cards when people first
+appear. `stt.ocr` scans the video at `ocr.fps` (2 by default, ~7 min per 90-min episode on an RTX 4070 Ti
+SUPER), groups identical text into events with start/end times and classifies them by position
+and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor line such as
+"SEASON 6 WINNER"), `title`, `overlay` (recurring logos/ads), `scene` (props, signs, shirts).
+
+- Captions are merged into the word stream before speaker assignment. Captions appear ~0.25 s
+  before the speech and stay ~0.6 s after it, so back-to-back captions are aligned together
+  against the nearby ASR words. If ASR already has ≥70% of a caption's words they stay (exact
+  timings); otherwise the garbled ASR sentence is replaced by the caption text (`source: "ocr"`
+  on the words, `ocr: true` on the cue), and a caption the ASR missed entirely is inserted at the
+  nearest sentence boundary. A caption under another transcribed sentence is a quieter voice
+  and stays only in the original audio. The cues are then translated and voiced as usual.
+  S10E01: 61 captions — 32 already right in ASR, 17 replaced, 11 added, 1 under other speech.
+- Name cards, titles and caption labels ("Shonee: …") become `on_screen` evidence for the
+  speaker that talks most while they are shown; the speaker-naming LLM sees it.
+- `--no-ocr` (or `"ocr": {"enabled": false}`) skips the stage; `--force ocr` rescans.
 
 ## Simultaneous speech
 
@@ -118,6 +141,7 @@ episode: equal speaker purity, pyannote 2.5x faster. Full tables: `output/stt_be
   `gender_source` (`voice`, `voice+text`, `text`, `manual`), speaker embedding.
 - `glossary.json/.txt`, `hotwords.txt`; the season glossary sits next to the episode folders.
 - `voiceover/` (other branch's run), `<name>.ru.wav`, `<name>.ru.mkv`.
+- `ocr.json` — captions, name cards and all text events with times and boxes.
 - `words.json`, `diarization.*.json`, `asr.*.json`, `voice.*.json`, `timings.json`, `logs/`.
 
 Manual fixes: `speakers.override.json` (`{"S04": {"gender": "female", "label_ru": "Анна"}}`),
