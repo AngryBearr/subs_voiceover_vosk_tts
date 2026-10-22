@@ -153,7 +153,9 @@ def transcribe(args: argparse.Namespace) -> Path:
         for model in [m.strip() for m in args.fuse.split(",") if m.strip()]:
             hypotheses[model] = [Segment.from_dict(s) for s in asr_stage(model)[1]["segments"]]
         asr_path = out / "asr.fused.json"
-        if asr_forced or "fuse" in stages or not asr_path.exists():
+        refuse = (asr_forced or "fuse" in stages or not asr_path.exists()
+                  or load_json(asr_path).get("sources") != list(hypotheses))  # other models than cached
+        if refuse:
             glossary = Path(args.glossary).read_text(encoding="utf-8") if args.glossary else ""
             client = OpenRouterClient(args.fuse_model)
             chunk_list = [tuple(c) for c in load_json(Path(chunks))]
@@ -169,8 +171,10 @@ def transcribe(args: argparse.Namespace) -> Path:
         aligned_path = asr_path.with_name(asr_path.stem + f".aligned.{args.aligner}.json")
         align_args = ["align", "--audio", audio, "--asr", str(asr_path), "--out", str(aligned_path),
                       "--device", args.device, "--aligner", args.aligner]
+        realign = asr_forced or "align" in stages or "fuse" in stages or (
+            aligned_path.exists() and aligned_path.stat().st_mtime < asr_path.stat().st_mtime)  # text changed
         asr_data = run_stage("align", "subs_env" if args.aligner == "ctc" else "stt_qwen_env", align_args,
-                             aligned_path, logs, asr_forced or "align" in stages or "fuse" in stages)
+                             aligned_path, logs, realign)
 
     ocr_data: dict[str, Any] | None = None
     if args.ocr:
