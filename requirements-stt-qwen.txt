@@ -1,0 +1,9 @@
+# Qwen3-ASR environment `stt_qwen_env` (qwen-asr pins transformers 4.57).
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+torchaudio==2.11.0+cu128
+qwen-asr==0.0.6
+numpy==2.5.4
+soundfile==0.14.0
+av==19.0.2
+nvidia-ml-py==13.615.71

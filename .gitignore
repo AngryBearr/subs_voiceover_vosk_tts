@@ -9,3 +9,6 @@ vosk_env/
 .env
 .env.*
 !.env.example
+stt_env/
+stt_*_env/
+output/

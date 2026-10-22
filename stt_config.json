@@ -1,0 +1,29 @@
+{
+  "mode": "accurate",
+  "modes": {
+    "fast": {"asr": "whisper-large-v3", "fuse": []},
+    "accurate": {"asr": "cohere-transcribe", "fuse": ["whisper-large-v3", "qwen3-asr-1.7b"]}
+  },
+  "diarizer": "pyannote-community-1",
+  "llm_model": "openai/gpt-6-luna",
+  "translate": {
+    "cps": 14.0,
+    "extend": 0.6,
+    "tts_profile": null,
+    "parallel": 4
+  },
+  "dub": {
+    "voices": "female=49,male=56",
+    "interjections": "dense"
+  },
+  "voiceover": {
+    "repo": null,
+    "python": "subs_env/bin/python",
+    "config": "voiceover_config.json",
+    "voice": 56
+  },
+  "mix": {
+    "duck_db": 12.0,
+    "mux": true
+  }
+}
