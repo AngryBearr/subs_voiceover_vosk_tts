@@ -14,6 +14,8 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import soundfile as sf
 
+from utils.ffmpeg import ffmpeg_exe
+
 LOGGER = logging.getLogger(__name__)
 
 StretchFn = Callable[[Path, float, int], np.ndarray]
@@ -57,7 +59,7 @@ def stretch_clip(path: Path, tempo_factor: float, sample_rate: int) -> np.ndarra
     stretch = abs(tempo_factor - 1.0) > 1e-6
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "clip.wav"
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(path)]
+        cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(path)]
         if stretch:
             cmd += ["-filter:a", f"atempo={tempo_factor:.6f}"]
         cmd += ["-ar", str(sample_rate), "-ac", "1", "-acodec", "pcm_s16le", str(out)]

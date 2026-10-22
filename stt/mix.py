@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +20,7 @@ import numpy as np
 import soundfile as sf
 
 from stt.audio import load_audio
+from utils.ffmpeg import ffmpeg_exe
 
 log = logging.getLogger("stt.mix")
 
@@ -73,23 +73,8 @@ def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: f
     return out.astype(np.float32)
 
 
-def find_ffmpeg() -> str | None:
-    path = shutil.which("ffmpeg")
-    if path:
-        return path
-    try:
-        import imageio_ffmpeg
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except ImportError:
-        return None
-
-
 def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None) -> None:
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg not found: install it or `uv pip install imageio-ffmpeg` in subs_env")
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(video), "-i", str(mixed_wav)]
+    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(video), "-i", str(mixed_wav)]
     if srt:
         cmd += ["-i", str(srt)]
     cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "0:a:0"]
