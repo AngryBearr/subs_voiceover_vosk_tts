@@ -183,6 +183,12 @@ class RunTest(unittest.TestCase):
             ep = self._episode(tmp)
             self.assertFalse(ep.needed("translate", [done]))
             self.assertTrue(ep.needed("translate", [done, Path(tmp) / "missing.json"]))
+            older = Path(tmp) / "older.json"
+            older.write_text("{}")
+            import os
+            os.utime(older, (done.stat().st_mtime - 10, done.stat().st_mtime - 10))
+            self.assertTrue(ep.needed("translate", [older], [done]))  # the previous stage was redone
+            self.assertFalse(ep.needed("translate", [done], [older]))
             forced = self._episode(tmp, force="speakers")
             self.assertFalse(forced.needed("glossary", [done]))
             self.assertTrue(forced.needed("translate", [done]))

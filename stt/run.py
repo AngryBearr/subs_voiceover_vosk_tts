@@ -13,8 +13,8 @@ Per episode, in `<out-root>/<video name>/`:
     check       Russian ASR check of the spoken clips                 voiceover.<engine>/speech_check.md
     mix         voice over the ducked original (+ mkv with tracks)    <name>.ru.<engine>.wav / .mkv
 
-Finished stages are skipped (no repeated LLM costs); `--force STAGE` recomputes it and
-everything after it. Defaults come from `stt_config.json`. Episodes in the same folder share a
+Finished stages are skipped (no repeated LLM costs) unless an earlier stage's output is newer;
+`--force STAGE` recomputes it and everything after it. Defaults come from `stt_config.json`. Episodes in the same folder share a
 season glossary (`<out-root>/<folder name>.glossary.json`).
 """
 
@@ -72,10 +72,14 @@ class Episode:
         self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk"))
         self.vo_dir = self.out / f"voiceover.{self.engine}"
 
-    def needed(self, stage: str, outputs: list[Path]) -> bool:
+    def needed(self, stage: str, outputs: list[Path], inputs: list[Path] | None = None) -> bool:
+        """Run a stage if forced, if an output is missing or if the previous stage's output is newer."""
         if self.forced_from is not None and STAGES.index(stage) >= self.forced_from:
             return True
-        return not all(p.exists() for p in outputs)
+        if not all(p.exists() for p in outputs):
+            return True
+        newest_input = max((p.stat().st_mtime for p in inputs or [] if p.exists()), default=0.0)
+        return min(p.stat().st_mtime for p in outputs) < newest_input
 
     def run(self) -> None:
         until = STAGES.index(self.args.until)
@@ -90,9 +94,11 @@ class Episode:
             "check": (self.check, [self.vo_dir / "speech_check.json"]),
             "mix": (self.mix, [self.out / f"{self.media.stem}.ru.{self.engine}.wav"]),
         }
+        previous: list[Path] = []
         for position, stage in enumerate(STAGES[: until + 1]):
             func, outputs = steps[stage]
-            if not self.needed(stage, outputs):
+            inputs, previous = previous, outputs
+            if not self.needed(stage, outputs, inputs):
                 log.info("[%s] %s: done earlier", self.media.stem, stage)
                 continue
             log.info("[%s] %s ...", self.media.stem, stage)
