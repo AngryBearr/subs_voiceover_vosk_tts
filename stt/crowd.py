@@ -59,10 +59,14 @@ def groups(skipped: list[dict[str, Any]], group_gap_s: float = 2.0) -> list[dict
     return out
 
 
+# Repeated backchannels ("Да, да, да", "Ага, ага") are one person agreeing, not a crowd.
+_BACKCHANNEL = {"да", "ага", "угу", "нет", "ну", "ой", "ох", "ах", "ай", "мм", "хм", "так", "yes", "yeah", "no", "oh"}
+
+
 def is_chant(text: str) -> bool:
-    """A repeated word: "Go, go, go!", "Давай, давай!"."""
+    """A repeated word that is not a backchannel: "Go, go, go!", "Давай, давай!", "Вперёд, вперёд!"."""
     words = re.findall(r"\w+", text.lower())
-    return any(words.count(w) >= 2 for w in set(words) if len(w) >= 2)
+    return any(words.count(w) >= 2 for w in set(words) if len(w) >= 2 and w not in _BACKCHANNEL)
 
 
 def pick_voices(genders: list[str], pool: dict[str, list[int | str]], count: int = 3) -> list[int | str]:

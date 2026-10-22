@@ -421,6 +421,10 @@ class CrowdTest(unittest.TestCase):
         found = groups(skipped)
         self.assertEqual([(g["start"], g["end"], g["text"], g["crowd"]) for g in found],
                          [(1000, 3200, "Давай, давай!", True), (9000, 9400, "Боже мой!", False)])
+        from stt.crowd import is_chant
+
+        self.assertTrue(is_chant("Давай, давай!") and is_chant("Вперёд! Вперёд!"))
+        self.assertFalse(is_chant("Да, да, да.") or is_chant("Ага, ага.") or is_chant("Боже мой!"))
         pool = {"female": [49, 38], "male": [56, 12]}
         self.assertEqual(pick_voices(["male", "female", "male"], pool), [56, 49, 12])
         found[0]["voices"], found[1]["voices"] = [56, 49], [56]
