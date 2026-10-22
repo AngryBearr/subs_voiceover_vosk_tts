@@ -183,12 +183,16 @@ class RunTest(unittest.TestCase):
             ep = self._episode(tmp)
             self.assertFalse(ep.needed("translate", [done]))
             self.assertTrue(ep.needed("translate", [done, Path(tmp) / "missing.json"]))
-            older = Path(tmp) / "older.json"
-            older.write_text("{}")
             import os
-            os.utime(older, (done.stat().st_mtime - 10, done.stat().st_mtime - 10))
-            self.assertTrue(ep.needed("translate", [older], [done]))  # the previous stage was redone
-            self.assertFalse(ep.needed("translate", [done], [older]))
+
+            self.assertFalse(ep.needed("translate", [done], "speakers"))  # no finish marks yet
+            for stage, age in (("speakers", 10), ("translate", 20)):
+                ep.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
+                ep.stamp(stage).touch()
+                os.utime(ep.stamp(stage), (ep.stamp(stage).stat().st_mtime - age,) * 2)
+            self.assertTrue(ep.needed("translate", [done], "speakers"))  # speakers was redone since
+            ep.stamp("translate").touch()
+            self.assertFalse(ep.needed("translate", [done], "speakers"))
             forced = self._episode(tmp, force="speakers")
             self.assertFalse(forced.needed("glossary", [done]))
             self.assertTrue(forced.needed("translate", [done]))
