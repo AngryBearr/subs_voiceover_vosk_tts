@@ -188,6 +188,13 @@ best is cut from the original video at 24 kHz mono with 1 s of silence at the en
 transcript from the aligned words (`<Name>.wav`, `<Name>.txt`, `references.json`). S29E01-E02:
 19 people, scores 0.71-0.95.
 
+The first episode of a season is named without a bank, so its mistakes surface later:
+`--recheck` lists prints whose voice at least two other episodes know under another name (and
+more than under its own), `--write-overrides` puts the rename into that episode's
+`speakers.override.json`; `stt.run <video> --force speakers` then redoes its naming and the
+stages after it. Per-line prints show what such a cluster holds: S29E01's "Jaclyn" cluster
+matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own line only 0.45.
+
 ## Simultaneous speech
 
 1. ASR yields one stream of words: the dominant voice is transcribed, quieter voices under it

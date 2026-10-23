@@ -18,8 +18,14 @@ own voice embedding is to the person's prints (music, noise or another voice low
 the best one per person from the original video: reference clips for voice cloning (24 kHz
 mono, 1 s of silence at the end, transcript from the aligned words).
 
+Once several episodes are in, ``--recheck`` looks for prints whose voice other episodes
+know under another name (S29E01's "Jaclyn" cluster is Baylor's voice in most lines) and can
+write the fix as ``speakers.override.json`` of that episode (``--write-overrides``); then
+``stt.run --force speakers`` redoes its naming and translation.
+
     uv run -m stt.voice_bank output/stt_s29/<season>.voices.json            # what the bank holds
     uv run -m stt.voice_bank output/stt_s29/<season>.voices.json --export output/voices/s29
+    uv run -m stt.voice_bank output/stt_s29/<season>.voices.json --recheck [--write-overrides]
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ SAMPLE_MIN_S, SAMPLE_MAX_S, SAMPLE_GAP_S = 6.0, 12.0, 0.4
 SAMPLES_PER_EPISODE = 5
 CLONE_RATE = 24_000
 MIN_SAMPLE_SCORE = 0.6  # a reference clip must sound at least this much like the person's prints
+MIN_SUPPORT = 2  # a rename needs the voice under the other name in at least this many other episodes
 
 
 def _similar(a: str, b: str, threshold: float) -> bool:
@@ -222,6 +229,53 @@ def resolve(speakers: list[dict[str, Any]]) -> list[str]:
     return notes
 
 
+def recheck(bank: VoiceBank) -> list[dict[str, Any]]:
+    """Prints whose voice more other episodes know under another name (in at least MIN_SUPPORT)."""
+    suggestions = []
+    for p in bank.prints:
+        probe = _unit(p["embedding"])
+        groups: list[dict[str, Any]] = []
+        for q in bank.prints:
+            if q["episode"] == p["episode"]:
+                continue
+            score = float(probe @ _unit(q["embedding"]))
+            group = next((g for g in groups if same_person(g["name"], q["name"])), None)
+            if group is None:
+                group = {"name": q["name"], "label_ru": q.get("label_ru"), "episodes": set(), "score": 0.0}
+                groups.append(group)
+            elif len(q["name"]) > len(group["name"]):
+                group.update(name=q["name"], label_ru=q.get("label_ru") or group["label_ru"])
+            if score >= STRONG:
+                group["episodes"].add(q["episode"])
+            group["score"] = max(group["score"], score)
+        own = next((len(g["episodes"]) for g in groups if same_person(g["name"], p["name"])), 0)
+        others = [g for g in groups if not same_person(g["name"], p["name"])]
+        if not others:
+            continue
+        best = max(others, key=lambda g: (len(g["episodes"]), g["score"]))
+        if len(best["episodes"]) >= MIN_SUPPORT and len(best["episodes"]) > own:
+            suggestions.append({"episode": p["episode"], "speaker": p["speaker"], "name": p["name"],
+                                "suggested": best["name"], "label_ru": best["label_ru"],
+                                "support": len(best["episodes"]), "own_support": own,
+                                "score": round(best["score"], 3)})
+    return suggestions
+
+
+def write_overrides(bank: VoiceBank, suggestions: list[dict[str, Any]]) -> list[Path]:
+    """Add the renames to each episode's speakers.override.json (manual entries win)."""
+    written = []
+    for episode in sorted({s["episode"] for s in suggestions}):
+        path = bank.path.parent / episode / "speakers.override.json"
+        overrides = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        for s in suggestions:
+            if s["episode"] == episode and s["speaker"] not in overrides:
+                overrides[s["speaker"]] = {"name": s["suggested"], "label_ru": s["label_ru"],
+                                           "name_source": "voice_bank_recheck"}
+        path.write_text(json.dumps(overrides, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        written.append(path)
+    return written
+
+
 class SegmentEmbedder:
     """WeSpeaker embedding of an audio stretch, in the space of pyannote community-1's cluster prints."""
 
@@ -317,11 +371,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("bank", type=Path)
     parser.add_argument("--export", type=Path, default=None, help="Cut one reference clip per person into this folder")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--recheck", action="store_true", help="List prints other episodes know by another name")
+    parser.add_argument("--write-overrides", action="store_true",
+                        help="With --recheck: write the renames into the episodes' speakers.override.json")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     bank = VoiceBank.load(args.bank)
     if args.export:
         export_references(bank, args.export, args.device)
+        return 0
+    if args.recheck:
+        suggestions = recheck(bank)
+        for x in suggestions:
+            print(f"{short(x['episode'])} {x['speaker']} {x['name']} -> {x['suggested']} "
+                  f"(voice in {x['support']} other episodes under that name, {x['own_support']} under its own; "
+                  f"best {x['score']:.2f})")
+        if not suggestions:
+            print("no renames suggested")
+        if args.write_overrides and suggestions:
+            for path in write_overrides(bank, suggestions):
+                print(f"wrote {path}; redo with: stt.run <video> --force speakers")
         return 0
     for person in bank.people():
         best = person["samples"][0] if person["samples"] else None

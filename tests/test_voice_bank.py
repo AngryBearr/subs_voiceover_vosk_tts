@@ -85,3 +85,28 @@ def test_reference_transcript_from_aligned_words(tmp_path: Path) -> None:
     assert voice_bank._words(tmp_path, 1.1, 8.0) == "I'm dating"
     assert voice_bank._words(tmp_path / "missing", 0, 1) is None
     assert voice_bank._safe_name("Jon Misch / host") == "Jon_Misch_host"
+
+
+def test_recheck_renames_a_voice_other_episodes_know_by_another_name(tmp_path: Path) -> None:
+    import json
+
+    bank = VoiceBank(tmp_path / "s.voices.json")
+    for ep in ("ep2", "ep3", "ep4"):
+        (tmp_path / ep).mkdir()
+    (tmp_path / "ep1").mkdir()
+    bank.add_episode("ep1", [_speaker("S06", "Jaclyn Schultz", _vec(21, 0.2, base=7))], [])
+    for i, ep in enumerate(("ep2", "ep3", "ep4")):
+        bank.add_episode(ep, [_speaker("S02", "Baylor Wilson", _vec(30 + i, 0.2, base=7))], [])
+    suggestions = voice_bank.recheck(bank)
+    assert [(s["episode"], s["suggested"], s["support"]) for s in suggestions] == [("ep1", "Baylor Wilson", 3)]
+    (tmp_path / "ep1" / "speakers.override.json").write_text(json.dumps({"S01": {"name": "Jeff"}}))
+    voice_bank.write_overrides(bank, suggestions)
+    overrides = json.loads((tmp_path / "ep1" / "speakers.override.json").read_text())
+    assert overrides["S01"] == {"name": "Jeff"} and overrides["S06"]["name"] == "Baylor Wilson"
+
+
+def test_recheck_needs_two_other_episodes(tmp_path: Path) -> None:
+    bank = VoiceBank(tmp_path / "s.voices.json")
+    bank.add_episode("ep1", [_speaker("S06", "Jaclyn Schultz", _vec(21, 0.2, base=7))], [])
+    bank.add_episode("ep2", [_speaker("S02", "Baylor Wilson", _vec(30, 0.2, base=7))], [])
+    assert voice_bank.recheck(bank) == []  # one episode against one: no majority
