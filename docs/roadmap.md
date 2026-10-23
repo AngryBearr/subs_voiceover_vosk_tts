@@ -73,7 +73,7 @@ music under the reference (ClearerVoice separation?), licences of the models.
 
 Shmyrev's table of 20.10.2026 lists Vosk TTS 0.11: same speed as 0.10, fewer stress errors
 (1.78 vs 2.29) and 0.8% CER. Not published yet on 23.10 (no model file on alphacephei.com).
-When it is out: download it, point `voiceover.engines.vosk.model` at it, re-voice S29E01 and
+When it is out: download it, set `voiceover.engines.vosk.model_path` in `stt_config.json` to it, re-voice S29E01 and
 compare the speech check and the stress errors with 0.10.
 
 ## 5. To test (tips from Telegram and 4pda)
