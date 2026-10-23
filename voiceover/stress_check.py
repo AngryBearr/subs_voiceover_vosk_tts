@@ -120,12 +120,14 @@ def queries(suspects: list[Suspect]) -> list[tuple[Suspect, str]]:
     return [(s, context) for s in suspects for context in (s.contexts if s.source == "homograph" else s.contexts[:1])]
 
 
-def ask(pairs: list[tuple[Suspect, str]], client: LLMClient, batch: int = 40) -> list[str | None]:
-    """One model's stress for every (word, sentence) pair; None where the answer is invalid or missing."""
-    out: list[str | None] = []
-    for offset in range(0, len(pairs), batch):
-        out += _ask_batch(pairs[offset:offset + batch], client, f"stress:{offset}")
-    return out
+def ask(pairs: list[tuple[Suspect, str]], client: LLMClient, batch: int = 40, workers: int = 4) -> list[str | None]:
+    """One model's stress for every (word, sentence) pair; None where the answer is invalid or missing.
+
+    Batches go out ``workers`` at a time (S29: the screener's 7 batches took 6 min one by one)."""
+    offsets = range(0, len(pairs), batch)
+    with ThreadPoolExecutor(max(1, min(workers, len(offsets)))) as pool:
+        parts = pool.map(lambda offset: _ask_batch(pairs[offset:offset + batch], client, f"stress:{offset}"), offsets)
+    return [answer for part in parts for answer in part]
 
 
 def _ask_batch(chunk: list[tuple[Suspect, str]], client: LLMClient, tag: str) -> list[str | None]:
