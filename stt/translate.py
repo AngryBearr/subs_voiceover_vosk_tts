@@ -54,7 +54,10 @@ Rules:
 - Timing: the dub must fit the original timing. Each line has "max" = maximum number of Russian
   characters that fit its time window. Stay within it by rephrasing concisely: drop filler words,
   repetitions and redundant phrases first, never essential meaning. Very short interjections may
-  stay short ("Да!", "Что?").
+  stay short ("Да!", "Что?"). Never cut a set phrase or break grammar to save characters
+  ("Добро в Саут-Бич!" is wrong for "Welcome to South Beach"): use another natural short phrase
+  ("Это Саут-Бич!"), or go a little over "max" when nothing natural fits. A fragment of a
+  sentence split across lines stays a natural fragment of the Russian sentence.
 - One output line per input line, same "i". Do not merge or split lines, do not add notes.
 - Lines marked "ctx" are already translated context - do not output them.
 
