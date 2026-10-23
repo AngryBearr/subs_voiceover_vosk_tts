@@ -13,10 +13,10 @@ with the prints of the other episodes:
 
 Same person across S29E01/E02: similarity 0.67-0.98 (a host's narration and on-location voice
 are two clusters, 0.70-0.82); different people mostly under 0.5, twins 0.67. The bank also
-lists, per person, stretches of solo speech (6-12 s). ``export`` scores them by how close their
-own voice embedding is to the person's prints (music, noise or another voice lower it) and cuts
-the best one per person from the original video: reference clips for voice cloning (24 kHz
-mono, 1 s of silence at the end, transcript from the aligned words).
+lists, per person, stretches of solo speech (6-12 s). ``export`` picks the cleanest one per
+person (no other diarized voice inside, every 3 s window sounding like the person, the least
+music) and writes its separated vocals (Hybrid Demucs) as a voice-cloning reference: 24 kHz
+mono, 1 s of silence at the end, transcript from the aligned words.
 
 Once several episodes are in, ``--recheck`` looks for prints whose voice other episodes
 know under another name (S29E01's "Jaclyn" cluster is Baylor's voice in most lines) and can
@@ -54,6 +54,10 @@ SAMPLE_MIN_S, SAMPLE_MAX_S, SAMPLE_GAP_S = 6.0, 12.0, 0.4
 SAMPLES_PER_EPISODE = 5
 CLONE_RATE = 24_000
 MIN_SAMPLE_SCORE = 0.6  # a reference clip must sound at least this much like the person's prints
+MIN_WINDOW_SCORE = 0.45  # ... and so must each 3 s window of it (another voice inside drops one)
+MAX_OTHER_VOICE_S = 0.15  # seconds of another diarized speaker allowed inside a reference stretch
+MUSIC_DB = -20.0  # accompaniment below the voice by more than this counts as clean
+SEPARATE_TOP = 8  # candidates per person that go through vocal separation
 MIN_SUPPORT = 2  # a rename needs the voice under the other name in at least this many other episodes
 RECHECK_SCORE = 0.85  # ... and this similarity (S29 twins Nadiya/Natalie: 0.80)
 
@@ -84,7 +88,8 @@ def _unit(vector: list[float]) -> np.ndarray:
     return v / norm if norm > 0 else v
 
 
-def reference_samples(speaker: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def reference_samples(speaker: str, records: list[dict[str, Any]], limit: int | None = SAMPLES_PER_EPISODE
+                      ) -> list[dict[str, Any]]:
     """Stretches of one speaker's solo speech (consecutive cues, no overlap, no burned-in caption)."""
     out: list[dict[str, Any]] = []
     run: list[dict[str, Any]] = []
@@ -110,7 +115,7 @@ def reference_samples(speaker: str, records: list[dict[str, Any]]) -> list[dict[
     close()
     # long, few cues (fewer turn edges), early in the list on ties
     out.sort(key=lambda s: (-(s["end"] - s["start"]) + 0.5 * s["cues"], s["start"]))
-    return out[:SAMPLES_PER_EPISODE]
+    return out[:limit] if limit else out
 
 
 class VoiceBank:
@@ -322,49 +327,129 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^\w.-]+", "_", name).strip("_") or "speaker"
 
 
-def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> list[dict[str, Any]]:
-    """Cut the best reference stretch of every person into ``out_dir``; returns the index."""
-    import soundfile as sf
+class VocalSeparator:
+    """Hybrid Demucs (torchaudio, MUSDB-HQ + extra data): the vocal stem of a stereo stretch."""
 
+    def __init__(self, device: str = "cuda") -> None:
+        import torch
+        import torchaudio
+
+        bundle = torchaudio.pipelines.HDEMUCS_HIGH_MUSDB_PLUS
+        self._torch = torch
+        self.device = device
+        self.model = bundle.get_model().to(device).eval()
+        self.rate = int(bundle.sample_rate)
+        self.vocals = list(self.model.sources).index("vocals")
+
+    def __call__(self, stereo: np.ndarray) -> tuple[np.ndarray, float]:
+        """(vocals, accompaniment level relative to the vocals in dB) of a (2, n) stretch at ``rate``."""
+        x = self._torch.from_numpy(np.ascontiguousarray(stereo, dtype=np.float32)).to(self.device)
+        ref = x.mean(0)
+        mean, std = ref.mean(), ref.std() + 1e-8
+        with self._torch.inference_mode():
+            vocals = (self.model(((x - mean) / std)[None])[0, self.vocals] * std + mean)
+        rest = x - vocals
+        level = 10 * np.log10(float((rest ** 2).mean() + 1e-12) / float((vocals ** 2).mean() + 1e-12))
+        return vocals.cpu().numpy(), round(level, 1)
+
+
+def _read_media(media: str, start: float, duration: float, rate: int, channels: int) -> np.ndarray:
+    """(channels, n) float32 samples of a stretch of the original video's audio."""
     from utils.ffmpeg import ffmpeg_exe
 
+    raw = subprocess.run([ffmpeg_exe(), "-v", "error", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", media,
+                          "-vn", "-ac", str(channels), "-ar", str(rate), "-f", "f32le", "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype=np.float32).reshape(-1, channels).T
+
+
+def other_voice_seconds(episode_dir: Path, speaker: str, start: float, end: float) -> float:
+    """Seconds of other diarized speakers inside the stretch (overlapping speech included)."""
+    found = sorted(episode_dir.glob("diarization.*.json"))
+    speakers_path = episode_dir / "speakers.json"
+    if not found or not speakers_path.exists():
+        return 0.0
+    labels = {s["id"]: s.get("diarizer_label") for s in json.loads(speakers_path.read_text(encoding="utf-8"))}
+    own = labels.get(speaker)
+    turns = json.loads(found[0].read_text(encoding="utf-8"))["turns"]
+    return sum(max(0.0, min(end, t["end"]) - max(start, t["start"])) for t in turns if t["speaker"] != own)
+
+
+def _window_scores(embed: "SegmentEmbedder", audio: np.ndarray, rate: int, prints: list[np.ndarray],
+                   window: float = 3.0, hop: float = 1.5) -> list[float]:
+    size, step = int(window * rate), int(hop * rate)
+    starts = range(0, max(1, len(audio) - size + 1), step)
+    return [max(float(embed(audio[i:i + size], rate) @ p) for p in prints) for i in starts]
+
+
+def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> list[dict[str, Any]]:
+    """Cut the cleanest reference stretch of every person into ``out_dir``; returns the index.
+
+    Candidates: the person's solo stretches in every episode of the bank, without another
+    diarized speaker inside. The closest to the person's prints go through vocal separation;
+    a candidate needs every 3 s window of its vocals to sound like the person. Clean ones
+    (accompaniment more than 20 dB under the voice) win, then the most similar. The clip is
+    the separated vocals, 24 kHz mono, with 1 s of silence at the end.
+    """
+    import soundfile as sf
+    import soxr
+
     embed = SegmentEmbedder(device)
+    separate = VocalSeparator(device)
     audio_cache: dict[str, tuple[np.ndarray, int]] = {}
     out_dir.mkdir(parents=True, exist_ok=True)
     index = []
     for person in bank.people():
-        prints = [_unit(p["embedding"]) for p in bank.prints if same_person(p["name"], person["name"])]
-        best: dict[str, Any] | None = None
-        for sample in person["samples"]:
-            episode_dir = bank.path.parent / sample["episode"]
-            if not (episode_dir / "audio.wav").exists():
+        mine = [p for p in bank.prints if same_person(p["name"], person["name"])]
+        prints = [_unit(p["embedding"]) for p in mine]
+        candidates = []
+        for p in mine:
+            episode_dir = bank.path.parent / p["episode"]
+            if not (episode_dir / "audio.wav").exists() or not (episode_dir / "subs.en.json").exists():
                 continue
-            if sample["episode"] not in audio_cache:
-                audio_cache[sample["episode"]] = sf.read(str(episode_dir / "audio.wav"), dtype="float32")
-            audio, sr = audio_cache[sample["episode"]]
-            vector = embed(audio[int(sample["start"] * sr):int(sample["end"] * sr)], sr)
-            score = max(float(vector @ p) for p in prints)
-            if best is None or score > best["score"]:
-                best = {**sample, "score": round(score, 3)}
-        if best is None or best["score"] < MIN_SAMPLE_SCORE:
-            log.info("%s: no clean reference (best %s)", person["name"], best and best["score"])
+            records = json.loads((episode_dir / "subs.en.json").read_text(encoding="utf-8"))
+            if p["episode"] not in audio_cache:
+                audio_cache[p["episode"]] = sf.read(str(episode_dir / "audio.wav"), dtype="float32")
+            audio, sr = audio_cache[p["episode"]]
+            for sample in reference_samples(p["speaker"], records, limit=None):
+                if other_voice_seconds(episode_dir, p["speaker"], sample["start"], sample["end"]) > MAX_OTHER_VOICE_S:
+                    continue
+                vector = embed(audio[int(sample["start"] * sr):int(sample["end"] * sr)], sr)
+                candidates.append({**sample, "episode": p["episode"], "speaker": p["speaker"],
+                                   "score": round(max(float(vector @ q) for q in prints), 3)})
+        candidates.sort(key=lambda c: -c["score"])
+        best: dict[str, Any] | None = None
+        for c in candidates[:SEPARATE_TOP]:
+            if c["score"] < MIN_SAMPLE_SCORE:
+                break
+            media = json.loads((bank.path.parent / c["episode"] / "source.json").read_text(encoding="utf-8"))["media"]
+            stereo = _read_media(media, c["start"], c["end"] - c["start"], separate.rate, 2)
+            vocals, music_db = separate(stereo)
+            mono16 = soxr.resample(vocals.mean(0), separate.rate, 16_000)
+            windows = _window_scores(embed, mono16, 16_000, prints)
+            if min(windows) < MIN_WINDOW_SCORE:
+                continue
+            c = {**c, "music_db": music_db, "min_window": round(min(windows), 3), "_vocals": vocals}
+            if best is None or (c["music_db"] < MUSIC_DB, c["score"]) > (best["music_db"] < MUSIC_DB, best["score"]):
+                best = c
+        if best is None:
+            log.info("%s: no clean reference among %d candidates", person["name"], len(candidates))
             continue
-        episode_dir = bank.path.parent / best["episode"]
-        media = json.loads((episode_dir / "source.json").read_text(encoding="utf-8"))["media"]
+        voice = soxr.resample(best.pop("_vocals").mean(0), separate.rate, CLONE_RATE).astype(np.float32)
+        fade = int(0.05 * CLONE_RATE)
+        voice[:fade] *= np.linspace(0, 1, fade, dtype=np.float32)
+        voice[-2 * fade:] *= np.linspace(1, 0, 2 * fade, dtype=np.float32)
+        voice = np.concatenate([voice, np.zeros(CLONE_RATE, dtype=np.float32)])
         stem = _safe_name(person["name"])
-        wav = out_dir / f"{stem}.wav"
-        duration = best["end"] - best["start"]
-        subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{best['start']:.3f}",
-                        "-t", f"{duration:.3f}", "-i", media, "-vn", "-ac", "1", "-ar", str(CLONE_RATE), "-af",
-                        f"afade=t=in:d=0.05,afade=t=out:st={max(0.0, duration - 0.12):.3f}:d=0.12,apad=pad_dur=1",
-                        str(wav)], check=True)
-        text = _words(episode_dir, best["start"], best["end"]) or best["text"]
+        sf.write(str(out_dir / f"{stem}.wav"), voice, CLONE_RATE, subtype="PCM_16")
+        text = _words(bank.path.parent / best["episode"], best["start"], best["end"]) or best["text"]
         (out_dir / f"{stem}.txt").write_text(text + "\n", encoding="utf-8")
         index.append({"name": person["name"], "label_ru": person.get("label_ru"), "gender": person.get("gender"),
-                      "wav": wav.name, "text": text, "episode": best["episode"], "start": best["start"],
-                      "end": best["end"], "score": best["score"]})
-        log.info("%-24s %s %.1f-%.1fs score %.2f", person["name"], short(best["episode"]), best["start"],
-                 best["end"], best["score"])
+                      "wav": f"{stem}.wav", "text": text, "candidates": len(candidates),
+                      **{k: best[k] for k in ("episode", "speaker", "start", "end", "score", "min_window", "music_db")}})
+        log.info("%-24s %s %.1f-%.1fs score %.2f, windows >= %.2f, music %+.0f dB (%d candidates)", person["name"],
+                 short(best["episode"]), best["start"], best["end"], best["score"], best["min_window"],
+                 best["music_db"], len(candidates))
     (out_dir / "references.json").write_text(json.dumps(index, ensure_ascii=False, indent=1) + "\n",
                                              encoding="utf-8")
     return index

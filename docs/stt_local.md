@@ -181,12 +181,15 @@ people mostly under 0.5. Per person the bank also lists the longest solo stretch
 overlap, no burned-in caption) as reference clips for voice cloning.
 
 `subs_env/bin/python -m stt.voice_bank output/stt/<folder>.voices.json` shows people, episodes,
-the best sample and the conflicts; `--export output/voices/<season>` cuts one reference clip per
-person for voice cloning: each candidate stretch is scored by how close its own WeSpeaker
-embedding is to the person's prints (music, noise or another voice lower it, minimum 0.6), the
-best is cut from the original video at 24 kHz mono with 1 s of silence at the end, with its
-transcript from the aligned words (`<Name>.wav`, `<Name>.txt`, `references.json`). S29E01-E02:
-19 people, scores 0.71-0.95.
+the best sample and the conflicts; `--export output/voices/<season>` writes one reference clip
+per person for voice cloning. Candidates are the person's solo stretches (6-12 s) in every
+episode; a stretch with more than 0.15 s of another diarized speaker is dropped; the ones whose
+WeSpeaker embedding is closest to the person's prints go through vocal separation (Hybrid
+Demucs from torchaudio); every 3 s window of the vocals must still sound like the person
+(0.45+), which drops stretches with a second voice. The clip is the separated vocals, 24 kHz
+mono, with 1 s of silence at the end and the transcript from the aligned words (`<Name>.wav`,
+`<Name>.txt`, `references.json`). S29E01-E04: 19 people; the music bed is 6-16 dB under the
+voice in every candidate (reality TV), and 22-46 dB under it in the separated clips.
 
 The first episode of a season is named without a bank, so its mistakes surface later:
 `--recheck` lists prints whose voice at least two other episodes know under another name (and
