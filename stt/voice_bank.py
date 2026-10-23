@@ -13,10 +13,13 @@ with the prints of the other episodes:
 
 Same person across S29E01/E02: similarity 0.67-0.98 (a host's narration and on-location voice
 are two clusters, 0.70-0.82); different people mostly under 0.5, twins 0.67. The bank also
-lists, per person, the cleanest stretches of solo speech (6-12 s): reference clips for voice
-cloning.
+lists, per person, stretches of solo speech (6-12 s). ``export`` scores them by how close their
+own voice embedding is to the person's prints (music, noise or another voice lower it) and cuts
+the best one per person from the original video: reference clips for voice cloning (24 kHz
+mono, 1 s of silence at the end, transcript from the aligned words).
 
-    uv run -m stt.voice_bank output/stt_s29/<season>.voices.json   # what the bank holds
+    uv run -m stt.voice_bank output/stt_s29/<season>.voices.json            # what the bank holds
+    uv run -m stt.voice_bank output/stt_s29/<season>.voices.json --export output/voices/s29
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ import difflib
 import json
 import logging
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,7 +45,9 @@ MARGIN = 0.1  # ... when the next other name is at least this much lower
 MIN_SPEECH_S = 20.0  # clusters with less speech give unreliable prints
 MIN_CONFIDENCE = 0.6  # LLM naming confidence needed to add a print
 SAMPLE_MIN_S, SAMPLE_MAX_S, SAMPLE_GAP_S = 6.0, 12.0, 0.4
-SAMPLES_PER_EPISODE = 3
+SAMPLES_PER_EPISODE = 5
+CLONE_RATE = 24_000
+MIN_SAMPLE_SCORE = 0.6  # a reference clip must sound at least this much like the person's prints
 
 
 def _similar(a: str, b: str, threshold: float) -> bool:
@@ -216,6 +222,90 @@ def resolve(speakers: list[dict[str, Any]]) -> list[str]:
     return notes
 
 
+class SegmentEmbedder:
+    """WeSpeaker embedding of an audio stretch, in the space of pyannote community-1's cluster prints."""
+
+    def __init__(self, device: str = "cuda") -> None:
+        import glob as globlib
+
+        import torch
+        from pyannote.audio import Inference, Model
+
+        cache = Path.home() / ".cache/huggingface/hub/models--pyannote--speaker-diarization-community-1"
+        found = sorted(globlib.glob(str(cache / "snapshots" / "*" / "embedding")))
+        if not found:
+            raise RuntimeError("pyannote community-1 is not downloaded; run a transcription first")
+        self._torch = torch
+        self.inference = Inference(Model.from_pretrained(found[-1]), window="whole", device=torch.device(device))
+
+    def __call__(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        vector = self.inference({"waveform": self._torch.from_numpy(np.ascontiguousarray(audio))[None],
+                                 "sample_rate": sample_rate})
+        return _unit(list(np.asarray(vector).ravel()))
+
+
+def _words(episode_dir: Path, start: float, end: float) -> str | None:
+    """Aligned words whose middle falls inside the stretch (exact text for a voice-cloning reference)."""
+    path = episode_dir / "words.json"
+    if not path.exists():
+        return None
+    words = json.loads(path.read_text(encoding="utf-8"))
+    picked = [w["text"] for w in words if start <= (w["start"] + w["end"]) / 2 <= end]
+    return " ".join(picked) or None
+
+
+def _safe_name(name: str) -> str:
+    return re.sub(r"[^\w.-]+", "_", name).strip("_") or "speaker"
+
+
+def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> list[dict[str, Any]]:
+    """Cut the best reference stretch of every person into ``out_dir``; returns the index."""
+    import soundfile as sf
+
+    from utils.ffmpeg import ffmpeg_exe
+
+    embed = SegmentEmbedder(device)
+    audio_cache: dict[str, tuple[np.ndarray, int]] = {}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    index = []
+    for person in bank.people():
+        prints = [_unit(p["embedding"]) for p in bank.prints if same_person(p["name"], person["name"])]
+        best: dict[str, Any] | None = None
+        for sample in person["samples"]:
+            episode_dir = bank.path.parent / sample["episode"]
+            if not (episode_dir / "audio.wav").exists():
+                continue
+            if sample["episode"] not in audio_cache:
+                audio_cache[sample["episode"]] = sf.read(str(episode_dir / "audio.wav"), dtype="float32")
+            audio, sr = audio_cache[sample["episode"]]
+            vector = embed(audio[int(sample["start"] * sr):int(sample["end"] * sr)], sr)
+            score = max(float(vector @ p) for p in prints)
+            if best is None or score > best["score"]:
+                best = {**sample, "score": round(score, 3)}
+        if best is None or best["score"] < MIN_SAMPLE_SCORE:
+            log.info("%s: no clean reference (best %s)", person["name"], best and best["score"])
+            continue
+        episode_dir = bank.path.parent / best["episode"]
+        media = json.loads((episode_dir / "source.json").read_text(encoding="utf-8"))["media"]
+        stem = _safe_name(person["name"])
+        wav = out_dir / f"{stem}.wav"
+        duration = best["end"] - best["start"]
+        subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{best['start']:.3f}",
+                        "-t", f"{duration:.3f}", "-i", media, "-vn", "-ac", "1", "-ar", str(CLONE_RATE), "-af",
+                        f"afade=t=in:d=0.05,afade=t=out:st={max(0.0, duration - 0.12):.3f}:d=0.12,apad=pad_dur=1",
+                        str(wav)], check=True)
+        text = _words(episode_dir, best["start"], best["end"]) or best["text"]
+        (out_dir / f"{stem}.txt").write_text(text + "\n", encoding="utf-8")
+        index.append({"name": person["name"], "label_ru": person.get("label_ru"), "gender": person.get("gender"),
+                      "wav": wav.name, "text": text, "episode": best["episode"], "start": best["start"],
+                      "end": best["end"], "score": best["score"]})
+        log.info("%-24s %s %.1f-%.1fs score %.2f", person["name"], short(best["episode"]), best["start"],
+                 best["end"], best["score"])
+    (out_dir / "references.json").write_text(json.dumps(index, ensure_ascii=False, indent=1) + "\n",
+                                             encoding="utf-8")
+    return index
+
+
 def short(episode: str) -> str:
     """S29E01 out of a long episode folder name."""
     found = re.search(r"S\d+E\d+", episode, re.IGNORECASE)
@@ -223,11 +313,16 @@ def short(episode: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Show a season voice bank")
+    parser = argparse.ArgumentParser(description="Show a season voice bank, or export voice-cloning references")
     parser.add_argument("bank", type=Path)
+    parser.add_argument("--export", type=Path, default=None, help="Cut one reference clip per person into this folder")
+    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     bank = VoiceBank.load(args.bank)
+    if args.export:
+        export_references(bank, args.export, args.device)
+        return 0
     for person in bank.people():
         best = person["samples"][0] if person["samples"] else None
         sample = f"{short(best['episode'])} {best['start']:.1f}-{best['end']:.1f}s" if best else "-"

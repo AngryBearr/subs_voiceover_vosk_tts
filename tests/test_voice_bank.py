@@ -74,3 +74,14 @@ def test_unclear_match_names_nobody(tmp_path: Path) -> None:
     assert len(ep2[0]["voice_bank"]) == 2
     assert resolve(ep2) == [] and ep2[0]["name"] is None
     assert voice_bank.MARGIN > 0
+
+
+def test_reference_transcript_from_aligned_words(tmp_path: Path) -> None:
+    import json
+
+    words = [{"start": 0.9, "end": 1.2, "text": "Before"}, {"start": 1.0, "end": 1.4, "text": "I'm"},
+             {"start": 1.5, "end": 2.0, "text": "dating"}, {"start": 7.9, "end": 8.4, "text": "after"}]
+    (tmp_path / "words.json").write_text(json.dumps(words), encoding="utf-8")
+    assert voice_bank._words(tmp_path, 1.1, 8.0) == "I'm dating"
+    assert voice_bank._words(tmp_path / "missing", 0, 1) is None
+    assert voice_bank._safe_name("Jon Misch / host") == "Jon_Misch_host"

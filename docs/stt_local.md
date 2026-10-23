@@ -181,7 +181,12 @@ people mostly under 0.5. Per person the bank also lists the longest solo stretch
 overlap, no burned-in caption) as reference clips for voice cloning.
 
 `subs_env/bin/python -m stt.voice_bank output/stt/<folder>.voices.json` shows people, episodes,
-the best sample and the conflicts.
+the best sample and the conflicts; `--export output/voices/<season>` cuts one reference clip per
+person for voice cloning: each candidate stretch is scored by how close its own WeSpeaker
+embedding is to the person's prints (music, noise or another voice lower it, minimum 0.6), the
+best is cut from the original video at 24 kHz mono with 1 s of silence at the end, with its
+transcript from the aligned words (`<Name>.wav`, `<Name>.txt`, `references.json`). S29E01-E02:
+19 people, scores 0.71-0.95.
 
 ## Simultaneous speech
 

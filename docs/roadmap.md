@@ -18,7 +18,7 @@ The first goal: any episode of a season, from the video to the mkv, without manu
 
 First part done (`stt.voice_bank`, see `docs/stt_local.md`): prints, matches as LLM
 evidence, naming of unnamed clusters, conflicts, sample lists. Still open: splitting a
-cluster that holds two voices, checking samples for music, cutting the reference clips.
+cluster that holds two voices. Reference clips: `--export` (scored by voice similarity).
 
 Keep a voice print per named person across the episodes of a season:
 
