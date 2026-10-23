@@ -40,7 +40,8 @@ reference = 8 s of an English confessional of Jon Misch + 1 s of silence and its
   takes, 0.83% after retries (Vosk 0.72%, TeraTTS 0.71% on the whole episode);
 - 7 steps (EPSS schedule, a 4pda tip; F5 applies it by itself for 5-7, 10, 12, 16 steps):
   0.50 s per line with the check (64 takes), ~7.5 min per episode, 0.77% after retries;
-  16 steps: 0.71 s, 0.76%. By ear not compared yet (`output/demo/f5_espeech/nfe7/`);
+  16 steps: 0.71 s, 0.76%. By ear almost the same as 32 steps (maybe a little less emotion):
+  32 steps for the normal voice-over, 7 as a fast mode (`output/demo/f5_espeech/nfe7/`);
 - each line must get its exact length (`fix_duration` = reference + slot length). F5's default
   length estimate counts UTF-8 bytes, so Cyrillic text came out about twice too long and the end
   of the English reference leaked into the speech (31% character errors);
@@ -68,7 +69,14 @@ in Russian.
 Open problems: picking clean references automatically (reality TV is loud and emotional),
 music under the reference (ClearerVoice separation?), licences of the models.
 
-## 4. To test (tips from Telegram and 4pda)
+## 4. Vosk TTS 0.11
+
+Shmyrev's table of 20.10.2026 lists Vosk TTS 0.11: same speed as 0.10, fewer stress errors
+(1.78 vs 2.29) and 0.8% CER. Not published yet on 23.10 (no model file on alphacephei.com).
+When it is out: download it, point `voiceover.engines.vosk.model` at it, re-voice S29E01 and
+compare the speech check and the stress errors with 0.10.
+
+## 5. To test (tips from Telegram and 4pda)
 
 - **Spoken stress check.** TeraAnaly's stress head, given the text: on 159 phrases synthesised
   with a deliberately wrong stress it heard the wrong stress in 73% (Vosk) / 62% (TeraTTS) of
