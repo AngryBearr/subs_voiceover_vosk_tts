@@ -4,7 +4,8 @@ Package `stt/` turns an English episode into speaker-attributed English subtitle
 speakers, determines their gender (Russian grammar, voice choice), translates to Russian fitted
 to the timing and prepares the dubbing script. The `voiceover` package synthesises it (Vosk or
 TeraTTS, a voice per speaker gender), fits the lines to the timeline and exports the voice
-track; `stt.mix` puts it over the ducked original and muxes a video copy.
+track; `stt.mix` puts it over the ducked original and muxes a video copy. What comes next
+(speaker bank, voice cloning, tips to test): `docs/roadmap.md`.
 
 ```
 video ─► audio 16 kHz ─┬─► VAD chunks ─► Whisper  (fast)
@@ -44,15 +45,35 @@ ones; `--mode fast` uses Whisper only.
 |---|---|---|
 | Audio decoding, VAD, ASR (Whisper, Cohere), alignment, diarization, gender/age | local GPU | nothing |
 | On-screen text (RapidOCR: detection on GPU, recognition on CPU) | local | nothing |
-| ASR fusion (accurate mode only) | OpenRouter LLM | English ASR text of the three models per chunk + glossary |
-| Glossary, speaker names, translation, shortening, gender check | OpenRouter LLM | English transcript / cues, Russian drafts |
-| Stress re-check of guessed words / homographs | OpenRouter (3 LLMs) | Russian lines with those words |
-| Voice-over shortening + meaning check | DeepSeek / OpenRouter | Russian lines |
+| ASR fusion, glossary, speaker names, translation, stress re-check, voice-over shortening | OpenRouter LLMs | text only, see below |
 | TTS (Vosk on CPU, TeraTTS on GPU), timeline fitting, Russian ASR check, mixing, muxing | local | nothing |
 
 No audio ever leaves the machine. No manual corrections are applied anywhere; the only human
 inputs are optional files: `speakers.override.json`, an edited `glossary.txt`, and the
 `voiceover` overrides. Reference subtitles are used only by the benchmarks, never by the pipeline.
+
+### Language models
+
+One switch, `llm.model` in `stt_config.json` (default `openai/gpt-6-luna`, through OpenRouter),
+sets the model of every step; `llm.stages.<step>` overrides one step (`fuse`, `glossary`,
+`speakers`, `translate`, `voiceover`, `stress`, `stress_screen`). By default only the stress
+re-check uses other models. Cost of S29E01 (64 min) per step, luna by default vs gpt-6.1-sol
+everywhere:
+
+| Step | What is sent | What comes back | luna | sol |
+|---|---|---|---|---|
+| `fuse` (accurate mode) | per ~30 s chunk: the English text of Cohere and Whisper, neighbouring chunks, glossary | one corrected English text per chunk | $0.025 | $0.24 |
+| `glossary` | the English transcript, the season glossary | names, places, terms with their Russian form | $0.004 | $0.08 |
+| `speakers` | transcript with speaker ids, voice gender estimates, on-screen names | name, role, gender per speaker | $0.003 | $0.085 |
+| `translate` | English cues with time budget, speaker cards, glossary; then over-long lines and lines with a wrong first-person gender | Russian lines (translation, shorter versions, gender fixes) | $0.036 | $0.47 |
+| `stress_screen` + `stress` | Russian sentences with a guessed word or homograph | the stress of that word in that sentence; luna proposes, sol, claude-sonnet-5.5 and gemini-4-argon vote | $0.14 | — |
+| `voiceover` | a Russian line that still does not fit its slot, its scene | shorter versions and a meaning check (0 calls on S29E01/E02: the translation already fits) | $0 | $0 |
+
+Sol everywhere: $1.0 per episode instead of $0.21 and ~3 min longer. It recognised slightly
+better (WER against the closed captions 17.93% vs 18.17%, within the LLM's run-to-run spread),
+translated more completely and naturally and fitted the time budget better (2 of 921 lines over
+it before shortening vs 53 of 911 with luna); speaker names agreed on 89% of the speech
+(the rest: Вентворт/Уэнтворт and one voice cluster that holds two women).
 
 ## On-screen text
 
@@ -102,9 +123,11 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   heard, garbled or drawn out is synthesised again with other seeds (up to 3 takes) and the best
   one is kept. Vosk is not faster on the GPU, so it stays on the CPU.
 - **Stress (before synthesis).** RUAccent is right for dictionary words; errors come from
-  homographs and words it guesses. Judging stress from the audio does not work (three detectors
-  on 160 phrases with deliberately wrong stress scored ~40%, chance level), so
-  `voiceover.stress_check` re-checks each guessed word and each homograph in its sentence:
+  homographs and words it guesses. Stress is fixed in the text: from the audio it is heard only
+  partly (TeraAnaly's stress head, given the text, on 159 phrases synthesised with a deliberately
+  wrong stress: heard the wrong stress in 73% of Vosk and 62% of TeraTTS clips, reported a wrong
+  stress on 1-2% of words said correctly), so `voiceover.stress_check` re-checks each guessed
+  word and each homograph in its sentence:
   gpt-6-luna (high reasoning) proposes changes and three strong LLMs (gpt-6.1-sol,
   claude-sonnet-5.5, gemini-4-argon) vote on them; a majority correction is applied
   (`stress.json`: words, or single sentences for homographs). S29E01: 244 sentences checked,
