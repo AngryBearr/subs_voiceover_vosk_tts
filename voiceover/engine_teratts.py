@@ -63,6 +63,44 @@ def load_model(path: Path, device: str, diffusion_model: str) -> Any:
     return _MODELS[key]
 
 
+class _ScaledNoise:
+    """numpy stand-in for TeraTTS's sampler module: initial noise scaled by a temperature.
+
+    TeraTTS draws the diffusion's starting latent from N(0, 1) with no temperature option;
+    0.667 (as in teratts-android) cuts dropped words noticeably. Everything else is numpy.
+    """
+
+    def __init__(self, temperature: float) -> None:
+        self._temperature = temperature
+        self.random = self  # the sampler calls np.random.default_rng(seed).standard_normal(shape)
+
+    def default_rng(self, seed: Any = None) -> Any:
+        rng = np.random.default_rng(seed)
+        temperature = self._temperature
+
+        class _Rng:
+            def standard_normal(self, *args: Any, **kwargs: Any) -> np.ndarray:
+                return rng.standard_normal(*args, **kwargs) * temperature
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(rng, name)
+
+        return _Rng()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(np.random if name in vars(np.random) and name != "random" else np, name)
+
+
+def set_temperature(model: Any, temperature: float) -> None:
+    """Scale the starting noise of the loaded model's sampler (1.0 = the model's own behaviour)."""
+    import sys
+
+    for name, module in list(sys.modules.items()):  # the remote-code module ...transformers_modules...teratts
+        if name.rsplit(".", 1)[-1] == "teratts" and "_generate_latent" in vars(module) and "np" in vars(module):
+            real = module.np if not isinstance(module.np, _ScaledNoise) else np
+            module.np = real if temperature == 1.0 else _ScaledNoise(temperature)
+
+
 def rate_correction(n_syllables: int, speech_sec: float, target_syl_per_sec: float, tolerance: float,
                     min_syllables: int = 4) -> float | None:
     """Factor for the utterance length that brings its rate to the target, or None if it is close enough."""
@@ -90,6 +128,7 @@ class TeraTTSEngine(VoskEngine):
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
         self.verify = {"enabled": True, "attempts": 3, **dict(config.get("verify", {}))}
+        self.temperature = float(config.get("temperature", 0.667))
         self._recognizer: Any = None
         self._identity: dict[str, Any] | None = None
         self._accentizer: Any = None
@@ -111,6 +150,7 @@ class TeraTTSEngine(VoskEngine):
             "voice": self.voice,
             "base_rate": self.base_rate,
             "diffusion_model": self.diffusion_model,
+            "temperature": self.temperature,
             "target_syl_per_sec": self.target_syl_per_sec,
             "rate_tolerance": self.rate_tolerance,
             "trim": dict(self.trim),
@@ -186,6 +226,8 @@ class TeraTTSEngine(VoskEngine):
         log.info("synthesis: %d distinct texts, %d cached, %d to synthesize", len(entries) + len(todo), len(entries),
                  len(todo))
         model = load_model(self.path, self.device, self.diffusion_model) if todo else None
+        if model is not None:
+            set_temperature(model, self.temperature)
         for key, (text, voice) in todo.items():
             wav = cache_dir / f"{key}.wav"
             try:

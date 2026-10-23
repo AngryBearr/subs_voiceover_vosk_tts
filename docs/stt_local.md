@@ -96,7 +96,9 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   continuation cues are never merged across voices. TeraTTS predicts only the total length of a
   phrase and stretches the speech to fill it (S10E01 scene: median 4.3 syllables/s, slowest
   2.1); the engine re-synthesises lines off the target tempo by more than 15% (median 5.4,
-  slowest 4.1). Each TeraTTS clip is also transcribed right away (GigaAM); a clip with a word not
+  slowest 4.1). The starting noise of its sampler is scaled to 0.667 (`temperature`, tip from the
+  teratts-android port): on S29E01 first takes went from 1.51% to 0.74% character errors and from
+  10 to 6 words not heard. Each TeraTTS clip is also transcribed right away (GigaAM); a clip with a word not
   heard, garbled or drawn out is synthesised again with other seeds (up to 3 takes) and the best
   one is kept. Vosk is not faster on the GPU, so it stays on the CPU.
 - **Stress (before synthesis).** RUAccent is right for dictionary words; errors come from
