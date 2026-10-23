@@ -190,7 +190,8 @@ transcript from the aligned words (`<Name>.wav`, `<Name>.txt`, `references.json`
 
 The first episode of a season is named without a bank, so its mistakes surface later:
 `--recheck` lists prints whose voice at least two other episodes know under another name (and
-more than under its own), `--write-overrides` puts the rename into that episode's
+more than under its own, similarity 0.85+, never between relatives with one surname: the S29
+twins Nadiya and Natalie Anderson match at 0.80), `--write-overrides` puts the rename into that episode's
 `speakers.override.json`; `stt.run <video> --force speakers` then redoes its naming and the
 stages after it. Per-line prints show what such a cluster holds: S29E01's "Jaclyn" cluster
 matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own line only 0.45.

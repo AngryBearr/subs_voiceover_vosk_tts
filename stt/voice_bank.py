@@ -55,6 +55,7 @@ SAMPLES_PER_EPISODE = 5
 CLONE_RATE = 24_000
 MIN_SAMPLE_SCORE = 0.6  # a reference clip must sound at least this much like the person's prints
 MIN_SUPPORT = 2  # a rename needs the voice under the other name in at least this many other episodes
+RECHECK_SCORE = 0.85  # ... and this similarity (S29 twins Nadiya/Natalie: 0.80)
 
 
 def _similar(a: str, b: str, threshold: float) -> bool:
@@ -69,6 +70,12 @@ def same_person(a: str, b: str) -> bool:
     if len(ta) == 1 or len(tb) == 1:
         return True
     return _similar(ta[-1], tb[-1], 0.85)
+
+
+def relatives(a: str, b: str) -> bool:
+    """Different first names, one surname: family members sound alike (Nadiya/Natalie Anderson)."""
+    ta, tb = re.findall(r"[^\W\d_]+", a.lower()), re.findall(r"[^\W\d_]+", b.lower())
+    return len(ta) > 1 and len(tb) > 1 and ta[-1] == tb[-1] and not same_person(a, b)
 
 
 def _unit(vector: list[float]) -> np.ndarray:
@@ -230,7 +237,8 @@ def resolve(speakers: list[dict[str, Any]]) -> list[str]:
 
 
 def recheck(bank: VoiceBank) -> list[dict[str, Any]]:
-    """Prints whose voice more other episodes know under another name (in at least MIN_SUPPORT)."""
+    """Prints whose voice more other episodes know under another name (in at least MIN_SUPPORT, with a
+    similarity of RECHECK_SCORE or more); relatives with one surname are never renamed into each other."""
     suggestions = []
     for p in bank.prints:
         probe = _unit(p["embedding"])
@@ -253,6 +261,8 @@ def recheck(bank: VoiceBank) -> list[dict[str, Any]]:
         if not others:
             continue
         best = max(others, key=lambda g: (len(g["episodes"]), g["score"]))
+        if relatives(p["name"], best["name"]) or best["score"] < RECHECK_SCORE:
+            continue
         if len(best["episodes"]) >= MIN_SUPPORT and len(best["episodes"]) > own:
             suggestions.append({"episode": p["episode"], "speaker": p["speaker"], "name": p["name"],
                                 "suggested": best["name"], "label_ru": best["label_ru"],

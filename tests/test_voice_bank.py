@@ -110,3 +110,13 @@ def test_recheck_needs_two_other_episodes(tmp_path: Path) -> None:
     bank.add_episode("ep1", [_speaker("S06", "Jaclyn Schultz", _vec(21, 0.2, base=7))], [])
     bank.add_episode("ep2", [_speaker("S02", "Baylor Wilson", _vec(30, 0.2, base=7))], [])
     assert voice_bank.recheck(bank) == []  # one episode against one: no majority
+
+
+def test_recheck_leaves_relatives_alone(tmp_path: Path) -> None:
+    bank = VoiceBank(tmp_path / "s.voices.json")
+    bank.add_episode("ep1", [_speaker("S02", "Nadiya Anderson", _vec(41, 0.2, base=9))], [])
+    for i, ep in enumerate(("ep2", "ep3", "ep4")):
+        bank.add_episode(ep, [_speaker("S05", "Natalie Anderson", _vec(50 + i, 0.2, base=9))], [])
+    assert voice_bank.relatives("Nadiya Anderson", "Natalie Anderson")
+    assert not voice_bank.relatives("Jon Misch", "John Misch")
+    assert voice_bank.recheck(bank) == []
