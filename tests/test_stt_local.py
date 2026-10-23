@@ -199,6 +199,18 @@ class RunTest(unittest.TestCase):
             self.assertEqual(ep.season.name, "Season 1.glossary.json")
         self.assertEqual(STAGES[-1], "mix")
 
+    def test_llm_model_per_stage(self) -> None:
+        import argparse
+
+        args = argparse.Namespace(season_glossary=None, force=None, until="dub")
+        one = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {"model": "openai/gpt-6.1-sol"}})
+        self.assertEqual((one.llm("translate"), one.llm("stress")), ("openai/gpt-6.1-sol", "openai/gpt-6.1-sol"))
+        mixed = Episode(Path("ep.mkv"), Path("out"), args,
+                        {"llm": {"model": "openai/gpt-6-luna", "stages": {"stress": ["a", "b", "c"]}}})
+        self.assertEqual((mixed.llm("fuse"), mixed.llm("stress")), ("openai/gpt-6-luna", ["a", "b", "c"]))
+        legacy = Episode(Path("ep.mkv"), Path("out"), args, {"llm_model": "x/y"})
+        self.assertEqual(legacy.llm("glossary"), "x/y")
+
     def test_dotenv_parses_without_executing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = Path(tmp) / ".env"

@@ -72,6 +72,12 @@ class Episode:
         self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk"))
         self.vo_dir = self.out / f"voiceover.{self.engine}"
 
+    def llm(self, stage: str) -> Any:
+        """OpenRouter model of an LLM step: llm.stages.<stage>, else llm.model (one model for everything)."""
+        llm = self.config.get("llm") or {"model": self.config.get("llm_model", "openai/gpt-6-luna")}
+        stages = llm.get("stages") or {}
+        return stages[stage] if stages.get(stage) is not None else llm["model"]
+
     def stamp(self, stage: str) -> Path:
         """Marks when a stage last finished (per engine for the engine's stages)."""
         engine_stage = stage in ("dub", "voiceover", "check", "mix")
@@ -125,7 +131,7 @@ class Episode:
         argv = [str(self.media), "--out", str(self.out), "--asr", mode["asr"],
                 "--diarizer", self.config["diarizer"]]
         if mode.get("fuse"):
-            argv += ["--fuse", ",".join(mode["fuse"]), "--fuse-model", self.config["llm_model"]]
+            argv += ["--fuse", ",".join(mode["fuse"]), "--fuse-model", self.llm("fuse")]
             if (self.season.with_suffix(".txt")).exists():
                 argv += ["--glossary", str(self.season.with_suffix(".txt"))]
         ocr = self.config.get("ocr", {})
@@ -139,7 +145,7 @@ class Episode:
     def glossary(self) -> None:
         from stt import glossary
 
-        glossary.main([str(self.out), "--season", str(self.season), "--model", self.config["llm_model"]])
+        glossary.main([str(self.out), "--season", str(self.season), "--model", self.llm("glossary")])
         # Plain-text copy of the season glossary for the next episode's ASR fusion prompt.
         lines = (self.out / "glossary.txt").read_text(encoding="utf-8")
         self.season.with_suffix(".txt").write_text(lines, encoding="utf-8")
@@ -147,14 +153,13 @@ class Episode:
     def speakers(self) -> None:
         from stt import speakers
 
-        speakers.main([str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model",
-                       self.config["llm_model"]])
+        speakers.main([str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("speakers")])
 
     def translate(self) -> None:
         from stt import translate
 
         cfg = self.config["translate"]
-        argv = [str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.config["llm_model"],
+        argv = [str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("translate"),
                 "--cps", str(cfg["cps"]), "--extend", str(cfg["extend"]), "--parallel", str(cfg["parallel"])]
         if cfg.get("tts_profile"):
             argv += ["--tts-profile", str(REPO_ROOT / cfg["tts_profile"])]
@@ -200,6 +205,12 @@ class Episode:
                                "voice": self._engine()["voices"]["male"]}
         for section in ("policy", "units"):  # dub-specific timing (preferred lag, base tempo, no unit merging)
             vo_config[section] = {**vo_config.get(section, {}), **cfg.get(section, {})}
+        openrouter = {"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1",
+                      "api_key_env": "OPENROUTER_API_KEY", "reasoning": "default", "max_tokens": 8192}
+        vo_config["llm"] = {**vo_config.get("llm", {}), **openrouter, "model": self.llm("voiceover")}  # shortening
+        vo_config["verify"] = {**vo_config.get("verify", {}),
+                               "llm": {**vo_config.get("verify", {}).get("llm", {}), **openrouter,
+                                       "model": self.llm("voiceover")}}  # meaning check of shortened lines
         config_path = self.out / f"voiceover.{self.engine}.config.json"
         save_json(config_path, vo_config)
         return config_path
@@ -209,9 +220,13 @@ class Episode:
         if not cfg.get("stress_check", True):
             save_json(self.out / "stress.json", {"schema": "voiceover-stress-v3", "skipped": True})
             return
-        self._module("stress", "voiceover.stress_check", [  # the texts exactly as this engine prepares them
-            str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str((self.out / "stress.json").resolve()),
-            "--config", str(self._voiceover_config().resolve())])
+        models = self.llm("stress")
+        screen = self.llm("stress_screen") if (self.config.get("llm") or {}).get("stages", {}).get("stress_screen") \
+            else None
+        args = [str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str((self.out / "stress.json").resolve()),
+                "--config", str(self._voiceover_config().resolve()),  # the texts exactly as this engine prepares them
+                "--models", ",".join(models if isinstance(models, list) else [models])]
+        self._module("stress", "voiceover.stress_check", args + (["--screen", screen] if screen else ["--no-screen"]))
 
     def voiceover(self) -> None:
         config_path = self._voiceover_config()

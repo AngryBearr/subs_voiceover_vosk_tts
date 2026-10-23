@@ -6,7 +6,13 @@
   },
   "diarizer": "pyannote-community-1",
   "ocr": {"enabled": true, "fps": 2.0},
-  "llm_model": "openai/gpt-6-luna",
+  "llm": {
+    "model": "openai/gpt-6-luna",
+    "stages": {
+      "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
+      "stress_screen": "openai/gpt-6-luna"
+    }
+  },
   "translate": {
     "cps": 14.0,
     "extend": 0.6,

@@ -247,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--engine", default=None, help="Override engine.name (vosk | teratts)")
     parser.add_argument("--models", default=None, help="Comma-separated OpenRouter models (default: config/built-in)")
     parser.add_argument("--no-screen", action="store_true", help="Let the strong models check every sentence")
+    parser.add_argument("--screen", default=None, help="Cheap model that proposes changes (default: config/built-in)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -254,7 +255,8 @@ def main(argv: list[str] | None = None) -> int:
     stress = config.get("stress", {})
     llm_config = stress.get("llm") or config.get("verify", {}).get("llm") or config["llm"]
     models = args.models.split(",") if args.models else list(stress.get("models", DEFAULT_MODELS))
-    screen = None if args.no_screen else stress.get("screen", DEFAULT_SCREEN)
+    screen = None if args.no_screen else ({**DEFAULT_SCREEN, "model": args.screen} if args.screen
+                                          else stress.get("screen", DEFAULT_SCREEN))
     lines = json.loads(args.source.read_text(encoding="utf-8"))
     result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
