@@ -11,6 +11,7 @@ Per episode, in `<out-root>/<video name>/`:
     stress      stress of guessed words/homographs re-checked (LLMs)  stress.json
     voiceover   synthesis (Vosk or TeraTTS) + timeline fitting        voiceover.<engine>/export/track.wav
     check       Russian ASR check of the spoken clips                 voiceover.<engine>/speech_check.md
+                + lines to check by ear (gender / speaker)            review.json, review.srt
     mix         voice over the ducked original (+ mkv with tracks)    <name>.ru.<engine>.wav / .mkv
 
 Finished stages are skipped (no repeated LLM costs) unless an earlier stage was redone since;
@@ -102,8 +103,10 @@ class Episode:
         engine_stage = stage in ("dub", "voiceover", "check", "mix")
         return self.out / ".stages" / (f"{stage}.{self.engine}" if engine_stage else stage)
 
-    def needed(self, stage: str, outputs: list[Path], previous: str | None = None) -> bool:
-        """Run a stage if forced, if an output is missing, or if the previous stage finished after it.
+    def needed(self, stage: str, outputs: list[Path], previous: str | None = None,
+               inputs: list[Path] | None = None) -> bool:
+        """Run a stage if forced, if an output is missing, if the previous stage finished after it,
+        or if a manual input (``speakers.override.json``, ``corrections.json``) changed since.
 
         Finish marks, not file times: some stages update earlier outputs (speakers rewrites
         subs.en.json), which must not make the earlier stages look stale.
@@ -112,9 +115,11 @@ class Episode:
             return True
         if not all(p.exists() for p in outputs):
             return True
+        mark = self.stamp(stage)
+        if mark.exists() and any(p.exists() and p.stat().st_mtime > mark.stat().st_mtime for p in inputs or []):
+            return True
         if previous is None or not self.stamp(previous).exists():
             return False  # runs from before the marks existed
-        mark = self.stamp(stage)
         return not mark.exists() or mark.stat().st_mtime < self.stamp(previous).stat().st_mtime
 
     def run(self) -> None:
@@ -122,17 +127,17 @@ class Episode:
         steps = {
             "transcribe": (self.transcribe, [self.out / "subs.en.json"]),
             "glossary": (self.glossary, [self.out / "glossary.json"]),
-            "speakers": (self.speakers, [self.out / "speakers.llm.json"]),
+            "speakers": (self.speakers, [self.out / "speakers.llm.json"], [self.out / "speakers.override.json"]),
             "translate": (self.translate, [self.out / "subs.ru.json"]),
-            "dub": (self.dub, [self.out / f"dub.ru.{self.engine}.json"]),
+            "dub": (self.dub, [self.out / f"dub.ru.{self.engine}.json"], [self.out / "corrections.json"]),
             "stress": (self.stress, [self.out / "stress.json"]),
             "voiceover": (self.voiceover, [self.vo_dir / "export" / "track.wav"]),
             "check": (self.check, [self.vo_dir / "speech_check.json"]),
             "mix": (self.mix, [self.out / f"{self.media.stem}.ru.{self.engine}.wav"]),
         }
         for position, stage in enumerate(STAGES[: until + 1]):
-            func, outputs = steps[stage]
-            if not self.needed(stage, outputs, STAGES[position - 1] if position else None):
+            func, outputs, *inputs = steps[stage]
+            if not self.needed(stage, outputs, STAGES[position - 1] if position else None, *inputs):
                 log.info("[%s] %s: done earlier", self.media.stem, stage)
                 continue
             log.info("[%s] %s ...", self.media.stem, stage)
@@ -276,6 +281,10 @@ class Episode:
             return
         self._module(f"check.{self.engine}", "voiceover.speech_check", [str(self.vo_dir.resolve()),
                                                                          "--root", str(REPO_ROOT)])
+        review = self.out / "review.json"
+        if self.config.get("review", True) and (
+                not review.exists() or review.stat().st_mtime < (self.out / "subs.ru.json").stat().st_mtime):
+            self._module("review", "stt.review", [str(self.out.resolve())])  # lines to check by ear
 
     def mix(self) -> None:
         from stt import mix

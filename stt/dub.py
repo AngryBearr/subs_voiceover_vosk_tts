@@ -10,6 +10,10 @@ colliding. This step removes what should not compete for that single stream: sho
 interjections/backchannels ("Yeah", "Wow", "Go, go!") that sit on top of another speaker or
 inside a rapid exchange stay audible in the ducked original instead of being dubbed.
 
+Manual fixes from `corrections.json` in the folder (`stt.review` lists lines worth checking)
+are applied first: `{"123": {"gender": "female"}, "130": {"speaker": "Julie McGee"},
+"140": {"text": "..."}, "141": {"skip": true}}` (line numbers as in `subs.ru.srt`).
+
 Writes `dub.ru.json` (or `--output`; voiced lines only, `voiceover` input format plus `speaker`,
 `gender`, `voice`), `dub.ru.srt` and `dub.report.json` (skipped lines with reasons).
 """
@@ -59,6 +63,7 @@ def plan(
     *,
     interjections: str = "dense",
     dense_gap_ms: int = 1000,
+    skip: set[int] | frozenset[int] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return (voiced lines, skipped lines with reasons)."""
     voiced: list[dict[str, Any]] = []
@@ -66,7 +71,9 @@ def plan(
     for pos, rec in enumerate(records):
         text_en = " ".join(rec.get("text_en") or [])
         reason = None
-        if not " ".join(rec["text"]).strip():
+        if rec["index"] in skip:
+            reason = "skipped in corrections.json"
+        elif not " ".join(rec["text"]).strip():
             reason = "empty"
         elif interjections != "keep" and is_interjection(text_en):
             prev_gap = rec["start"] - records[pos - 1]["end"] if pos > 0 else None
@@ -106,11 +113,18 @@ def main(argv: list[str] | None = None) -> None:
 
     folder = Path(args.folder)
     records = load_json(folder / args.input)
+    skip: set[int] = set()
+    if (folder / "corrections.json").exists():
+        from stt.review import apply_corrections
+
+        corrections = load_json(folder / "corrections.json")
+        records, skip = apply_corrections(records, corrections, load_json(folder / "speakers.json"))
+        log.info("corrections.json: %d lines corrected", len(corrections))
     if args.single_voice is not None:
         voices = {"female": args.single_voice, "male": args.single_voice, "unknown": args.single_voice}
     else:
         voices = parse_voices(args.voices)
-    voiced, skipped = plan(records, voices, interjections=args.interjections)
+    voiced, skipped = plan(records, voices, interjections=args.interjections, skip=skip)
     save_json(folder / args.output, voiced)
     save_json(folder / "dub.report.json", {"voices": voices, "interjections": args.interjections,
                                            "voiced": len(voiced), "skipped": skipped})

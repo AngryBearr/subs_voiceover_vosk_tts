@@ -199,6 +199,31 @@ twins Nadiya and Natalie Anderson match at 0.80), `--write-overrides` puts the r
 stages after it. Per-line prints show what such a cluster holds: S29E01's "Jaclyn" cluster
 matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own line only 0.45.
 
+## Checking by ear and fixing lines
+
+After the speech check, `stt.review` lists voiced lines that may have the wrong voice: the
+age/gender model hears the other gender with 0.9+ on the line's own audio, or the line's voice
+print is clearly (0.15+) closer to another speaker than to its own. Shouts and crowd noise fool
+the gender model, so this is a list for a person, not an automatic fix (S29E01-E04: 12-35 lines
+per episode).
+
+- `review.json`: line number (as in `subs.ru.srt`), time, speaker, voice used, what was heard,
+  English and Russian text, and a ready `fix`;
+- `review.srt`: the same lines, for Subtitle Edit next to the original video (or open
+  `subs.ru.srt` and jump to the numbers).
+
+Fixes go into `corrections.json` in the episode folder, keyed by line number:
+
+```json
+{"123": {"gender": "female"}, "130": {"speaker": "Julie McGee"}, "140": {"text": "Новый текст"},
+ "141": {"skip": true}}
+```
+
+`speaker` takes a name, Russian label or id from `speakers.json` (and its gender). The next
+`stt.run` of the episode sees the newer file and redoes the dubbing script and everything after
+it (for `--engine teratts` too); `speakers.override.json` works the same way for the speakers
+stage.
+
 ## Simultaneous speech
 
 1. ASR yields one stream of words: the dominant voice is transcribed, quieter voices under it
