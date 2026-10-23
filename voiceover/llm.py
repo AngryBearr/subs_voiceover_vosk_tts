@@ -14,7 +14,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -148,7 +148,7 @@ def openai_transport(config: LLMConfig, api_key: str) -> Transport:
 
 
 def opencode_transport(config: LLMConfig) -> Transport:
-    """Transport for ``opencode:<provider>/<model>``: the OpenCode login of a ChatGPT subscription."""
+    """Transport for the OpenCode login of a ChatGPT subscription (``config.model`` is the bare id)."""
     from utils.opencode_clean import OpenCodeError, flatten_messages, shared_server
 
     def call(body: dict[str, Any]) -> dict[str, Any]:
@@ -158,8 +158,65 @@ def opencode_transport(config: LLMConfig) -> Transport:
                                                         timeout=config.timeout_sec)
         except OpenCodeError as error:
             raise (LLMTransientError if error.transient else LLMError)(str(error)) from error
-        return {"model": config.model, "choices": [{"message": {"content": text}, "finish_reason": "stop"}],
-                "usage": {}}
+        return {"model": "opencode:" + config.model,
+                "choices": [{"message": {"content": text}, "finish_reason": "stop"}], "usage": {}}
+
+    return call
+
+
+FAILOVER_AFTER = 3  # transient failures in a row before the next transport of a route takes over
+
+
+def route_transport(config: LLMConfig, env_file: Path | None = None) -> Transport:
+    """Transport for ``config.model``: its route prefix (``utils.llm_route``) or the configured provider.
+
+    With several transports (``opencode+orcarouter:...``) a transport that fails for good, or
+    ``FAILOVER_AFTER`` times in a row, hands over to the next one for the rest of the run.
+    """
+    from utils.llm_route import ROUTERS, split_route
+
+    names, bare = split_route(config.model)
+    if not names:
+        return openai_transport(config, load_api_key(config.api_key_env, env_file))
+    built: dict[int, Transport] = {}
+
+    def transport(index: int) -> Transport:
+        if index not in built:
+            name = names[index]
+            if name == "opencode":
+                built[index] = opencode_transport(replace(config, model=bare))
+            else:
+                router = ROUTERS[name]
+                routed = replace(config, provider=name, base_url=router.base_url, api_key_env=router.api_key_env,
+                                 model=bare)
+                built[index] = openai_transport(routed, load_api_key(router.api_key_env, env_file))
+        return built[index]
+
+    state = {"active": 0, "transient": 0}
+    lock = threading.Lock()
+
+    def call(body: dict[str, Any]) -> dict[str, Any]:
+        while True:
+            active = state["active"]
+            request = {**body, "model": bare}
+            if names[active] != "opencode":
+                request.pop("thinking", None)  # DeepSeek's field; OrcaRouter rejects it for OpenAI models
+            try:
+                response = transport(active)(request)
+                state["transient"] = 0
+                return response
+            except Exception as error:  # noqa: BLE001 - any failure of a non-last transport hands over
+                last = active + 1 >= len(names)
+                transient = isinstance(error, LLMTransientError)
+                with lock:
+                    if transient and not last:
+                        state["transient"] += 1
+                    if last or (transient and state["transient"] < FAILOVER_AFTER):
+                        raise
+                    if state["active"] == active:
+                        state.update(active=active + 1, transient=0)
+                        log.warning("llm: %s via %s failed (%s); using %s from now on", bare, names[active],
+                                    error, names[active + 1])
 
     return call
 
@@ -243,8 +300,7 @@ class LLMClient:
                 body["reasoning_effort"] = cfg.reasoning
         with self._lock:
             if self.transport is None:
-                self.transport = opencode_transport(cfg) if cfg.model.startswith("opencode:") else \
-                    openai_transport(cfg, load_api_key(cfg.api_key_env, self.env_file))
+                self.transport = route_transport(cfg, self.env_file)
             transport = self.transport
         attempt = 0
         while True:

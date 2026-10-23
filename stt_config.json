@@ -7,10 +7,12 @@
   "diarizer": "pyannote-community-1",
   "ocr": {"enabled": true, "fps": 2.0},
   "llm": {
-    "model": "openai/gpt-6-luna",
+    "model": "openai/gpt-6.1-sol",
     "opencode": ["openai/*"],
+    "router": "orcarouter",
+    "fallback": true,
     "stages": {
-      "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
+      "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "openrouter:google/gemini-4-argon"],
       "stress_screen": "openai/gpt-6-luna"
     }
   },

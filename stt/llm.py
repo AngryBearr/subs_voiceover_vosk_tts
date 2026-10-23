@@ -1,8 +1,9 @@
-"""Minimal OpenRouter chat client (stdlib only) returning parsed JSON answers.
+"""Minimal chat client (stdlib only) returning parsed JSON answers.
 
-A model id with the ``opencode:`` prefix (``opencode:openai/gpt-6-luna``) goes through the
-OpenCode login of a ChatGPT subscription instead (``utils.opencode_clean``): no API cost, no
-token counts.
+By default requests go to OpenRouter. Transports in front of the model id choose others
+(``utils.llm_route``): ``opencode:`` is the OpenCode login of a ChatGPT subscription (no API
+cost, no token counts), ``orcarouter:`` / ``openrouter:`` the paid routers;
+``opencode+orcarouter:openai/gpt-6.1-sol`` falls back to OrcaRouter when OpenCode fails.
 """
 
 from __future__ import annotations
@@ -20,25 +21,25 @@ from pathlib import Path
 from typing import Any
 
 from stt.runner import REPO_ROOT
-from utils.opencode_clean import PREFIX as OPENCODE_PREFIX, OpenCodeError, flatten_messages, shared_server
+from utils.llm_route import ROUTERS, split_route
+from utils.opencode_clean import OpenCodeError, flatten_messages, shared_server
 
-ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-6-luna"
 
 log = logging.getLogger(__name__)
 _USAGE_LOCK = threading.Lock()  # clients may be shared by worker threads
 
 
-def load_api_key(env_file: Path = REPO_ROOT / ".env") -> str:
-    """OPENROUTER_API_KEY from the environment or the repo `.env` file (parsed as data)."""
-    value = os.environ.get("OPENROUTER_API_KEY")
+def load_api_key(env_file: Path = REPO_ROOT / ".env", name: str = "OPENROUTER_API_KEY") -> str:
+    """API key ``name`` from the environment or the repo `.env` file (parsed as data)."""
+    value = os.environ.get(name)
     if not value and env_file.is_file():
         for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            match = re.match(r"^\s*(?:export\s+)?OPENROUTER_API_KEY\s*=\s*(.*?)\s*$", line)
+            match = re.match(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=\s*(.*?)\s*$", line)
             if match:
                 value = match.group(1).strip().strip("'\"")
     if not value:
-        raise RuntimeError("Set OPENROUTER_API_KEY in the environment or in .env at the repo root")
+        raise RuntimeError(f"Set {name} in the environment or in .env at the repo root")
     return value
 
 
@@ -95,17 +96,36 @@ class OpenRouterClient:
     ) -> None:
         self.model = model
         self.reasoning = reasoning  # off | minimal | low | medium | high; None: model default
-        self.opencode = model.startswith(OPENCODE_PREFIX)
-        self.api_key = "" if self.opencode else api_key or load_api_key()
+        transports, self.bare_model = split_route(model)
+        self.transports = transports or ["openrouter"]
+        self._active = 0  # index of the transport in use; moves on when one fails for good
+        self._api_keys: dict[str, str] = {}
+        if api_key:
+            self._api_keys[self.transports[0]] = api_key
+        elif self.transports[0] != "opencode":
+            self._key(self.transports[0])  # fail early without a key
         self.timeout_s = timeout_s
         self.usage = Usage()
+        self._lock = threading.Lock()
 
-    def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+    @property
+    def transport(self) -> str:
+        return self.transports[self._active]
+
+    def _key(self, router: str) -> str:
+        if router not in self._api_keys:
+            self._api_keys[router] = load_api_key(name=ROUTERS[router].api_key_env)
+        return self._api_keys[router]
+
+    def _post(self, body: dict[str, Any], router: str = "openrouter") -> dict[str, Any]:
+        body = {**body, "model": self.bare_model}
+        if router != "openrouter":
+            body.pop("usage", None)  # OpenRouter's cost accounting flag; OrcaRouter rejects it for OpenAI models
         request = urllib.request.Request(
-            ENDPOINT,
+            ROUTERS[router].base_url + "/chat/completions",
             data=json.dumps(body).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {self._key(router)}",
                 "Content-Type": "application/json",
                 "X-Title": "subs-voiceover-stt",
             },
@@ -116,9 +136,10 @@ class OpenRouterClient:
 
     def _generate(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """The OpenCode answer in the OpenRouter response shape (no usage: the subscription pays)."""
-        text = shared_server(self.model).generate(flatten_messages(messages), self.model, self.reasoning,
-                                                  timeout=self.timeout_s)
-        return {"model": self.model, "choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+        text = shared_server(self.bare_model).generate(flatten_messages(messages), self.bare_model, self.reasoning,
+                                                       timeout=self.timeout_s)
+        return {"model": "opencode:" + self.bare_model,
+                "choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
 
     def chat_json(
         self,
@@ -129,10 +150,29 @@ class OpenRouterClient:
         max_tokens: int = 16000,
         retries: int = 2,
     ) -> Any:
-        """Send one chat request and return the parsed JSON answer (retries on HTTP/JSON errors)."""
+        """Send one chat request and return the parsed JSON answer.
+
+        Retries on HTTP/JSON errors; when a transport keeps failing, the next one of the model's
+        route takes over for this and all later requests of the client.
+        """
+        while True:
+            active = self._active
+            try:
+                return self._chat_once(self.transports[active], system, user, temperature, max_tokens, retries)
+            except RuntimeError as exc:
+                if active + 1 >= len(self.transports):
+                    raise
+                with self._lock:
+                    if self._active == active:
+                        self._active = active + 1
+                        log.warning("LLM %s via %s failed (%s); using %s from now on", self.bare_model,
+                                    self.transports[active], exc, self.transports[active + 1])
+
+    def _chat_once(self, transport: str, system: str, user: str, temperature: float, max_tokens: int,
+                   retries: int) -> Any:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         body = {
-            "model": self.model,
+            "model": self.bare_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -146,7 +186,7 @@ class OpenRouterClient:
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                response = self._generate(messages) if self.opencode else self._post(body)
+                response = self._generate(messages) if transport == "opencode" else self._post(body, transport)
                 self.usage.add(response)
                 choice = response["choices"][0]
                 content = choice["message"].get("content") or ""
@@ -172,4 +212,4 @@ class OpenRouterClient:
                 last_error = exc
             log.warning("LLM call failed (attempt %d/%d): %s", attempt + 1, retries + 1, last_error)
             time.sleep(2.0 * (attempt + 1))
-        raise RuntimeError(f"LLM request to {self.model} failed: {last_error}")
+        raise RuntimeError(f"LLM request to {self.bare_model} via {transport} failed: {last_error}")

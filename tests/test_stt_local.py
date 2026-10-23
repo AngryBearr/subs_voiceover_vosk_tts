@@ -205,18 +205,48 @@ class RunTest(unittest.TestCase):
 
         args = argparse.Namespace(season_glossary=None, force=None, until="dub")
         one = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {"model": "openai/gpt-6.1-sol"}})
-        self.assertEqual((one.llm("translate"), one.llm("stress")), ("openai/gpt-6.1-sol", "openai/gpt-6.1-sol"))
+        self.assertEqual((one.llm("translate"), one.llm("stress")),
+                         ("openrouter:openai/gpt-6.1-sol", "openrouter:openai/gpt-6.1-sol"))
         mixed = Episode(Path("ep.mkv"), Path("out"), args,
                         {"llm": {"model": "openai/gpt-6-luna", "stages": {"stress": ["a", "b", "c"]}}})
-        self.assertEqual((mixed.llm("fuse"), mixed.llm("stress")), ("openai/gpt-6-luna", ["a", "b", "c"]))
+        self.assertEqual((mixed.llm("fuse"), mixed.llm("stress")),
+                         ("openrouter:openai/gpt-6-luna", ["openrouter:a", "openrouter:b", "openrouter:c"]))
         legacy = Episode(Path("ep.mkv"), Path("out"), args, {"llm_model": "x/y"})
-        self.assertEqual(legacy.llm("glossary"), "x/y")
+        self.assertEqual(legacy.llm("glossary"), "openrouter:x/y")
         routed = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
-            "model": "openai/gpt-6-luna", "opencode": ["openai/*"],
-            "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "opencode:openai/x"]}}})
-        self.assertEqual(routed.llm("translate"), "opencode:openai/gpt-6-luna")
-        self.assertEqual(routed.llm("stress"),
-                         ["opencode:openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "opencode:openai/x"])
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": "orcarouter",
+            "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "openrouter:google/g"]}}})
+        self.assertEqual(routed.llm("translate"), "opencode+orcarouter:openai/gpt-6-luna")
+        self.assertEqual(routed.llm("stress"), ["opencode+orcarouter:openai/gpt-6.1-sol",
+                                                "orcarouter:anthropic/claude-sonnet-5.5", "openrouter:google/g"])
+        no_fallback = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "fallback": False}})
+        self.assertEqual(no_fallback.llm("fuse"), "opencode:openai/gpt-6-luna")
+
+    def test_opencode_falls_back_to_the_paid_router(self) -> None:
+        from unittest import mock
+
+        import stt.llm
+
+        class _Down:
+            def generate(self, *args: object, **kwargs: object) -> str:
+                raise stt.llm.OpenCodeError("HTTP 401: login expired")
+
+        posted: list[tuple[str, str]] = []
+
+        def post(self: stt.llm.OpenRouterClient, body: dict, router: str = "openrouter") -> dict:
+            posted.append((router, body["model"]))
+            return {"model": "gpt-6.1-sol", "choices": [{"message": {"content": '{"ok": 1}'}}], "usage": {}}
+
+        with mock.patch.object(stt.llm, "shared_server", return_value=_Down()), \
+                mock.patch.object(stt.llm.OpenRouterClient, "_post", post), \
+                mock.patch.object(stt.llm, "load_api_key", return_value="k"), \
+                mock.patch.object(stt.llm.time, "sleep"):
+            client = stt.llm.OpenRouterClient("opencode+orcarouter:openai/gpt-6.1-sol")
+            self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
+            self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
+        self.assertEqual(posted, [("orcarouter", "openai/gpt-6.1-sol")] * 2)
+        self.assertEqual(client.transport, "orcarouter")
 
     def test_opencode_model_needs_no_api_key(self) -> None:
         from unittest import mock
@@ -236,7 +266,7 @@ class RunTest(unittest.TestCase):
                 mock.patch.object(stt.llm, "shared_server", return_value=server):
             client = stt.llm.OpenRouterClient("opencode:openai/gpt-6.1-sol", reasoning="high")
             self.assertEqual(client.chat_json("SYSTEM", "USER"), {"items": [1]})
-        self.assertEqual(server.prompts, [("SYSTEM\n\nUSER", "opencode:openai/gpt-6.1-sol", "high")])
+        self.assertEqual(server.prompts, [("SYSTEM\n\nUSER", "openai/gpt-6.1-sol", "high")])
         self.assertEqual((client.usage.calls, client.usage.cost), (1, 0.0))
 
     def test_dotenv_parses_without_executing(self) -> None:

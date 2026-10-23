@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from stt.runner import REPO_ROOT, load_json, save_json
+from utils.llm_route import with_route
 
 log = logging.getLogger("stt.run")
 
@@ -76,18 +77,21 @@ class Episode:
     def llm(self, stage: str) -> Any:
         """Model of an LLM step: llm.stages.<stage>, else llm.model (one model for everything).
 
-        Models matching a pattern of ``llm.opencode`` (e.g. "openai/*") get the ``opencode:`` prefix:
-        they go through the OpenCode login of a subscription instead of OpenRouter.
+        The model id gets its route (``utils.llm_route``): models matching a pattern of
+        ``llm.opencode`` (e.g. "openai/*") go through the OpenCode login of a subscription, with
+        ``llm.router`` (openrouter | orcarouter) as fallback unless ``llm.fallback`` is false;
+        the rest go to ``llm.router``. Ids that already carry a route keep it.
         """
         llm = self.config.get("llm") or {"model": self.config.get("llm_model", "openai/gpt-6-luna")}
         stages = llm.get("stages") or {}
         model = stages[stage] if stages.get(stage) is not None else llm["model"]
         patterns = llm.get("opencode") or []
+        router = llm.get("router", "openrouter")
 
         def route(name: str) -> str:
-            if name.startswith("opencode:") or not any(fnmatch.fnmatchcase(name, p) for p in patterns):
-                return name
-            return "opencode:" + name
+            if any(fnmatch.fnmatchcase(name, p) for p in patterns):
+                return with_route(name, ["opencode", router] if llm.get("fallback", True) else ["opencode"])
+            return with_route(name, [router])
 
         return [route(m) for m in model] if isinstance(model, list) else route(model)
 

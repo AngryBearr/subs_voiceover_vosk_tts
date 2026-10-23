@@ -197,7 +197,7 @@ def test_opencode_model_goes_through_the_opencode_login(tmp_path: Path, monkeypa
     client = LLMClient(config, sleep=lambda _: None)
     result = client.complete_json("sys", "user", prompt_version="v1", tag="t")
     assert result.content == {"ok": True} and result.model == "opencode:openai/gpt-6-luna"
-    assert calls == [("sys\n\nuser", "opencode:openai/gpt-6-luna", "high")] * 2
+    assert calls == [("sys\n\nuser", "openai/gpt-6-luna", "high")] * 2
     assert client.stats()["calls_made"] == 2
 
 
@@ -221,3 +221,40 @@ def test_opencode_model_list_of_v2_servers() -> None:
     payload = {"data": [{"id": "gpt-6-luna", "providerID": "openai", "variants": [{"id": "none"}, {"id": "high"}]}]}
     assert _find_model_variants(payload, "openai/gpt-6-luna") == {"none", "high"}
     assert _find_model_variants(payload, "openai/gpt-6.1-sol") is None
+
+
+def test_route_hands_over_to_the_paid_router(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_clean as opencode
+    import voiceover.llm as vllm
+
+    class _Down:
+        def generate(self, *args: Any, **kwargs: Any) -> str:
+            raise opencode.OpenCodeError("HTTP 503: busy", transient=True)
+
+    routed: list[tuple[str, str]] = []
+
+    def fake_openai(config: LLMConfig, api_key: str) -> Any:
+        def call(body: dict[str, Any]) -> dict[str, Any]:
+            routed.append((config.base_url, body["model"]))
+            assert "thinking" not in body and body["reasoning_effort"] == "high"
+            return {"model": body["model"], "choices": [{"message": {"content": '{"a": 1}'}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2}}
+        return call
+
+    monkeypatch.setattr(opencode, "shared_server", lambda model: _Down())
+    monkeypatch.setattr(vllm, "openai_transport", fake_openai)
+    monkeypatch.setattr(vllm, "load_api_key", lambda name, env_file=None: "key")
+    client = LLMClient(LLMConfig(model="opencode+orcarouter:openai/gpt-6.1-sol", reasoning="high",
+                                 cache_dir=tmp_path), sleep=lambda _: None)
+    assert client.complete_json("sys", "user", prompt_version="v1", tag="t").content == {"a": 1}
+    assert routed == [("https://api.orcarouter.ai/v1", "openai/gpt-6.1-sol")]
+    assert client.stats()["calls_made"] == vllm.FAILOVER_AFTER  # two transient failures were retried first
+
+
+def test_route_prefix_parsing() -> None:
+    from utils.llm_route import split_route, with_route
+
+    assert split_route("opencode+orcarouter:openai/gpt-6.1-sol") == (["opencode", "orcarouter"], "openai/gpt-6.1-sol")
+    assert split_route("meta/llama-4:free") == ([], "meta/llama-4:free")
+    assert with_route("anthropic/claude-sonnet-5.5", ["orcarouter"]) == "orcarouter:anthropic/claude-sonnet-5.5"
+    assert with_route("openrouter:google/gemini-4-argon", ["orcarouter"]) == "openrouter:google/gemini-4-argon"
