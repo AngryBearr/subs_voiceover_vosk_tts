@@ -7,6 +7,10 @@ real names (only when evident), a short Russian label, role and gender (voice es
 combined with textual evidence), then applies manual corrections from
 `speakers.override.json` ({"S03": {"name": "Jeff", "gender": "male"}, ...}) and writes
 the results back into `speakers.json` and `subs.en.json` (`gender`, `speaker_name`).
+
+With ``--voice-bank`` the season voice bank (``stt.voice_bank``) adds voice matches with the
+other episodes as evidence, names clusters the LLM left unnamed when the match is strong, and
+takes this episode's named clusters as new prints.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from stt import voice_bank
 from stt.llm import DEFAULT_MODEL, OpenRouterClient
 from stt.runner import load_json, save_json
 
@@ -31,8 +36,8 @@ For EVERY speaker ID return:
 - "name": the person's real name ONLY if the transcript makes it evident (self-introduction,
   "my name is", being addressed by name and answering, others clearly referring to them) or the
   speaker's "on_screen" evidence names them: a name card/title shown while they talked or a caption
-  label of their line (OCR, may contain misreadings, props or place names). Else null.
-  Never guess celebrities from style alone.
+  label of their line (OCR, may contain misreadings, props or place names), or a strong
+  "voice_bank" match does (see below). Else null. Never guess celebrities from style alone.
 - "name_evidence": short quote/reason for the name, or null.
 - "role": short English role (host, narrator, contestant, interviewer, interviewee, reporter, ...).
 - "label_ru": short unique Russian label for display. If the name is known: the name in Russian
@@ -45,6 +50,11 @@ For EVERY speaker ID return:
 - "gender_evidence": short explanation, e.g. "voice 0.97 + 'she' in S04 line 12".
 - "same_as": ID of another speaker that is very likely the same person, else null.
 - "confidence": 0..1 overall confidence in this card.
+
+"voice_bank" (when present) lists people named in earlier episodes of the same season whose voice
+matches this speaker, with cosine similarity 0..1 (0.75 and more: strong, 0.6-0.75: weak). Use
+it as evidence for the name, like on_screen. It can repeat an earlier naming mistake and relatives
+can sound alike (twins, parent and child): clear transcript evidence for another name wins.
 
 Answer with JSON only: {"speakers": [{"id": "S01", ...}, ...]}"""
 
@@ -66,6 +76,8 @@ def build_prompt(
             "child_prob": s.get("p_child"),
             "speech_seconds": s.get("speech_s"),
             "on_screen": s.get("on_screen") or [],
+            **({"voice_bank": [f"{m['name']} ({m['score']:.2f})" for m in s["voice_bank"]]}
+               if s.get("voice_bank") else {}),
             "lines": s.get("cues"),
         }
         for s in speakers
@@ -94,6 +106,7 @@ def apply_cards(speakers: list[dict[str, Any]], cards: list[dict[str, Any]]) -> 
         speaker.update(
             {
                 "name": card.get("name") or None,
+                "name_source": "llm" if card.get("name") else None,
                 "name_evidence": card.get("name_evidence"),
                 "role": card.get("role"),
                 "label_ru": card.get("label_ru"),
@@ -129,10 +142,14 @@ def update_records(records: list[dict[str, Any]], speakers: list[dict[str, Any]]
 
 
 def name_speakers(
-    folder: Path, model: str, *, use_llm: bool = True, reasoning: str | None = None, glossary: str = ""
+    folder: Path, model: str, *, use_llm: bool = True, reasoning: str | None = None, glossary: str = "",
+    bank_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     speakers_path, subs_path = folder / "speakers.json", folder / "subs.en.json"
     speakers, records = load_json(speakers_path), load_json(subs_path)
+    bank = voice_bank.VoiceBank.load(bank_path) if bank_path else None
+    if bank is not None:
+        voice_bank.attach_matches(speakers, bank, folder.name)
     if use_llm:
         client = OpenRouterClient(model, reasoning=reasoning)
         prompt = build_prompt([s for s in speakers if s.get("cues")], records, glossary=glossary)
@@ -141,9 +158,16 @@ def name_speakers(
         save_json(folder / "speakers.llm.json", {"model": model, "usage": client.usage.to_dict(), "cards": cards})
         apply_cards(speakers, cards)
         log.info("LLM naming: %s", client.usage.to_dict())
+    if bank is not None:
+        for note in voice_bank.resolve(speakers):
+            log.info("voice bank: %s", note)
     override_path = folder / "speakers.override.json"
     if override_path.exists():
         apply_overrides(speakers, load_json(override_path))
+    if bank is not None:
+        added = bank.add_episode(folder.name, speakers, records)
+        bank.save()
+        log.info("voice bank: %d prints from this episode, %d in %s", added, len(bank.prints), bank.path)
     update_records(records, speakers)
     save_json(speakers_path, speakers)
     save_json(subs_path, records)
@@ -162,6 +186,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenRouter model id")
     parser.add_argument("--no-llm", action="store_true", help="Only apply speakers.override.json")
     parser.add_argument("--glossary", default=None, help="glossary.txt from stt.glossary (canonical names)")
+    parser.add_argument("--voice-bank", type=Path, default=None, help="Season voice bank (stt.voice_bank)")
     parser.add_argument(
         "--reasoning",
         default="medium",
@@ -172,7 +197,8 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     reasoning = None if args.reasoning == "default" else args.reasoning
     glossary = Path(args.glossary).read_text(encoding="utf-8") if args.glossary else ""
-    name_speakers(Path(args.folder), args.model, use_llm=not args.no_llm, reasoning=reasoning, glossary=glossary)
+    name_speakers(Path(args.folder), args.model, use_llm=not args.no_llm, reasoning=reasoning, glossary=glossary,
+                  bank_path=args.voice_bank)
 
 
 if __name__ == "__main__":

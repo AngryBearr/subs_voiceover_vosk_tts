@@ -5,7 +5,7 @@
 Per episode, in `<out-root>/<video name>/`:
     transcribe  English subtitles with speakers (stt.transcribe)       subs.en.json
     glossary    season glossary: names/terms + Russian renderings     glossary.json
-    speakers    names, Russian labels, final gender (LLM)             speakers.llm.json
+    speakers    names, Russian labels, final gender (LLM + voice bank) speakers.llm.json
     translate   timing-aware EN -> RU translation (LLM)               subs.ru.json
     dub         voiced lines and a voice per line (speaker gender)    dub.ru.<engine>.json
     stress      stress of guessed words/homographs re-checked (LLMs)  stress.json
@@ -15,7 +15,8 @@ Per episode, in `<out-root>/<video name>/`:
 
 Finished stages are skipped (no repeated LLM costs) unless an earlier stage was redone since;
 `--force STAGE` recomputes it and everything after it. Defaults come from `stt_config.json`. Episodes in the same folder share a
-season glossary (`<out-root>/<folder name>.glossary.json`).
+season glossary (`<out-root>/<folder name>.glossary.json`) and voice bank
+(`<out-root>/<folder name>.voices.json`, `stt.voice_bank`).
 """
 
 from __future__ import annotations
@@ -69,6 +70,7 @@ class Episode:
         self.config = config
         default_season = out_root / f"{media.parent.name}.glossary.json"
         self.season = Path(args.season_glossary) if args.season_glossary else default_season
+        self.voice_bank = self.season.with_name(self.season.name.replace(".glossary.json", "") + ".voices.json")
         self.forced_from: int | None = STAGES.index(args.force) if args.force else None
         vo = config.get("voiceover", {})
         self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk"))
@@ -170,7 +172,10 @@ class Episode:
     def speakers(self) -> None:
         from stt import speakers
 
-        speakers.main([str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("speakers")])
+        argv = [str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("speakers")]
+        if (self.config.get("voice_bank") or {}).get("enabled", True):
+            argv += ["--voice-bank", str(self.voice_bank)]
+        speakers.main(argv)
 
     def translate(self) -> None:
         from stt import translate

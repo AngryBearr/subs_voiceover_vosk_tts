@@ -16,6 +16,10 @@ The first goal: any episode of a season, from the video to the mkv, without manu
 
 ## 2. Season speaker bank
 
+First part done (`stt.voice_bank`, see `docs/stt_local.md`): prints, matches as LLM
+evidence, naming of unnamed clusters, conflicts, sample lists. Still open: splitting a
+cluster that holds two voices, checking samples for music, cutting the reference clips.
+
 Keep a voice print per named person across the episodes of a season:
 
 - clusters of a new episode are matched to the bank, so names and gender stay the same in every

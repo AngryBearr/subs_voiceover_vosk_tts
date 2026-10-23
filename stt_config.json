@@ -16,6 +16,7 @@
       "stress_screen": "openai/gpt-6-luna"
     }
   },
+  "voice_bank": {"enabled": true},
   "translate": {
     "cps": 14.0,
     "extend": 0.6,

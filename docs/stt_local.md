@@ -159,6 +159,30 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
   abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.
 
+## Season voice bank
+
+Episodes of one folder share `<out-root>/<folder>.voices.json` (`stt.voice_bank`, on with
+`"voice_bank": {"enabled": true}`). Every named speaker cluster with 20+ s of speech becomes a
+voice print (its pyannote/WeSpeaker embedding with name, Russian label and gender). In the next
+episode, before the LLM names the speakers:
+
+- each cluster gets the closest names of the other episodes (similarity 0.6+) as `voice_bank`
+  evidence in the naming prompt; the LLM still decides, since a print can carry an earlier
+  naming mistake and relatives sound alike (S29 twins Nadiya/Natalie: 0.67);
+- a cluster the LLM leaves unnamed takes the name of a strong (0.75+) and clear (0.1 ahead of
+  the next name) match;
+- a strong match the LLM contradicts is a conflict, logged and kept in the bank. Spellings of one
+  name ("Jon"/"John Misch", "Baylor"/"Baylor Wilson") count as one person.
+
+S29E02 with the E01 bank: the voice luna had named Missy Payne became Julie McGee (right: in
+E01 she talks about her boyfriend John Rocker); the one conflict left is real (E01's "Jaclyn"
+cluster holds Baylor's voice). Same person across episodes: similarity 0.67-0.98; different
+people mostly under 0.5. Per person the bank also lists the longest solo stretches (6-12 s, no
+overlap, no burned-in caption) as reference clips for voice cloning.
+
+`subs_env/bin/python -m stt.voice_bank output/stt/<folder>.voices.json` shows people, episodes,
+the best sample and the conflicts.
+
 ## Simultaneous speech
 
 1. ASR yields one stream of words: the dominant voice is transcribed, quieter voices under it
