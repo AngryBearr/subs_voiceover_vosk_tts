@@ -58,6 +58,13 @@ reference = 8 s of an English confessional of Jon Misch + 1 s of silence and its
   not hoarseness or breathiness, and has no accent cross-lingually. Samples:
   `output/demo/f5_espeech/`.
 
+First listening demo (23.10): three 75 s scenes of S29E02-E04 (23-30 lines, 6-7 people each)
+voiced line by line in each speaker's cloned voice, in the TeraTTS slots and at their
+loudness: 1.1 s per line with up to 3 takes, 2.0-2.5% character errors (short exclamations
+and names are the hard part). References: the voice bank's cleaned clips (vocals only).
+Prototype scripts and videos (F5 / TeraTTS / Vosk / original tracks): `output/demo/s29_f5/`.
+F5 runs in its own venv (f5-tts pins differ from subs_env); an engine would call it there.
+
 Other engines discussed in the Telegram chat (Shmyrev's table of 20.10.2026, 1270 Russian
 phrases; xRT = synthesis time / audio length, stress errors as he counts them):
 
