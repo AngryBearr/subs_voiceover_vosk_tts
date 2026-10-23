@@ -149,6 +149,18 @@ def check_clip(clip: dict[str, Any], heard: str, words: list[tuple[str, float, f
             "flags": flags}
 
 
+def clip_score(result: dict[str, Any]) -> float:
+    """Lower is better: character errors, words not heard / garbled, a drawn-out word."""
+    return (result["cer"] + 0.3 * sum(bad_word(d) for d in result["diffs"])
+            + 0.1 * max(0.0, result["stretch"] - 2.0))
+
+
+def check_audio(recognizer: "Recognizer", tts_text: str, audio: np.ndarray, sample_rate: int) -> dict[str, Any]:
+    """Speech check of one synthesized clip (used by engines to retry bad takes)."""
+    heard, words = recognizer(audio, sample_rate)
+    return check_clip({"tts_text": tts_text}, heard, words, len(audio) / sample_rate)
+
+
 def check_run(run_dir: Path, root: Path, device: str = "cuda") -> dict[str, Any]:
     clips = final_clips(run_dir)
     recognizer = Recognizer(device)

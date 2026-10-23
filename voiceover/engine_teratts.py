@@ -10,6 +10,11 @@ When the prediction is too long the whole phrase sounds drawn out, too short —
 synthesised again with the length that gives the target rate (times ``base_rate``), so all
 lines share one natural tempo and the timeline solver only fine-tunes it. ``base_rate`` maps
 to ``duration_scale = 1 / base_rate``, so calibration works as for Vosk.
+
+The diffusion sampler sometimes mumbles or drops a word or draws one out. With ``verify``
+every clip is transcribed by GigaAM right away (``voiceover.speech_check``); a clip with a word
+not heard, a garbled word or a drawn-out word is synthesised again with other seeds and the
+best take is kept.
 """
 
 from __future__ import annotations
@@ -84,6 +89,8 @@ class TeraTTSEngine(VoskEngine):
         self.rate_tolerance = float(config.get("rate_tolerance", 0.15))
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
+        self.verify = {"enabled": True, "attempts": 3, **dict(config.get("verify", {}))}
+        self._recognizer: Any = None
         self._identity: dict[str, Any] | None = None
         self._accentizer: Any = None
         self._check_voice(self.voice)
@@ -107,26 +114,55 @@ class TeraTTSEngine(VoskEngine):
             "target_syl_per_sec": self.target_syl_per_sec,
             "rate_tolerance": self.rate_tolerance,
             "trim": dict(self.trim),
+            **({"verify": dict(self.verify)} if self.verify.get("enabled") else {}),
         }
 
     def _voice(self, row: PreparedText) -> str:  # type: ignore[override]
         return self.voice if row.voice is None else str(row.voice)
 
-    def _synth_one(self, model: Any, text: str, voice: str, wav: Path) -> dict[str, Any]:
-        scale = 1.0 / self.base_rate
-        audio = model.generate_speech(f"<ru>{text}</ru>", voice=voice, duration_scale=scale)
+    def _take(self, model: Any, text: str, voice: str, wav: Path, scale: float, seed: int
+              ) -> tuple[float, float, int, int]:
+        audio = model.generate_speech(f"<ru>{text}</ru>", voice=voice, duration_scale=scale, seed=seed)
         sf.write(str(wav), np.asarray(audio, dtype=np.float32), SAMPLE_RATE, subtype="PCM_16")
-        raw_sec, speech_sec, edge_ms, reduced = postprocess_wav(wav, self.trim)
+        return postprocess_wav(wav, self.trim)
+
+    def _check(self, text: str, wav: Path) -> dict[str, Any]:
+        from voiceover.speech_check import Recognizer, check_audio
+
+        if self._recognizer is None:
+            self._recognizer = Recognizer(self.device)
+        audio, sr = sf.read(str(wav), dtype="float32")
+        return check_audio(self._recognizer, text, audio, sr)
+
+    def _synth_one(self, model: Any, text: str, voice: str, wav: Path) -> dict[str, Any]:
+        from voiceover.speech_check import clip_score
+
+        seed = 1234
+        scale = 1.0 / self.base_rate
+        raw_sec, speech_sec, edge_ms, reduced = self._take(model, text, voice, wav, scale, seed)
         factor = rate_correction(syllables(text), speech_sec, self.target_syl_per_sec * self.base_rate,
                                  self.rate_tolerance)
         if factor is not None:
             scale *= factor
-            audio = model.generate_speech(f"<ru>{text}</ru>", voice=voice, duration_scale=scale)
-            sf.write(str(wav), np.asarray(audio, dtype=np.float32), SAMPLE_RATE, subtype="PCM_16")
-            raw_sec, speech_sec, edge_ms, reduced = postprocess_wav(wav, self.trim)
+            raw_sec, speech_sec, edge_ms, reduced = self._take(model, text, voice, wav, scale, seed)
+        entry: dict[str, Any] = {"duration_scale": round(scale, 4), "seed": seed}
+        if self.verify.get("enabled"):
+            check = self._check(text, wav)
+            best = (clip_score(check), seed, check, (raw_sec, speech_sec, edge_ms, reduced))
+            retry = wav.with_suffix(".retry.wav")
+            for attempt in range(1, int(self.verify["attempts"])):
+                if not best[2]["flags"] or not {"pronunciation", "drawn_out"} & set(best[2]["flags"]):
+                    break
+                stats = self._take(model, text, voice, retry, scale, seed + attempt)
+                check = self._check(text, retry)
+                if clip_score(check) < best[0]:
+                    retry.replace(wav)
+                    best = (clip_score(check), seed + attempt, check, stats)
+            retry.unlink(missing_ok=True)
+            raw_sec, speech_sec, edge_ms, reduced = best[3]
+            entry.update(seed=best[1], check={k: best[2][k] for k in ("cer", "stretch", "flags", "heard")})
         return {"path": str(wav), "sha256": _sha256_file(wav), "raw_sec": raw_sec, "speech_sec": speech_sec,
-                "edge_trimmed_ms": edge_ms, "reduced_pauses": reduced, "error": None,
-                "duration_scale": round(scale, 4)}
+                "edge_trimmed_ms": edge_ms, "reduced_pauses": reduced, "error": None, **entry}
 
     def synthesize_many(self, prepared: list[PreparedText], cache_dir: Path, workers: int = 1) -> list[SynthResult]:
         """Synthesise every distinct (text, voice) once on one model; ``workers`` is ignored (GPU)."""
