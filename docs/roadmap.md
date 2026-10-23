@@ -10,6 +10,11 @@ The first goal: any episode of a season, from the video to the mkv, without manu
 - S29E02 from scratch with Vosk: 28 min for a 43-min episode (voice-over on the CPU 11 min of
   it), no failures, 0.79% character errors in the Russian ASR check, 7 of 608 lines over 15%.
   The same script with TeraTTS: 6 min more (voice-over 4 min), 0.78%, 4 lines over 15%.
+- S29E01-E04 in one run (23.10, gpt-6.1-sol through the ChatGPT subscription, voice bank on):
+  Vosk 1 h 50 min for the four (23-31 min per episode; fresh ASR ~6 min, LLM steps ~10 min,
+  Vosk voice-over 10-14 min on the CPU), then TeraTTS 29 min for the four (voice-over 4-5 min
+  each). No failures, no fallback to OrcaRouter needed. Character errors: Vosk 0.57-1.06%,
+  TeraTTS 0.50-0.97%; the voice bank found no naming conflicts across the four episodes.
 - Known weak spot: diarization merges similar voices. S29E01 has one voice cluster with two
   women (Jaclyn and Baylor), so one of them gets the other's name and voice. The season
   speaker bank (below) is the planned fix.
