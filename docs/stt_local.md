@@ -54,11 +54,23 @@ inputs are optional files: `speakers.override.json`, an edited `glossary.txt`, a
 
 ### Language models
 
-One switch, `llm.model` in `stt_config.json` (default `openai/gpt-6-luna`, through OpenRouter),
-sets the model of every step; `llm.stages.<step>` overrides one step (`fuse`, `glossary`,
-`speakers`, `translate`, `voiceover`, `stress`, `stress_screen`). By default only the stress
-re-check uses other models. Cost of S29E01 (64 min) per step, luna by default vs gpt-6.1-sol
-everywhere:
+One switch, `llm.model` in `stt_config.json` (default `openai/gpt-6-luna`), sets the model of
+every step; `llm.stages.<step>` overrides one step (`fuse`, `glossary`, `speakers`, `translate`,
+`voiceover`, `stress`, `stress_screen`). By default only the stress re-check uses other models.
+
+Models matching a pattern of `llm.opencode` (default `["openai/*"]`) are sent through OpenCode
+logged in with a ChatGPT subscription (`opencode auth login`, OpenAI) instead of OpenRouter, so
+they cost nothing beyond the subscription; the rest (claude, gemini voters) still go through
+OpenRouter. Each process starts its own private `opencode serve` (OpenCode 2.x) on 127.0.0.1
+with a random password and the clean preset `config/opencode_clean` (no tools, project config,
+plugins or MCP) and calls its stateless generation route. A model id can also carry the prefix
+itself (`opencode:openai/gpt-6.1-sol`). `"opencode": []` sends everything to OpenRouter again.
+OpenCode reports no token counts, so `usage` shows calls and $0 for these models. S29E01 with
+gpt-6.1-sol for every step this way: all LLM steps in 15 min, fusion WER 18.03% (17.93% through
+OpenRouter), translation as through OpenRouter (2 of 918 lines over budget); only the claude
+and gemini stress voters were paid (~$0.1).
+
+OpenRouter prices of S29E01 (64 min) per step, luna by default vs gpt-6.1-sol everywhere:
 
 | Step | What is sent | What comes back | luna | sol |
 |---|---|---|---|---|

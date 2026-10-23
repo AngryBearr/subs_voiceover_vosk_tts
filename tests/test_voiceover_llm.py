@@ -175,3 +175,49 @@ def test_reasoning_setting_changes_request_body_and_cache_key(tmp_path) -> None:
     assert len(bodies) == 3  # three different cache keys
     with pytest.raises(ValueError):
         LLMConfig.from_dict({"reasoning": "sometimes"})
+
+
+def test_opencode_model_goes_through_the_opencode_login(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_clean as opencode
+
+    calls: list[tuple[str, str, str | None]] = []
+    answers: list[Any] = [opencode.OpenCodeError("HTTP 429: slow down", transient=True), '{"ok": true}']
+
+    class _Server:
+        def generate(self, prompt: str, model: str, variant: str | None = None, timeout: float = 0) -> str:
+            calls.append((prompt, model, variant))
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return str(answer)
+
+    monkeypatch.setattr(opencode, "shared_server", lambda model: _Server())
+    config = LLMConfig(provider="openrouter", model="opencode:openai/gpt-6-luna", api_key_env="NO_SUCH_KEY",
+                       reasoning="high", cache_dir=tmp_path)
+    client = LLMClient(config, sleep=lambda _: None)
+    result = client.complete_json("sys", "user", prompt_version="v1", tag="t")
+    assert result.content == {"ok": True} and result.model == "opencode:openai/gpt-6-luna"
+    assert calls == [("sys\n\nuser", "opencode:openai/gpt-6-luna", "high")] * 2
+    assert client.stats()["calls_made"] == 2
+
+
+def test_opencode_refusal_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_clean as opencode
+
+    class _Server:
+        def generate(self, *args: Any, **kwargs: Any) -> str:
+            raise opencode.OpenCodeError("HTTP 400: unknown model")
+
+    monkeypatch.setattr(opencode, "shared_server", lambda model: _Server())
+    client = LLMClient(LLMConfig(model="opencode:openai/nope", cache_dir=tmp_path), sleep=lambda _: None)
+    with pytest.raises(LLMError, match="unknown model"):
+        client.complete_json("sys", "user", prompt_version="v1", tag="t")
+    assert client.stats()["calls_made"] == 1
+
+
+def test_opencode_model_list_of_v2_servers() -> None:
+    from utils.opencode_clean import _find_model_variants
+
+    payload = {"data": [{"id": "gpt-6-luna", "providerID": "openai", "variants": [{"id": "none"}, {"id": "high"}]}]}
+    assert _find_model_variants(payload, "openai/gpt-6-luna") == {"none", "high"}
+    assert _find_model_variants(payload, "openai/gpt-6.1-sol") is None

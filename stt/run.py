@@ -21,6 +21,7 @@ season glossary (`<out-root>/<folder name>.glossary.json`).
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import glob
 import hashlib
 import json
@@ -73,10 +74,22 @@ class Episode:
         self.vo_dir = self.out / f"voiceover.{self.engine}"
 
     def llm(self, stage: str) -> Any:
-        """OpenRouter model of an LLM step: llm.stages.<stage>, else llm.model (one model for everything)."""
+        """Model of an LLM step: llm.stages.<stage>, else llm.model (one model for everything).
+
+        Models matching a pattern of ``llm.opencode`` (e.g. "openai/*") get the ``opencode:`` prefix:
+        they go through the OpenCode login of a subscription instead of OpenRouter.
+        """
         llm = self.config.get("llm") or {"model": self.config.get("llm_model", "openai/gpt-6-luna")}
         stages = llm.get("stages") or {}
-        return stages[stage] if stages.get(stage) is not None else llm["model"]
+        model = stages[stage] if stages.get(stage) is not None else llm["model"]
+        patterns = llm.get("opencode") or []
+
+        def route(name: str) -> str:
+            if name.startswith("opencode:") or not any(fnmatch.fnmatchcase(name, p) for p in patterns):
+                return name
+            return "opencode:" + name
+
+        return [route(m) for m in model] if isinstance(model, list) else route(model)
 
     def stamp(self, stage: str) -> Path:
         """Marks when a stage last finished (per engine for the engine's stages)."""

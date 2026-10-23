@@ -1,7 +1,14 @@
-"""Isolated, metadata-only OpenCode OAuth runtime for subtitle experiments."""
+"""Isolated OpenCode OAuth runtime: subtitle experiments and the pipeline's subscription LLM calls.
+
+OpenCode keeps the login of a ChatGPT subscription (``opencode auth``, OpenAI OAuth). A private
+``opencode serve`` with a clean preset config lets the pipeline send its prompts to the OpenAI
+models of that subscription instead of paying OpenRouter. OpenCode 2.x has a stateless text
+generation route (``generate``); 1.x servers are still checked for the old experiments.
+"""
 
 from __future__ import annotations
 
+import atexit
 import base64
 import json
 import os
@@ -11,7 +18,10 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +29,17 @@ from typing import Any, Optional
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRESET_ROOT = REPO_ROOT / "config" / "opencode_clean"
 DEFAULT_REQUIRED_MODELS: dict[str, set[str]] = {"openai/gpt-5.6-luna": {"medium"}}
+PREFIX = "opencode:"  # a model id "opencode:openai/gpt-6-luna" is sent through the OpenCode subscription
+# pipeline reasoning names -> OpenCode variants ("default" / None: the model's own default)
+VARIANTS = {"off": "none", "minimal": "low", "max": "xhigh"}
+
+
+class OpenCodeError(RuntimeError):
+    """OpenCode refused or failed a request."""
+
+    def __init__(self, message: str, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 def _free_port() -> int:
@@ -48,6 +69,11 @@ def _find_model_variants(payload: Any, wanted: str) -> Optional[set[str]]:
     if "/" not in wanted or not isinstance(payload, (dict, list)):
         return None
     provider, model = wanted.split("/", 1)
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):  # 2.x: /api/model
+        for item in payload["data"]:
+            if isinstance(item, dict) and item.get("providerID") == provider and item.get("id") == model:
+                return {str(v.get("id")) for v in item.get("variants") or [] if isinstance(v, dict)}
+        return None
     providers = payload.get("all") if isinstance(payload, dict) else payload
     if not isinstance(providers, list):
         return None
@@ -92,6 +118,8 @@ class CleanOpenCodeServer:
         self._temp_directory: Optional[tempfile.TemporaryDirectory[str]] = None
         self._neutral_directory: Optional[tempfile.TemporaryDirectory[str]] = None
         self._password = secrets.token_urlsafe(32)
+        self.api_version = 1
+        self.checked_models: set[str] = set()
         self._auth_header = {"Authorization": "Basic " + base64.b64encode(f"opencode:{self._password}".encode()).decode()}
 
     @property
@@ -146,11 +174,65 @@ class CleanOpenCodeServer:
 
     def _healthy(self) -> bool:
         try:
+            if isinstance(self._request("/api/info", 1.5).get("version"), str):  # OpenCode 2.x
+                self.api_version = 2
+                return True
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
             return self._request("/global/health", 1.5).get("healthy") is True
         except (OSError, ValueError, AttributeError):
             return False
 
+    def _verify_metadata_v2(self) -> None:
+        agents = self._request("/api/agent").get("data") or []
+        active = {str(a.get("name", "")).lower() for a in agents if isinstance(a, dict) and not a.get("disable")}
+        if active - {"subtitle", "title", "summary", "compaction"}:
+            raise RuntimeError("foreign active agent enabled")
+        plugins = self._request("/api/plugin").get("data") or []
+        if any((p.get("source") or {}).get("type") != "builtin" for p in plugins if isinstance(p, dict)):
+            raise RuntimeError("clean config contains foreign plugins")
+        if self._request("/api/mcp").get("data") not in ([], None, {}) and not self.enable_length_tool:
+            raise RuntimeError("clean config unexpectedly enables MCP")
+        self.require_models(self.required_models)
+
+    def require_models(self, models: dict[str, set[str]]) -> None:
+        """Fail early when the login does not give these models (and variants)."""
+        payload = self._request("/api/model" if self.api_version == 2 else "/provider")
+        for model, variants in models.items():
+            available = _find_model_variants(payload, model)
+            if available is None or not variants.issubset(available):
+                raise RuntimeError(f"OpenCode does not offer {model} {sorted(variants)} with this login")
+
+    def generate(self, prompt: str, model: str, variant: Optional[str] = None, timeout: float = 600.0) -> str:
+        """One stateless generation (OpenCode 2.x): the model's text answer to ``prompt``."""
+        if self.api_version != 2:
+            raise RuntimeError("stateless generation needs OpenCode 2.x")
+        provider, model_id = model.removeprefix(PREFIX).split("/", 1)
+        ref: dict[str, str] = {"id": model_id, "providerID": provider}
+        if variant:
+            ref["variant"] = VARIANTS.get(variant, variant)
+        request = urllib.request.Request(
+            self.base_url + "/api/experimental/generate", method="POST",
+            data=json.dumps({"prompt": prompt, "model": ref}).encode("utf-8"),
+            headers={**self.auth_header, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            raise OpenCodeError(f"HTTP {exc.code}: {detail}", transient=exc.code == 429 or exc.code >= 500) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise OpenCodeError(f"{type(exc).__name__}: {exc}", transient=True) from exc
+        text = (data.get("data") or {}).get("text") if isinstance(data, dict) else None
+        if not isinstance(text, str):
+            raise OpenCodeError("answer without text", transient=True)
+        return text
+
     def _verify_metadata(self) -> None:
+        if self.api_version == 2:
+            self._verify_metadata_v2()
+            return
         config = self._request("/config")
         if config.get("plugin") not in ([], None) or config.get("instructions") not in ([], None) or config.get("skills") not in ({"paths": [], "urls": []}, None):
             raise RuntimeError("clean config contains foreign extensions")
@@ -264,6 +346,31 @@ class CleanOpenCodeServer:
 
     def __exit__(self, *args: Any) -> None:
         self.stop()
+
+
+_SHARED: Optional[CleanOpenCodeServer] = None
+_SHARED_LOCK = threading.Lock()
+
+
+def shared_server(model: str) -> CleanOpenCodeServer:
+    """The process-wide server (started on first use, stopped at exit) after checking ``model``."""
+    global _SHARED
+    with _SHARED_LOCK:
+        if _SHARED is None:
+            server = CleanOpenCodeServer(required_models={}, timeout=60.0)
+            server.start()
+            atexit.register(server.stop)
+            _SHARED = server
+        server = _SHARED
+        if model not in server.checked_models:
+            server.require_models({model.removeprefix(PREFIX): set()})
+            server.checked_models.add(model)
+        return server
+
+
+def flatten_messages(messages: list[dict[str, str]]) -> str:
+    """Chat messages as one prompt: the stateless route has no separate system role."""
+    return "\n\n".join(m["content"] for m in messages if m.get("content"))
 
 
 def main() -> int:

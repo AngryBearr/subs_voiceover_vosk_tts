@@ -5,6 +5,7 @@ Run: subs_env/bin/python -m unittest tests.test_stt_local -v
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -210,6 +211,33 @@ class RunTest(unittest.TestCase):
         self.assertEqual((mixed.llm("fuse"), mixed.llm("stress")), ("openai/gpt-6-luna", ["a", "b", "c"]))
         legacy = Episode(Path("ep.mkv"), Path("out"), args, {"llm_model": "x/y"})
         self.assertEqual(legacy.llm("glossary"), "x/y")
+        routed = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"],
+            "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "opencode:openai/x"]}}})
+        self.assertEqual(routed.llm("translate"), "opencode:openai/gpt-6-luna")
+        self.assertEqual(routed.llm("stress"),
+                         ["opencode:openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "opencode:openai/x"])
+
+    def test_opencode_model_needs_no_api_key(self) -> None:
+        from unittest import mock
+
+        import stt.llm
+
+        class _Server:
+            prompts: list[tuple[str, str, str | None]] = []
+
+            def generate(self, prompt: str, model: str, variant: str | None = None, timeout: float = 0) -> str:
+                self.prompts.append((prompt, model, variant))
+                return '```json\n{"items": [1]}\n```'
+
+        server = _Server()
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}), \
+                mock.patch.object(stt.llm, "load_api_key", side_effect=AssertionError("no key needed")), \
+                mock.patch.object(stt.llm, "shared_server", return_value=server):
+            client = stt.llm.OpenRouterClient("opencode:openai/gpt-6.1-sol", reasoning="high")
+            self.assertEqual(client.chat_json("SYSTEM", "USER"), {"items": [1]})
+        self.assertEqual(server.prompts, [("SYSTEM\n\nUSER", "opencode:openai/gpt-6.1-sol", "high")])
+        self.assertEqual((client.usage.calls, client.usage.cost), (1, 0.0))
 
     def test_dotenv_parses_without_executing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

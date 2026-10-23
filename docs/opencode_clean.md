@@ -4,6 +4,17 @@
 глобальную конфигурацию Fusion. Подробные правила сокращения и измеренные
 результаты находятся в [`shortening_memory.md`](shortening_memory.md).
 
+## OpenCode 2.x: запросы пайплайна через подписку
+
+С OpenCode 2.x (проверено на 2.1.3, 23 октября 2026) API сервера другое: пути под `/api/...`,
+сессии 1.x (`/session/{id}/message`) больше нет. Поэтому `utils/opencode_transport.py` с
+2.x не работает. Пайплайн `stt` использует `CleanOpenCodeServer.generate`: один запрос без
+состояния через `POST /api/experimental/generate` с полями `prompt` и
+`model: {providerID, id, variant}`. Системный промпт и текст запроса передаются одной строкой.
+Количество токенов этот путь не возвращает. Проверка сервера при запуске для 2.x: `/api/info`,
+`/api/agent`, `/api/plugin`, `/api/mcp`, `/api/model`. Какие модели идут этим путём,
+задаёт `llm.opencode` в `stt_config.json` (см. `docs/stt_local.md`).
+
 ## Текущая конфигурация
 
 Файл preset:

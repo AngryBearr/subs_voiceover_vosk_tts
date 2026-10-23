@@ -8,6 +8,7 @@
   "ocr": {"enabled": true, "fps": 2.0},
   "llm": {
     "model": "openai/gpt-6-luna",
+    "opencode": ["openai/*"],
     "stages": {
       "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
       "stress_screen": "openai/gpt-6-luna"

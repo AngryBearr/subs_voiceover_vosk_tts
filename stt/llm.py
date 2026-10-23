@@ -1,4 +1,9 @@
-"""Minimal OpenRouter chat client (stdlib only) returning parsed JSON answers."""
+"""Minimal OpenRouter chat client (stdlib only) returning parsed JSON answers.
+
+A model id with the ``opencode:`` prefix (``opencode:openai/gpt-6-luna``) goes through the
+OpenCode login of a ChatGPT subscription instead (``utils.opencode_clean``): no API cost, no
+token counts.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from stt.runner import REPO_ROOT
+from utils.opencode_clean import PREFIX as OPENCODE_PREFIX, OpenCodeError, flatten_messages, shared_server
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-6-luna"
@@ -89,7 +95,8 @@ class OpenRouterClient:
     ) -> None:
         self.model = model
         self.reasoning = reasoning  # off | minimal | low | medium | high; None: model default
-        self.api_key = api_key or load_api_key()
+        self.opencode = model.startswith(OPENCODE_PREFIX)
+        self.api_key = "" if self.opencode else api_key or load_api_key()
         self.timeout_s = timeout_s
         self.usage = Usage()
 
@@ -106,6 +113,12 @@ class OpenRouterClient:
         )
         with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _generate(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        """The OpenCode answer in the OpenRouter response shape (no usage: the subscription pays)."""
+        text = shared_server(self.model).generate(flatten_messages(messages), self.model, self.reasoning,
+                                                  timeout=self.timeout_s)
+        return {"model": self.model, "choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
 
     def chat_json(
         self,
@@ -133,7 +146,7 @@ class OpenRouterClient:
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                response = self._post(body)
+                response = self._generate(messages) if self.opencode else self._post(body)
                 self.usage.add(response)
                 choice = response["choices"][0]
                 content = choice["message"].get("content") or ""
@@ -146,6 +159,10 @@ class OpenRouterClient:
                         f"content chars={len(content)}, reasoning tokens={details.get('reasoning_tokens')}): "
                         f"{content[:120]!r}"
                     ) from exc
+            except OpenCodeError as exc:
+                last_error = exc
+                if not exc.transient:
+                    break
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
                 last_error = RuntimeError(f"HTTP {exc.code}: {detail}")

@@ -147,6 +147,23 @@ def openai_transport(config: LLMConfig, api_key: str) -> Transport:
     return call
 
 
+def opencode_transport(config: LLMConfig) -> Transport:
+    """Transport for ``opencode:<provider>/<model>``: the OpenCode login of a ChatGPT subscription."""
+    from utils.opencode_clean import OpenCodeError, flatten_messages, shared_server
+
+    def call(body: dict[str, Any]) -> dict[str, Any]:
+        variant = None if config.reasoning == "default" else config.reasoning
+        try:
+            text = shared_server(config.model).generate(flatten_messages(body["messages"]), config.model, variant,
+                                                        timeout=config.timeout_sec)
+        except OpenCodeError as error:
+            raise (LLMTransientError if error.transient else LLMError)(str(error)) from error
+        return {"model": config.model, "choices": [{"message": {"content": text}, "finish_reason": "stop"}],
+                "usage": {}}
+
+    return call
+
+
 @dataclass
 class LLMClient:
     config: LLMConfig
@@ -226,7 +243,8 @@ class LLMClient:
                 body["reasoning_effort"] = cfg.reasoning
         with self._lock:
             if self.transport is None:
-                self.transport = openai_transport(cfg, load_api_key(cfg.api_key_env, self.env_file))
+                self.transport = opencode_transport(cfg) if cfg.model.startswith("opencode:") else \
+                    openai_transport(cfg, load_api_key(cfg.api_key_env, self.env_file))
             transport = self.transport
         attempt = 0
         while True:
