@@ -55,3 +55,14 @@ def test_space_after_glued_ellipsis() -> None:
     assert space_after_ellipsis("хотят…хотят меня") == "хотят… хотят меня"
     assert space_after_ellipsis("Но... но племя") == "Но... но племя"
     assert space_after_ellipsis("...разговор...") == "... разговор..."
+
+
+def test_keep_yo_spelling_of_homographs() -> None:
+    from voiceover.normalize import keep_yo_spelling
+
+    yo = {"все": "всё", "узнаем": "узнаём"}
+    accents = {"все": "вс+е", "всё": "вс+ё"}
+    accented = "Вс+ё хвал+или. Гд+е вс+ё? Всё хорош+о, ещё раз."
+    assert keep_yo_spelling("Все хвалили. Где все? Всё хорошо, ещё раз.", accented, yo, accents) == \
+        "Вс+е хвал+или. Гд+е вс+е? Всё хорош+о, ещё раз."
+    assert keep_yo_spelling("Мы узнаем", "Мы узна+ём", yo, accents) == "Мы узна+ем"

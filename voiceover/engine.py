@@ -194,6 +194,8 @@ class VoskEngine:
                     "accent": f"ruaccent/{importlib.metadata.version('ruaccent')}" if enabled else None,
                     "punctuation_map": "vosk_text.normalize_vosk_text",
                     "prepare_version": 2,  # bump when the preparation code changes engine texts
+                    **({"keep_input_yo_homographs": True} if self.normalization.get("keep_input_yo_homographs")
+                       else {}),
                     **({"stress_dict_sha256": _sha256_text(json.dumps(self._stress_dict(), ensure_ascii=False,
                                                                        sort_keys=True))}
                        if self._stress_dict() else {}),
@@ -283,7 +285,12 @@ class VoskEngine:
                 results.append(PreparedText(cue_id, display, normalize_vosk_text(text), "accent_failed", errors[index],
                                             notes[index], voice=item.get("voice")))
             else:
-                text = normalize_vosk_text(accented[index] or "")
+                text = accented[index] or ""
+                if self.normalization.get("keep_input_yo_homographs"):
+                    from voiceover.normalize import keep_yo_spelling
+                    text = keep_yo_spelling(expanded[index]["_normalized_text"], text,  # type: ignore[index]
+                                            self._accentizer.yo_homographs, self._accentizer.accents)
+                text = normalize_vosk_text(text)
                 sentence_fixes = self._stress_dict().get("sentences")
                 if sentence_fixes:
                     from voiceover.stress_check import apply_sentence_fixes

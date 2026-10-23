@@ -185,22 +185,15 @@ class Episode:
         if code != 0:
             raise SystemExit(f"{name} failed (exit {code}), see {log_path}")
 
-    def stress(self) -> None:
-        cfg = self.config["voiceover"]
-        if not cfg.get("stress_check", True):
-            save_json(self.out / "stress.json", {"schema": "voiceover-stress-v3", "skipped": True})
-            return
-        self._module("stress", "voiceover.stress_check", [
-            str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str((self.out / "stress.json").resolve()),
-            "--config", str(REPO_ROOT / cfg.get("config", "voiceover_config.json"))])
-
-    def voiceover(self) -> None:
+    def _voiceover_config(self) -> Path:
+        """voiceover_config.json with this run's engine, voices, text preparation and timing; saved per engine."""
         cfg = self.config["voiceover"]
         vo_config = load_json(REPO_ROOT / cfg.get("config", "voiceover_config.json"))
         engine = {k: v for k, v in self._engine().items() if k != "voices"}
         if "sample_rate" in engine:  # export rate of the track (TeraTTS speaks at 44.1 kHz)
             vo_config["export"] = {**vo_config.get("export", {}), "sample_rate": int(engine.pop("sample_rate"))}
-        normalization = {**vo_config["engine"].get("normalization", {}), **engine.pop("normalization", {})}
+        normalization = {**vo_config["engine"].get("normalization", {}), **cfg.get("normalization", {}),
+                         **engine.pop("normalization", {})}
         if (self.out / "stress.json").exists():
             normalization["stress_dict"] = str((self.out / "stress.json").resolve())
         vo_config["engine"] = {**vo_config["engine"], **engine, "name": self.engine, "normalization": normalization,
@@ -209,6 +202,19 @@ class Episode:
             vo_config[section] = {**vo_config.get(section, {}), **cfg.get(section, {})}
         config_path = self.out / f"voiceover.{self.engine}.config.json"
         save_json(config_path, vo_config)
+        return config_path
+
+    def stress(self) -> None:
+        cfg = self.config["voiceover"]
+        if not cfg.get("stress_check", True):
+            save_json(self.out / "stress.json", {"schema": "voiceover-stress-v3", "skipped": True})
+            return
+        self._module("stress", "voiceover.stress_check", [  # the texts exactly as this engine prepares them
+            str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str((self.out / "stress.json").resolve()),
+            "--config", str(self._voiceover_config().resolve())])
+
+    def voiceover(self) -> None:
+        config_path = self._voiceover_config()
         self._reset_voiceover_dir()
         self._module(f"voiceover.{self.engine}", "voiceover.pipeline", [
             "run", str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str(self.vo_dir.resolve()),

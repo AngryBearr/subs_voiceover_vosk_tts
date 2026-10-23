@@ -79,3 +79,32 @@ def expand(text: str) -> Expanded:
     guard(text, result)
     notes = tuple(f"{original!r}: {reason}" for _start, _end, original, reason in flag_uncertain(text))
     return Expanded(result, result != text, notes)
+
+
+_ACCENTED_WORD_RE = re.compile(r"[А-Яа-яЁё+]+")
+_SOURCE_WORD_RE = re.compile(r"[А-Яа-яЁё]+")
+
+
+def keep_yo_spelling(source: str, accented: str, yo_homographs: dict[str, str], accents: dict[str, str]) -> str:
+    """Undo RUAccent's е -> ё in words that are spelled both ways (все / всё), keeping the source.
+
+    For text whose author already writes ё (the LLM translation) the source spelling is the
+    better guess: RUAccent's model turned "Все хвалили", "Где все?" into "всё".
+    """
+    source_words = iter(_SOURCE_WORD_RE.findall(source))
+
+    def fix(match: re.Match[str]) -> str:
+        token = match.group(0)
+        plain = token.replace("+", "")
+        original = next(source_words, None)
+        if original is None or "ё" in original.lower() or "ё" not in plain.lower() \
+                or plain.lower().replace("ё", "е") != original.lower() or original.lower() not in yo_homographs:
+            return token
+        stressed = accents.get(original.lower())
+        if not stressed or stressed.replace("+", "") != original.lower():
+            yo = plain.lower().index("ё")
+            stressed = original.lower()[:yo] + "+" + original.lower()[yo:]
+        position = stressed.index("+")
+        return original[:position] + "+" + original[position:]
+
+    return _ACCENTED_WORD_RE.sub(fix, accented)

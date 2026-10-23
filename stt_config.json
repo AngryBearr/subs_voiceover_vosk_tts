@@ -26,6 +26,7 @@
     },
     "policy": {"base_syl_per_sec": 5.0, "target_lag_ms": 250, "weight_early": 5.0},
     "units": {"enabled": false},
+    "normalization": {"keep_input_yo_homographs": true},
     "stress_check": true,
     "speech_check": true
   },
