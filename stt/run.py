@@ -287,7 +287,10 @@ class Episode:
         review = self.out / "review.json"
         if self.config.get("review", True) and (
                 not review.exists() or review.stat().st_mtime < (self.out / "subs.ru.json").stat().st_mtime):
-            self._module("review", "stt.review", [str(self.out.resolve())])  # lines to check by ear
+            try:  # lines to check by ear: a help for a person, never a reason to stop the episode
+                self._module("review", "stt.review", [str(self.out.resolve())])
+            except SystemExit as error:
+                log.warning("[%s] %s", self.media.stem, error)
 
     def mix(self) -> None:
         from stt import mix
@@ -298,15 +301,15 @@ class Episode:
                 "--duck-db", str(cfg["duck_db"])]
         if cfg.get("duck") == "voices":  # lower only the original voices, keep music and effects
             argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 3.0))]
-        if self.args.start:
-            argv += ["--start", str(self.args.start)]
+        if self.args.start:  # a test piece: the voice-over is on the episode timeline from 0
+            argv += ["--start", str(self.args.start), "--voice-from-zero"]
         crowd = self.config.get("crowd", {})
         if crowd.get("enabled"):  # experimental: cheers/chants by several voices, under the voice-over
             from stt import crowd as crowd_layer
 
             crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 3))])
             argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -4.0)}"]
-        if cfg.get("mux") and not self.args.start:
+        if cfg.get("mux"):  # a test piece gets a short re-encoded video of the piece
             argv += ["--mux", str(self.out / f"{self.media.stem}.ru.{self.engine}.mkv")]
             if cfg.get("subtitles", True):  # Russian subtitles as a track of the mkv
                 argv += ["--srt", str(self.out / "subs.ru.srt")]

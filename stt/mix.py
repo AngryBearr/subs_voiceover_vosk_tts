@@ -84,14 +84,20 @@ def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: f
     return out.astype(np.float32)
 
 
-def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None) -> None:
-    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(video), "-i", str(mixed_wav)]
-    if srt:
+def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None, start: float = 0.0,
+        duration: float | None = None) -> None:
+    """Video copy with the mix as the first audio track; a test piece (``start``) is cut and re-encoded."""
+    piece = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}"] if start and duration else []
+    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *piece, "-i", str(video), "-i", str(mixed_wav)]
+    if srt and not piece:  # subtitle times are on the episode timeline
         cmd += ["-i", str(srt)]
+    else:
+        srt = None
     cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "0:a:0"]
     if srt:
         cmd += ["-map", "2:s:0", "-c:s", "srt", "-metadata:s:s:0", "language=rus"]
-    cmd += ["-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "copy",
+    video_codec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"] if piece else ["-c:v", "copy"]
+    cmd += [*video_codec, "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "aac" if piece else "copy",
             "-metadata:s:a:0", "language=rus", "-metadata:s:a:0", "title=Russian voice-over",
             "-metadata:s:a:1", "title=Original", "-disposition:a:0", "default", "-disposition:a:1", "0",
             str(out)]
@@ -104,6 +110,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("voice", help="Voice-over WAV aligned to the media timeline (e.g. voiceover export/track.wav)")
     parser.add_argument("--out", required=True, help="Mixed WAV")
     parser.add_argument("--start", type=float, default=0.0, help="Media start of the voice track, seconds")
+    parser.add_argument("--voice-from-zero", action="store_true",
+                        help="The voice track is on the media timeline from 0 (a test piece of stt.run): "
+                             "its first --start seconds are dropped")
     parser.add_argument("--duck-db", type=float, default=12.0, help="How much to lower the original under speech")
     parser.add_argument("--duck-voices-only", action="store_true",
                         help="Lower only the original voices (Hybrid Demucs), keep music and effects")
@@ -122,6 +131,8 @@ def main(argv: list[str] | None = None) -> None:
     voice, voice_sr = sf.read(args.voice, dtype="float32", always_2d=False)
     if voice.ndim == 2:
         voice = voice.mean(axis=1)
+    if args.voice_from_zero and args.start:
+        voice = voice[int(args.start * voice_sr):]
     voice = _resample(voice, voice_sr, args.sample_rate)
     duration = len(voice) / args.sample_rate
     original = load_audio(args.media, start=args.start, duration=duration, sample_rate=args.sample_rate, channels=2)
@@ -148,7 +159,8 @@ def main(argv: list[str] | None = None) -> None:
         sf.write(str(out_path.with_suffix(".mp3")), out, args.sample_rate, format="MP3")
     log.info("Mixed %.1f s -> %s", duration, out_path)
     if args.mux:
-        mux(Path(args.media), out_path, Path(args.mux), Path(args.srt) if args.srt else None)
+        mux(Path(args.media), out_path, Path(args.mux), Path(args.srt) if args.srt else None,
+            args.start, duration if args.start else None)
         log.info("Muxed -> %s", args.mux)
 
 

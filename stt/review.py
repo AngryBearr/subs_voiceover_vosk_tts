@@ -51,8 +51,10 @@ def _clock(seconds: float) -> str:
 
 
 def suspects(records: list[dict[str, Any]], speakers: list[dict[str, Any]], audio: np.ndarray, rate: int,
-             gender_of: Any, embed: Any, skip: set[int] = frozenset()) -> list[dict[str, Any]]:
-    """Suspicious voiced lines; ``gender_of(audio) -> (p_female, p_male)``, ``embed(audio, rate) -> unit vector``."""
+             gender_of: Any, embed: Any, skip: set[int] = frozenset(), offset: float = 0.0) -> list[dict[str, Any]]:
+    """Suspicious voiced lines; ``gender_of(audio) -> (p_female, p_male)``, ``embed(audio, rate) -> unit vector``.
+
+    ``offset``: media time of the first sample of ``audio`` (a test piece starts mid-episode)."""
     from stt.voice_bank import _unit
 
     cards = {s["id"]: s for s in speakers}
@@ -62,7 +64,9 @@ def suspects(records: list[dict[str, Any]], speakers: list[dict[str, Any]], audi
         if r["index"] in skip or not " ".join(r["text"]).strip():
             continue
         start, end = r["start"] / 1000, r["end"] / 1000
-        segment = audio[int(start * rate):int(end * rate)]
+        segment = audio[max(0, int((start - offset) * rate)):max(0, int((end - offset) * rate))]
+        if len(segment) < rate // 10:  # outside the decoded audio
+            continue
         voice = r.get("gender")
         entry: dict[str, Any] = {}
         if end - start >= MIN_GENDER_S and voice in ("male", "female"):
@@ -117,6 +121,8 @@ def review(folder: Path, device: str = "cuda") -> list[dict[str, Any]]:
     report = folder / "dub.report.json"
     skip = {s["index"] for s in load_json(report).get("skipped", [])} if report.exists() else set()
     audio, rate = sf.read(str(folder / "audio.wav"), dtype="float32")
+    source = folder / "source.json"
+    offset = float(load_json(source).get("start") or 0.0) if source.exists() else 0.0
     estimator = AgeGenderEstimator(device)
     estimator.load()
 
@@ -124,7 +130,7 @@ def review(folder: Path, device: str = "cuda") -> list[dict[str, Any]]:
         _, probs = estimator.predict(segment)
         return float(probs[0]), float(probs[1])
 
-    items = suspects(records, speakers, audio, rate, gender_of, SegmentEmbedder(device), skip)
+    items = suspects(records, speakers, audio, rate, gender_of, SegmentEmbedder(device), skip, offset)
     write_review(folder, items)
     log.info("review: %d of %d lines to check (%d with both signals) -> %s", len(items), len(records),
              sum(i["both_signals"] for i in items), folder / "review.json")
