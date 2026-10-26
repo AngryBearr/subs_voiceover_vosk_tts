@@ -274,7 +274,10 @@ moves there before the words get their speakers. Measured against SDH speaker la
 Australian Survivor S10 (mostly off-screen or unclear voices): voiced cues on their person's main
 speaker 63.5% -> 71.1% on E01/E12/E16 (249 lines), diarization turns 63.6% -> 68.8% on all 24
 episodes (1300 lines); 10-28 cues per episode change the voice gender. Splitting speakers into
-sub-voices and the CAM++ model did worse. Gender/age: `audeering/wav2vec2-large-robust-24-ft-age-gender`
+sub-voices and the CAM++ model did worse. An LLM check of the speaker of each line (gpt-6.1-sol reading the
+conversation with named speakers, fixing lines like "Get him, George!" on George) proposed 22-33
+fixes per episode but changed nothing on the SDH-labelled lines, and the line's own voice was
+closer to the new speaker in only 26 of 62 fixes it could judge: not used. Gender/age: `audeering/wav2vec2-large-robust-24-ft-age-gender`
 (CC-BY-NC-SA-4.0, abstains below 0.7).
 
 Benchmarked and dropped (summary below): Parakeet v2/v3/Unified/TDT 1.1B, Canary 1B v2/180M/Qwen
