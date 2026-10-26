@@ -15,15 +15,25 @@ The first goal: any episode of a season, from the video to the mkv, without manu
   Vosk voice-over 10-14 min on the CPU), then TeraTTS 29 min for the four (voice-over 4-5 min
   each). No failures, no fallback to OrcaRouter needed. Character errors: Vosk 0.57-1.06%,
   TeraTTS 0.50-0.97%; the voice bank found no naming conflicts across the four episodes.
+- Done since (26.10): speaker refinement by WeSpeaker ResNet293 (voiced cues on their person's
+  main speaker 63.5% -> 71.1% on S10 SDH labels), ducking only the original voices, the browser
+  UI (processing, voice bank, review), the review list with corrections, ESpeech F5 engine.
 - Known weak spot: diarization merges similar voices. S29E01 has one voice cluster with two
   women (Jaclyn and Baylor), so one of them gets the other's name and voice. The season
   speaker bank (below) is the planned fix.
 
 ## 2. Season speaker bank
 
-First part done (`stt.voice_bank`, see `docs/stt_local.md`): prints, matches as LLM
-evidence, naming of unnamed clusters, conflicts, sample lists. Still open: splitting a
-cluster that holds two voices. Reference clips: `--export` (scored by voice similarity).
+Done (`stt.voice_bank`, see `docs/stt_local.md`): prints, matches as LLM evidence, naming of
+unnamed clusters, conflicts, season re-check, clean reference clips (5-9 s, one voice, music
+removed, Whisper transcript), UI tab with "another clip". Splitting a cluster into sub-voices
+was tried on S10 and lost accuracy (one person's narration and on-location voice split too).
+
+Open: **the season's cast list as evidence.** A cheap LLM with web search finds the cast of the
+season (names, spelling, gender, relations such as twins or parent and child) once per season;
+the speaker naming and the voice bank check their names against it (a name not in the cast is
+a likely ASR mistake, a gender that contradicts the cast is a likely clustering mistake).
+Idea of the user, 26.10.
 
 Keep a voice print per named person across the episodes of a season:
 
@@ -38,7 +48,12 @@ Keep a voice print per named person across the episodes of a season:
 
 ## 3. A voice per main character (voice cloning)
 
-Only after section 1: when whole episodes are stable on Vosk and TeraTTS.
+Done (26.10): engine "f5" (UI "ESpeech (голоса героев)"), clips from the voice bank, fallback
+voices for people without a clip, leaked reference speech cut off. S29E03: 19 min per episode,
+1.5% character errors (Vosk 0.6%, TeraTTS 0.5%); liked by ear. Open: several clips per person
+(calm / excited) only if they can be picked reliably; licences of ESpeech and the clips.
+
+History of the measurements:
 
 Measured: ESpeech-TTS-1_RL-V2 (F5-TTS trained for Russian, accepts `+` stress marks),
 reference = 8 s of an English confessional of Jon Misch + 1 s of silence and its transcript,
@@ -85,6 +100,13 @@ in Russian.
 Open problems: picking clean references automatically (reality TV is loud and emotional),
 music under the reference (ClearerVoice separation?), licences of the models.
 
+## 3b. Translation check before voicing
+
+A pass of a strong model over the finished translation of an episode: names and terms as in the
+glossary, gender agreement of every line with its speaker, lines that lost their meaning when
+shortened. Only worth it if it measurably reduces errors heard in the voice-over (the LLM check
+of line speakers did not, see `docs/stt_local.md`); measure on a few episodes first.
+
 ## 4. Vosk TTS 0.11
 
 Shmyrev's table of 20.10.2026 lists Vosk TTS 0.11: same speed as 0.10, fewer stress errors
@@ -125,6 +147,10 @@ So that a new user only clones the branch, runs one script and then works in the
 - **DiariZen Large MD v2**: best open model in Shmyrev's Russian telephony benchmark (13.6% vs
   21.6% for pyannote community-1). The older DiariZen was as accurate as pyannote on Survivor
   and 2.5x slower; v2 is worth one run on S29E01 against the SDH speaker labels.
+
+- **Look again on GitHub / Hugging Face** for diarization and speaker-embedding models newer
+  than pyannote community-1 and WeSpeaker ResNet293 (the S10 SDH benchmark,
+  `stt.refine_speakers sdh`, measures any of them in minutes).
 
 ## Not planned
 
