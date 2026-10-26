@@ -57,14 +57,25 @@ def speech_envelope(voice: np.ndarray, sample_rate: int, *, threshold_db: float 
 
 
 def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: float = 12.0,
-        voice_gain_db: float = 0.0, extra: list[tuple[np.ndarray, float]] | None = None) -> np.ndarray:
-    """Stereo mix: original * ducking gain + voice (centered) + `extra` layers (not ducking)."""
+        voice_gain_db: float = 0.0, extra: list[tuple[np.ndarray, float]] | None = None,
+        voices: np.ndarray | None = None, rest_duck_db: float = 3.0) -> np.ndarray:
+    """Stereo mix: original * ducking gain + voice (centered) + `extra` layers (not ducking).
+
+    With ``voices`` (the original's vocal stem, same shape) only the voices are ducked by
+    ``duck_db``; music and effects (original - voices) only by ``rest_duck_db``.
+    """
     length = max([len(original), len(voice)] + [len(e) for e, _ in extra or []])
     original = np.pad(original, ((0, length - len(original)), (0, 0)))
     voice = np.pad(voice, (0, length - len(voice)))
     env = speech_envelope(voice, sample_rate)
     duck = 1.0 - (1.0 - 10 ** (-duck_db / 20)) * env
-    out = original * duck[:, None] + (voice * 10 ** (voice_gain_db / 20))[:, None]
+    if voices is not None:
+        voices = np.pad(voices[:length], ((0, length - min(length, len(voices))), (0, 0)))
+        duck_rest = 1.0 - (1.0 - 10 ** (-rest_duck_db / 20)) * env
+        out = (original - voices) * duck_rest[:, None] + voices * duck[:, None]
+    else:
+        out = original * duck[:, None]
+    out = out + (voice * 10 ** (voice_gain_db / 20))[:, None]
     for layer, gain_db in extra or []:
         out += (np.pad(layer, (0, length - len(layer))) * 10 ** (gain_db / 20))[:, None]
     peak = float(np.max(np.abs(out))) if len(out) else 0.0
@@ -94,6 +105,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", required=True, help="Mixed WAV")
     parser.add_argument("--start", type=float, default=0.0, help="Media start of the voice track, seconds")
     parser.add_argument("--duck-db", type=float, default=12.0, help="How much to lower the original under speech")
+    parser.add_argument("--duck-voices-only", action="store_true",
+                        help="Lower only the original voices (Hybrid Demucs), keep music and effects")
+    parser.add_argument("--rest-duck-db", type=float, default=3.0,
+                        help="With --duck-voices-only: how much music and effects go down under speech")
     parser.add_argument("--voice-gain-db", type=float, default=0.0)
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--mp3", action="store_true", help="Also write an MP3 next to the WAV")
@@ -116,8 +131,16 @@ def main(argv: list[str] | None = None) -> None:
         layer, layer_sr = sf.read(path, dtype="float32", always_2d=False)
         layers.append((_resample(layer.mean(axis=1) if layer.ndim == 2 else layer, layer_sr, args.sample_rate),
                        float(gain or 0.0)))
+    voices = None
+    if args.duck_voices_only:
+        from stt.separate import VocalSeparator
+
+        separator = VocalSeparator()
+        stem = separator.separate_long(_resample(original, args.sample_rate, separator.rate).T)
+        voices = _resample(stem.T, separator.rate, args.sample_rate)[: len(original)]
+        log.info("Separated the original voices (%.1f min)", len(original) / args.sample_rate / 60)
     out = mix(original, voice, args.sample_rate, duck_db=args.duck_db, voice_gain_db=args.voice_gain_db,
-              extra=layers)
+              extra=layers, voices=voices, rest_duck_db=args.rest_duck_db)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), out, args.sample_rate, subtype="PCM_16")

@@ -327,32 +327,6 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^\w.-]+", "_", name).strip("_") or "speaker"
 
 
-class VocalSeparator:
-    """Hybrid Demucs (torchaudio, MUSDB-HQ + extra data): the vocal stem of a stereo stretch."""
-
-    def __init__(self, device: str = "cuda") -> None:
-        import torch
-        import torchaudio
-
-        bundle = torchaudio.pipelines.HDEMUCS_HIGH_MUSDB_PLUS
-        self._torch = torch
-        self.device = device
-        self.model = bundle.get_model().to(device).eval()
-        self.rate = int(bundle.sample_rate)
-        self.vocals = list(self.model.sources).index("vocals")
-
-    def __call__(self, stereo: np.ndarray) -> tuple[np.ndarray, float]:
-        """(vocals, accompaniment level relative to the vocals in dB) of a (2, n) stretch at ``rate``."""
-        x = self._torch.from_numpy(np.ascontiguousarray(stereo, dtype=np.float32)).to(self.device)
-        ref = x.mean(0)
-        mean, std = ref.mean(), ref.std() + 1e-8
-        with self._torch.inference_mode():
-            vocals = (self.model(((x - mean) / std)[None])[0, self.vocals] * std + mean)
-        rest = x - vocals
-        level = 10 * np.log10(float((rest ** 2).mean() + 1e-12) / float((vocals ** 2).mean() + 1e-12))
-        return vocals.cpu().numpy(), round(level, 1)
-
-
 def _read_media(media: str, start: float, duration: float, rate: int, channels: int) -> np.ndarray:
     """(channels, n) float32 samples of a stretch of the original video's audio."""
     from utils.ffmpeg import ffmpeg_exe
@@ -393,6 +367,8 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> l
     """
     import soundfile as sf
     import soxr
+
+    from stt.separate import VocalSeparator
 
     embed = SegmentEmbedder(device)
     separate = VocalSeparator(device)

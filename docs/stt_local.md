@@ -236,8 +236,11 @@ stage.
    speaker or inside a rapid exchange (S10E01: 36 of 1180): they stay audible in the original.
 4. The voice-over timeline solver never lets two Russian lines collide: it shifts lines within
    −360/+500 ms, speeds them up to a comfort limit and asks for shorter text only when needed.
-5. The original track stays under the voice, lowered by 12 dB only while the voice speaks, so
-   crowd noise and overlapping voices remain audible.
+5. The original track stays under the voice. By default (`"mix": {"duck": "voices"}`) Hybrid
+   Demucs (`stt.separate`) splits it into voices and everything else, and only the voices go
+   12 dB down while the Russian voice speaks; music and effects only 3 dB (`rest_duck_db`), so
+   the scene keeps its sound (43-min episode: 40 s on the GPU). `"duck": "all"` lowers the whole
+   original by 12 dB as before. `"subtitles": false` leaves the Russian subtitles out of the mkv.
 6. Experimental crowd layer (`"crowd": {"enabled": true}`, `stt.crowd`): skipped interjections of
    two or more speakers within 2 s, or chants ("Go, go, go!"), are said by three TTS voices at
    once with 70 ms offsets, 4 dB under the voice-over, and added to the mix without ducking the

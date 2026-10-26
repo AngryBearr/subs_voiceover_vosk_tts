@@ -296,6 +296,8 @@ class Episode:
         out_wav = self.out / f"{self.media.stem}.ru.{self.engine}.wav"
         argv = [str(self.media), str(self.vo_dir / "export" / "track.wav"), "--out", str(out_wav),
                 "--duck-db", str(cfg["duck_db"])]
+        if cfg.get("duck") == "voices":  # lower only the original voices, keep music and effects
+            argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 3.0))]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
         crowd = self.config.get("crowd", {})
@@ -305,8 +307,9 @@ class Episode:
             crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 3))])
             argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -4.0)}"]
         if cfg.get("mux") and not self.args.start:
-            argv += ["--mux", str(self.out / f"{self.media.stem}.ru.{self.engine}.mkv"),
-                     "--srt", str(self.out / "subs.ru.srt")]
+            argv += ["--mux", str(self.out / f"{self.media.stem}.ru.{self.engine}.mkv")]
+            if cfg.get("subtitles", True):  # Russian subtitles as a track of the mkv
+                argv += ["--srt", str(self.out / "subs.ru.srt")]
         mix.main(argv)
 
 
