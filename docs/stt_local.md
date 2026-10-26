@@ -35,6 +35,12 @@ subs_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --until du
 subs_env/bin/python -m stt.run ep01.mkv
 ```
 
+Browser UI: `subs_env/bin/python -m ui.dub_app` (http://127.0.0.1:7861). Tab "Обработка":
+episodes of a folder, engines, recognition mode, LLM, "embed subtitles", "duck only voices",
+stress check and speaker refinement; "test piece" voices N minutes from minute M into
+`<out>/_проба` (with a short video) to try settings quickly. One job at a time, engines one after
+the other; progress per episode and stage, the log, the finished files.
+
 Defaults live in `stt_config.json` (mode, models, OCR, LLM, TTS engine and voices, checks,
 ducking). Stages already done are skipped; `--force STAGE` recomputes it and the following
 ones; `--mode fast` uses Whisper only.
