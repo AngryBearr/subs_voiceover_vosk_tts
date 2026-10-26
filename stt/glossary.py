@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--reasoning", default="medium", choices=["default", "off", "minimal", "low", "medium", "high"]
     )
+    parser.add_argument("--cast", default=None, help="Season cast JSON (stt.cast): spellings of the people")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
@@ -81,6 +82,11 @@ def main(argv: list[str] | None = None) -> None:
     transcript = "\n".join(f"{r.get('speaker') or '??'}: {' '.join(r['text'])}" for r in records)
     client = OpenRouterClient(args.model, reasoning=None if args.reasoning == "default" else args.reasoning)
     prompt = "Existing glossary:\n" + json.dumps(existing, ensure_ascii=False) + "\n\nTranscript:\n" + transcript
+    if args.cast and Path(args.cast).exists():
+        from stt.cast import cast_text
+
+        prompt = ("Cast of the season (from the web; use these spellings for people):\n"
+                  + cast_text(load_json(Path(args.cast))) + "\n\n" + prompt)
     answer = client.chat_json(SYSTEM_PROMPT, prompt)
     entries = merge(existing, answer.get("entries", []) if isinstance(answer, dict) else answer)
     write_outputs(folder, entries)

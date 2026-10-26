@@ -176,9 +176,10 @@ class OpenRouterClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
             "usage": {"include": True},
         }
+        if not self.bare_model.endswith(":online"):  # web search (":online") refuses JSON mode
+            body["response_format"] = {"type": "json_object"}
         if self.reasoning == "off":
             body["reasoning"] = {"enabled": False}
         elif self.reasoning:

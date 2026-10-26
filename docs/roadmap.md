@@ -29,11 +29,11 @@ unnamed clusters, conflicts, season re-check, clean reference clips (5-9 s, one 
 removed, Whisper transcript), UI tab with "another clip". Splitting a cluster into sub-voices
 was tried on S10 and lost accuracy (one person's narration and on-location voice split too).
 
-Open: **the season's cast list as evidence.** A cheap LLM with web search finds the cast of the
-season (names, spelling, gender, relations such as twins or parent and child) once per season;
-the speaker naming and the voice bank check their names against it (a name not in the cast is
-a likely ASR mistake, a gender that contradicts the cast is a likely clustering mistake).
-Idea of the user, 26.10.
+Done (26.10, idea of the user): **the season's cast list from the web** (`stt.cast`) as
+evidence for the glossary and the speaker naming, and a check of the names after it. No
+measurable gain in names on S10/S29 (they were mostly right already), one spelling per person,
+$0.01-0.03 per season; the web lookup got one gender wrong of 45 people, so gender conflicts are
+only logged. Worth watching on less known seasons.
 
 Keep a voice print per named person across the episodes of a season:
 

@@ -185,10 +185,31 @@ class Episode:
             argv += ["--duration", str(self.args.duration)]
         transcribe.main(argv)
 
+    @property
+    def cast(self) -> Path:
+        """The season's cast from the web (stt.cast)."""
+        return self.voice_bank.with_name(self.voice_bank.name.replace(".voices.json", ".cast.json"))
+
+    def _find_cast(self) -> bool:
+        """Look the season's cast up once (cheap LLM with web search); a failure only costs the evidence."""
+        cfg = self.config.get("cast") or {}
+        if not cfg.get("enabled", True):
+            return False
+        if not self.cast.exists():
+            from stt import cast
+
+            model = (self.config.get("llm") or {}).get("stages", {}).get("cast") or cast.DEFAULT_MODEL
+            try:
+                cast.main([str(self.out), "--cast", str(self.cast), "--model", model])
+            except Exception as error:  # noqa: BLE001 - names still come from the transcript and the voices
+                log.warning("[%s] cast lookup failed: %s", self.media.stem, error)
+        return self.cast.exists()
+
     def glossary(self) -> None:
         from stt import glossary
 
-        glossary.main([str(self.out), "--season", str(self.season), "--model", self.llm("glossary")])
+        argv = [str(self.out), "--season", str(self.season), "--model", self.llm("glossary")]
+        glossary.main(argv + (["--cast", str(self.cast)] if self._find_cast() else []))
         # Plain-text copy of the season glossary for the next episode's ASR fusion prompt.
         lines = (self.out / "glossary.txt").read_text(encoding="utf-8")
         self.season.with_suffix(".txt").write_text(lines, encoding="utf-8")
@@ -199,6 +220,8 @@ class Episode:
         argv = [str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("speakers")]
         if (self.config.get("voice_bank") or {}).get("enabled", True):
             argv += ["--voice-bank", str(self.voice_bank)]
+        if self._find_cast():
+            argv += ["--cast", str(self.cast)]
         speakers.main(argv)
 
     def translate(self) -> None:

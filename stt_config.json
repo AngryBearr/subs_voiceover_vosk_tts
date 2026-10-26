@@ -12,10 +12,12 @@
     "router": "openrouter",
     "stages": {
       "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
-      "stress_screen": "openai/gpt-6-luna"
+      "stress_screen": "openai/gpt-6-luna",
+      "cast": "openrouter:openai/gpt-6-luna:online"
     }
   },
   "voice_bank": {"enabled": true},
+  "cast": {"enabled": true},
   "translate": {
     "cps": 14.0,
     "extend": 0.6,

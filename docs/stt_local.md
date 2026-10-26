@@ -229,6 +229,27 @@ twins Nadiya and Natalie Anderson match at 0.80), `--write-overrides` puts the r
 stages after it. Per-line prints show what such a cluster holds: S29E01's "Jaclyn" cluster
 matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own line only 0.45.
 
+### Cast of the season from the web
+
+Once per season (before the first glossary) a cheap LLM with web search,
+`openrouter:openai/gpt-6-luna:online` (`llm.stages.cast`), reads the show and season off the
+folder and file names and writes `<out-root>/<folder>.cast.json`: every person who speaks, with
+spellings, nicknames, gender, role and relations (twins, couples, parent and child). The
+glossary uses its spellings, the speaker naming gets it as evidence, and after naming
+`stt.cast.check_speakers` turns other spellings of a cast name into the cast's ("John Misch" ->
+"Jon Misch"), and logs names not in the cast and genders that contradict it (`cast_check` in
+`speakers.json`). The gender is never changed from the cast: the web is wrong too (S10 Stevie
+Khouw came back "female"; the voice and the transcript said male, correctly).
+
+Measured: 15-20 s and $0.01-0.03 per season; S29: 19 people, S10: 26. Names on the S10 SDH
+speaker labels (E01, E12, E16) were as right with the cast as without it (gpt-6.1-sol: 65.5% of
+labelled lines both ways; gpt-6-luna: 63.9-65.9% both ways over three runs, the spread is one
+cluster of E01). The S29E01-E04 names were already right. What it does give: one spelling per
+person across the season, a name for a small cluster the LLM left unnamed (S10E01, 11 lines),
+and a list to check names against for seasons the LLM knows less well. Off with
+`"cast": {"enabled": false}`; a failed lookup only logs a warning. Run by hand:
+`subs_env/bin/python -m stt.cast output/stt/<episode> --cast output/stt/<folder>.cast.json`.
+
 ## Checking by ear and fixing lines
 
 After the speech check, `stt.review` lists voiced lines that may have the wrong voice: the

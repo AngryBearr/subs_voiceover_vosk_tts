@@ -65,7 +65,8 @@ def _clock(ms: int) -> str:
 
 
 def build_prompt(
-    speakers: list[dict[str, Any]], records: list[dict[str, Any]], max_lines: int = 4000, glossary: str = ""
+    speakers: list[dict[str, Any]], records: list[dict[str, Any]], max_lines: int = 4000, glossary: str = "",
+    cast: str = "",
 ) -> str:
     table = [
         {
@@ -84,6 +85,8 @@ def build_prompt(
     ]
     lines = [f"[{_clock(r['start'])}] {r['speaker'] or '??'}: {' '.join(r['text'])}" for r in records[:max_lines]]
     head = f"Show glossary (use these spellings and Russian renderings):\n{glossary}\n\n" if glossary else ""
+    if cast:
+        head = f"Cast of the season (from the web: names, gender, relations):\n{cast}\n\n" + head
     return (
         head
         + "Speakers (acoustic estimates):\n"
@@ -143,7 +146,7 @@ def update_records(records: list[dict[str, Any]], speakers: list[dict[str, Any]]
 
 def name_speakers(
     folder: Path, model: str, *, use_llm: bool = True, reasoning: str | None = None, glossary: str = "",
-    bank_path: Path | None = None,
+    bank_path: Path | None = None, cast_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     speakers_path, subs_path = folder / "speakers.json", folder / "subs.en.json"
     speakers, records = load_json(speakers_path), load_json(subs_path)
@@ -152,7 +155,11 @@ def name_speakers(
         voice_bank.attach_matches(speakers, bank, folder.name)
     if use_llm:
         client = OpenRouterClient(model, reasoning=reasoning)
-        prompt = build_prompt([s for s in speakers if s.get("cues")], records, glossary=glossary)
+        cast = load_json(cast_path) if cast_path and cast_path.exists() else None
+        from stt.cast import cast_text
+
+        prompt = build_prompt([s for s in speakers if s.get("cues")], records, glossary=glossary,
+                              cast=cast_text(cast) if cast else "")
         answer = client.chat_json(SYSTEM_PROMPT, prompt)
         cards = answer.get("speakers", []) if isinstance(answer, dict) else answer
         save_json(folder / "speakers.llm.json", {"model": model, "usage": client.usage.to_dict(), "cards": cards})
@@ -161,6 +168,11 @@ def name_speakers(
     if bank is not None:
         for note in voice_bank.resolve(speakers):
             log.info("voice bank: %s", note)
+    if cast_path and cast_path.exists():  # cast spellings; names not in the cast and gender conflicts listed
+        from stt.cast import check_speakers
+
+        for note in check_speakers(speakers, load_json(cast_path)):
+            log.info("cast: %s", note)
     override_path = folder / "speakers.override.json"
     if override_path.exists():
         apply_overrides(speakers, load_json(override_path))
@@ -187,6 +199,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--no-llm", action="store_true", help="Only apply speakers.override.json")
     parser.add_argument("--glossary", default=None, help="glossary.txt from stt.glossary (canonical names)")
     parser.add_argument("--voice-bank", type=Path, default=None, help="Season voice bank (stt.voice_bank)")
+    parser.add_argument("--cast", type=Path, default=None, help="Season cast from the web (stt.cast)")
     parser.add_argument(
         "--reasoning",
         default="medium",
@@ -198,7 +211,7 @@ def main(argv: list[str] | None = None) -> None:
     reasoning = None if args.reasoning == "default" else args.reasoning
     glossary = Path(args.glossary).read_text(encoding="utf-8") if args.glossary else ""
     name_speakers(Path(args.folder), args.model, use_llm=not args.no_llm, reasoning=reasoning, glossary=glossary,
-                  bank_path=args.voice_bank)
+                  bank_path=args.voice_bank, cast_path=args.cast)
 
 
 if __name__ == "__main__":

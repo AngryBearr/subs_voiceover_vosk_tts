@@ -200,6 +200,31 @@ class RunTest(unittest.TestCase):
             self.assertEqual(ep.season.name, "Season 1.glossary.json")
         self.assertEqual(STAGES[-1], "mix")
 
+    def test_cast_lookup_once_per_season(self) -> None:
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ep = self._episode(tmp)
+            self.assertEqual(ep.cast.name, "Season 1.cast.json")
+            ep.cast.parent.mkdir(parents=True)
+            calls: list[list[str]] = []
+
+            def fake_main(argv: list[str]) -> int:
+                calls.append(argv)
+                Path(argv[argv.index("--cast") + 1]).write_text('{"cast": []}')
+                return 0
+
+            with mock.patch("stt.cast.main", side_effect=fake_main):
+                self.assertTrue(ep._find_cast())
+                self.assertTrue(ep._find_cast())  # the file is there: no second lookup
+            self.assertEqual(len(calls), 1)
+            self.assertIn("openrouter:openai/gpt-6-luna:online", calls[0])
+            ep.cast.unlink()
+            with mock.patch("stt.cast.main", side_effect=RuntimeError("no web")):
+                self.assertFalse(ep._find_cast())  # a failed lookup is only a warning
+            ep.config = {"cast": {"enabled": False}}
+            self.assertFalse(ep._find_cast())
+
     def test_llm_model_per_stage(self) -> None:
         import argparse
 
