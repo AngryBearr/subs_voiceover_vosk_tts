@@ -1,12 +1,17 @@
 """Speaker refinement after diarization: re-assign turns that sound clearly like another speaker.
 
 pyannote clusters sliding-window embeddings of a small model (WeSpeaker ResNet34). Here every
-turn gets one embedding of a stronger model, every speaker a centroid of its longer turns, and a
-turn that is clearly (``margin``) closer to another speaker's centroid moves there; speakers whose
-centroids are near-identical (``merge``) become one. Two passes.
+turn gets one embedding of a stronger model (WeSpeaker ResNet293), every speaker a centroid of
+its longer turns, and a turn that is clearly (``margin``) closer to another speaker's centroid
+moves there; speakers whose centroids are near-identical (``merge``) become one. Two passes.
+
+Australian Survivor S10, all 24 episodes, 1300 lines with an SDH speaker label (mostly
+off-screen or unclear voices), exclusive turns (what words are labelled by): lines on their
+person's main speaker 63.6% -> 68.8% (margin 0.1; 68.9% at 0.05), ~17 s per episode.
+VoxConverse: DER 11.87% -> 11.43%.
 
     subs_env/bin/python -m stt.refine_speakers bench --data output/stt_bench/diar_voxconverse \\
-        --hyp output/stt_bench/diar_voxconverse/hyp/pyannote-community-1 --models resnet293,campplus
+        --hyp output/stt_bench/diar_voxconverse/hyp/pyannote-community-1 --models resnet293,pyannote
 """
 
 from __future__ import annotations
@@ -23,38 +28,36 @@ import numpy as np
 log = logging.getLogger("stt.refine_speakers")
 
 RATE = 16_000
-EMBEDDERS: dict[str, tuple[str, str]] = {
-    "resnet293": ("Wespeaker/wespeaker-voxceleb-resnet293-LM", "voxceleb_resnet293_LM.onnx"),
-    "campplus": ("Wespeaker/wespeaker-voxceleb-campplus-LM", "voxceleb_CAM++_LM.onnx"),
+# WeSpeaker checkpoints loaded into pyannote's PyTorch port of the same architecture
+WESPEAKER: dict[str, tuple[str, str]] = {
+    "resnet293": ("Wespeaker/wespeaker-voxceleb-resnet293-LM", "WeSpeakerResNet293"),
 }
 
 Embed = Callable[[np.ndarray], np.ndarray]
 
 
-class WespeakerOnnx:
-    """WeSpeaker ONNX speaker model: Kaldi fbank (80 bins, mean-normalised) -> unit embedding."""
+class WespeakerTorch:
+    """A WeSpeaker model in pyannote's PyTorch port: 16 kHz audio -> unit embedding (~35 ms per turn).
+
+    The ONNX exports run 3-8x slower on turns of changing length (cuDNN falls back per shape)."""
 
     def __init__(self, name: str, device: str = "cuda") -> None:
-        import onnxruntime as ort
+        import pyannote.audio.models.embedding.wespeaker as wespeaker
+        import torch
         from huggingface_hub import hf_hub_download
 
-        repo, filename = EMBEDDERS[name]
-        if device == "cuda":
-            ort.preload_dlls()
-        # every turn has another length: the exhaustive cuDNN search per new shape would dominate the run
-        cuda = ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"})
-        providers = [cuda, "CPUExecutionProvider"] if device == "cuda" else ["CPUExecutionProvider"]
-        self.session = ort.InferenceSession(hf_hub_download(repo, filename), providers=providers)
+        repo, klass = WESPEAKER[name]
+        state = torch.load(hf_hub_download(repo, "avg_model.pt"), map_location="cpu")
+        model = getattr(wespeaker, klass)()
+        model.resnet.load_state_dict({k: v for k, v in state.items() if not k.startswith("projection")})
+        self.model = model.to(device).eval()
+        self.device = device
+        self._torch = torch
 
     def __call__(self, audio: np.ndarray) -> np.ndarray:
-        import torch
-        import torchaudio.compliance.kaldi as kaldi
-
-        wav = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))[None] * 32768
-        feats = kaldi.fbank(wav, num_mel_bins=80, frame_length=25, frame_shift=10, dither=0.0,
-                            sample_frequency=RATE, window_type="hamming", use_energy=False)
-        feats = feats - feats.mean(0, keepdim=True)
-        vector = self.session.run(None, {"feats": feats[None].numpy()})[0][0]
+        wav = self._torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))[None, None].to(self.device)
+        with self._torch.inference_mode():
+            vector = self.model(wav)[0].float().cpu().numpy()
         return vector / (np.linalg.norm(vector) + 1e-9)
 
 
@@ -64,7 +67,7 @@ def make_embedder(name: str, device: str = "cuda") -> Embed:
 
         embedder = SegmentEmbedder(device)
         return lambda audio: embedder(audio, RATE)
-    return WespeakerOnnx(name, device)
+    return WespeakerTorch(name, device)
 
 
 def _overlapping(turns: list[dict[str, Any]]) -> list[bool]:
@@ -135,6 +138,17 @@ def refine_turns(turns: list[dict[str, Any]], embed_turn: Callable[[dict[str, An
     return turns, stats
 
 
+def refine_diarization(audio: np.ndarray, diarization: dict[str, Any], model: str, margin: float,
+                       device: str = "cuda") -> dict[str, Any]:
+    """The diarization with refined speakers in its turns and exclusive turns (same embeddings cache)."""
+    embed_turn = turn_embedder(audio, make_embedder(model, device))
+    turns, stats = refine_turns(diarization["turns"], embed_turn, margin=margin)
+    exclusive, stats_x = refine_turns(diarization.get("exclusive") or [], embed_turn, margin=margin)
+    return {**diarization, "turns": turns, "exclusive": exclusive,
+            "refined": {"model": model, "margin": margin, "moved_turns": stats["moved"],
+                        "moved_exclusive": stats_x["moved"]}}
+
+
 def _der(ref: list[dict[str, Any]], hyp: list[dict[str, Any]], metric: Any) -> float:
     from pyannote.core import Annotation, Segment
 
@@ -180,6 +194,80 @@ def bench(data_dir: Path, hyp_dir: Path, models: list[str], margins: list[float]
     return rows
 
 
+def sdh_score(spans: list[tuple[str, float, float]], turns: list[dict[str, Any]]) -> dict[str, Any]:
+    """Labelled lines on their person's main speaker (line accuracy, time purity), people merged."""
+    from collections import Counter, defaultdict
+
+    from stt.sdh_eval import _GENERIC
+
+    lines: list[tuple[str, str, float]] = []  # (label, predicted speaker, seconds)
+    for label, start, end in spans:
+        if label in _GENERIC:
+            continue
+        cover: Counter[str] = Counter()
+        for t in turns:
+            overlap = min(end, t["end"]) - max(start, t["start"])
+            if overlap > 0:
+                cover[t["speaker"]] += overlap
+        if cover:
+            speaker, _ = cover.most_common(1)[0]
+            lines.append((label, speaker, end - start))
+    by_label: dict[str, Counter[str]] = defaultdict(Counter)
+    for label, speaker, seconds in lines:
+        by_label[label][speaker] += seconds
+    main = {label: c.most_common(1)[0][0] for label, c in by_label.items()}
+    owners = Counter(main.values())
+    return {"lines": len(lines), "correct": sum(main[label] == speaker for label, speaker, _ in lines),
+            "people": len(main), "merged": sum(1 for label in main if owners[main[label]] > 1)}
+
+
+def sdh_bench(media: list[Path], cache: Path, models: list[str], margins: list[float], device: str,
+              which: str = "turns") -> dict[str, dict[str, int]]:
+    """Per variant, summed over episodes: labelled lines on their person's main speaker, people merged."""
+    from stt.audio import load_audio, read_wav, save_wav
+    from stt.diarize import create_diarizer
+    from stt.sdh_eval import labelled_spans
+
+    diarizer = None
+    episodes = []
+    for path in media:
+        srt = path.with_name(path.stem + "_synced.srt")
+        if not srt.exists():
+            srt = path.with_suffix(".srt")
+        folder = cache / path.stem
+        folder.mkdir(parents=True, exist_ok=True)
+        if not (folder / "audio.wav").exists():
+            save_wav(folder / "audio.wav", load_audio(path, sample_rate=RATE, channels=1))
+        audio = read_wav(folder / "audio.wav")
+        if not (folder / "diarization.json").exists():
+            if diarizer is None:
+                diarizer = create_diarizer("pyannote-community-1", device=device)
+                diarizer.load()
+            (folder / "diarization.json").write_text(json.dumps(diarizer.diarize(audio).to_dict()), encoding="utf-8")
+        turns = json.loads((folder / "diarization.json").read_text(encoding="utf-8"))[which]
+        episodes.append((path.stem, audio, turns, labelled_spans(srt)))
+        log.info("%s: %d turns, %d labelled lines", path.stem, len(turns), len(episodes[-1][3]))
+    totals: dict[str, dict[str, int]] = {}
+
+    def add(variant: str, score: dict[str, Any]) -> None:
+        total = totals.setdefault(variant, {"lines": 0, "correct": 0, "people": 0, "merged": 0, "moved": 0})
+        for key in ("lines", "correct", "people", "merged"):
+            total[key] += score[key]
+
+    for name, _, turns, spans in episodes:
+        add("pyannote (as is)", sdh_score(spans, turns))
+    for model in models:
+        embed = make_embedder(model, device)
+        for name, audio, turns, spans in episodes:
+            embed_turn = turn_embedder(audio, embed)
+            for margin in margins:
+                refined, stats = refine_turns(turns, embed_turn, margin=margin)
+                variant = f"{model} margin {margin}"
+                add(variant, sdh_score(spans, refined))
+                totals[variant]["moved"] += stats["moved"]
+    return totals
+
+
 def _components(metric: Any) -> dict[str, float]:
     c = metric[:]
     return {"der": round(abs(metric), 4), "confusion": round(c["confusion"] / c["total"], 4),
@@ -193,12 +281,31 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("bench", help="DER on VoxConverse before/after refinement")
     b.add_argument("--data", type=Path, required=True)
     b.add_argument("--hyp", type=Path, required=True)
-    b.add_argument("--models", default="resnet293,campplus,pyannote")
+    b.add_argument("--models", default="resnet293,pyannote")
     b.add_argument("--margins", default="0.05,0.1,0.15")
     b.add_argument("--merges", default="none,0.8")
     b.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    d = sub.add_parser("sdh", help="Reality TV episodes: SDH speaker labels before/after refinement")
+    d.add_argument("media", nargs="+", help="Episodes (glob patterns); <name>_synced.srt or <name>.srt next to them")
+    d.add_argument("--cache", type=Path, default=Path("output/stt_bench/sdh"))
+    d.add_argument("--models", default="pyannote,resnet293")
+    d.add_argument("--margins", default="0.05,0.1,0.2")
+    d.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    d.add_argument("--turns", default="turns", choices=["turns", "exclusive"],
+                   help="Diarization turns (may overlap) or exclusive turns (what words are labelled by)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+    if args.cmd == "sdh":
+        import glob
+
+        media = sorted(Path(m) for pattern in args.media for m in (glob.glob(pattern) or [pattern]))
+        totals = sdh_bench(media, args.cache, args.models.split(","), [float(m) for m in args.margins.split(",")],
+                           args.device, args.turns)
+        print(f"{'variant':26} {'lines':>6} {'on own speaker':>15} {'people':>7} {'merged':>7} {'moved':>6}")
+        for variant, t in totals.items():
+            print(f"{variant:26} {t['lines']:6d} {t['correct'] / t['lines']:14.1%} {t['people']:7d} {t['merged']:7d} "
+                  f"{t['moved']:6d}")
+        return 0
     rows = bench(args.data, args.hyp, args.models.split(","), [float(m) for m in args.margins.split(",")],
                  [None if m == "none" else float(m) for m in args.merges.split(",")], args.device)
     print(f"{'model':18} {'margin':>6} {'merge':>6} {'DER':>7} {'confus':>7} {'moved':>6} {'merged':>6}")

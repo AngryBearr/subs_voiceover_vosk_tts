@@ -160,6 +160,9 @@ class Episode:
                 argv += ["--glossary", str(self.season.with_suffix(".txt"))]
         ocr = self.config.get("ocr", {})
         argv += ["--ocr-fps", str(ocr.get("fps", 2.0))] if ocr.get("enabled", True) else ["--no-ocr"]
+        refine = self.config.get("speaker_refine") or {}
+        if refine.get("model", "none") != "none":
+            argv += ["--refine-speakers", refine["model"], "--refine-margin", str(refine.get("margin", 0.1))]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
         if self.args.duration:

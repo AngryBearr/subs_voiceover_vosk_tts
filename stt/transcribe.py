@@ -7,6 +7,8 @@ Run from the repo root (each model stage runs in its own venv, results are cache
 Outputs in --out:
     audio.wav, chunks.json        decoded 16 kHz mono audio and VAD chunks
     diarization.<diarizer>.json   speaker turns (+ exclusive turns, speaker embeddings)
+    diarization.<diarizer>.refined.<model>.json   turns re-assigned by a stronger voice model
+                                  (--refine-speakers, stt.refine_speakers); used for the subtitles
     asr.<model>.json              ASR segments with word timings
     voice.<diarizer>.json         gender/age per diarized speaker
     words.json                    every word with time and speaker
@@ -129,6 +131,16 @@ def transcribe(args: argparse.Namespace) -> Path:
             diar_args += [flag, str(value)]
     diar_data = run_stage("diarize", DIARIZERS[args.diarizer].env, diar_args, diar_path, logs,
                           all_forced or "diarize" in stages)
+    if args.refine_speakers != "none":
+        refined_path = out / f"diarization.{args.diarizer}.refined.{args.refine_speakers}.json"
+        refine_args = ["refine", "--audio", audio, "--diarization", str(diar_path), "--out", str(refined_path),
+                       "--model", args.refine_speakers, "--margin", str(args.refine_margin), "--device", args.device]
+        stale = refined_path.exists() and (
+            load_json(refined_path).get("refined", {}).get("margin") != args.refine_margin
+            or refined_path.stat().st_mtime < diar_path.stat().st_mtime)
+        diar_data = run_stage("refine", "subs_env", refine_args, refined_path, logs,
+                              all_forced or "diarize" in stages or "refine" in stages or stale)
+        log.info("[refine] %s", diar_data.get("refined"))
 
     hotwords = None
     if args.hotwords_file:
@@ -282,6 +294,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-speakers", type=int, default=None)
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--gender-threshold", type=float, default=0.7, help="Min confidence, else 'unknown'")
+    parser.add_argument("--refine-speakers", default="none", choices=["none", "resnet293", "pyannote"],
+                        help="Re-assign diarized turns that sound clearly like another speaker (stt.refine_speakers)")
+    parser.add_argument("--refine-margin", type=float, default=0.1,
+                        help="How much closer to the other speaker a turn must sound to move")
     parser.add_argument("--hotwords-file", default=None,
                         help="Names/terms for ASR biasing (e.g. hotwords.txt from stt.glossary)")
     parser.add_argument("--fuse", default=None,

@@ -130,6 +130,18 @@ def run_voice(audio_path: Path, diarization_path: Path, out: Path, device: str, 
     )
 
 
+def run_refine(audio_path: Path, diarization_path: Path, out: Path, model: str, margin: float, device: str) -> None:
+    """Re-assign diarized turns that sound clearly like another speaker (stt.refine_speakers)."""
+    from stt.audio import read_wav
+    from stt.refine_speakers import refine_diarization
+
+    t0 = time.perf_counter()
+    data = refine_diarization(read_wav(audio_path), load_json(diarization_path), model, margin, device)
+    data["refine_s"] = round(time.perf_counter() - t0, 1)
+    log.info("refine: %s in %.1fs", data["refined"], data["refine_s"])
+    save_json(out, data)
+
+
 def run_align(audio_path: Path, asr_path: Path, out: Path, device: str, kind: str = "ctc") -> None:
     """Add forced-alignment word times to an ASR result that has none."""
     from stt.align import ALIGNER_MODEL, CTC_MODEL, CtcAligner, ForcedAligner
@@ -211,6 +223,14 @@ def main(argv: list[str] | None = None) -> None:
     p_voice.add_argument("--device", default="cuda")
     p_voice.add_argument("--threshold", type=float, default=0.7)
 
+    p_refine = sub.add_parser("refine")
+    p_refine.add_argument("--audio", required=True)
+    p_refine.add_argument("--diarization", required=True)
+    p_refine.add_argument("--out", required=True)
+    p_refine.add_argument("--model", default="resnet293")
+    p_refine.add_argument("--margin", type=float, default=0.1)
+    p_refine.add_argument("--device", default="cuda")
+
     p_align = sub.add_parser("align")
     p_align.add_argument("--audio", required=True)
     p_align.add_argument("--asr", required=True, help="ASR result JSON (stt.worker asr output)")
@@ -244,6 +264,8 @@ def main(argv: list[str] | None = None) -> None:
         run_ocr(Path(args.media), Path(args.out), args.device, args.start, args.duration, args.fps)
     elif args.command == "align":
         run_align(Path(args.audio), Path(args.asr), Path(args.out), args.device, args.aligner)
+    elif args.command == "refine":
+        run_refine(Path(args.audio), Path(args.diarization), Path(args.out), args.model, args.margin, args.device)
     elif args.command == "voice":
         run_voice(Path(args.audio), Path(args.diarization), Path(args.out), args.device, args.threshold)
 
