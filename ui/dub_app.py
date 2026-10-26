@@ -8,6 +8,9 @@ a time, engines one after the other); its config and log are kept in ``<out-root
 
 Tab "Банк голосов": the season voice bank (``stt.voice_bank``): people, episodes, speech; cut
 the voice-cloning references, listen, ask for another clip, re-check names across the season.
+
+Tab "Проверка реплик": the lines ``stt.review`` found suspicious (gender / speaker), the original
+and the voice-over of each, one-click fixes into ``corrections.json`` and re-voicing the episode.
 """
 
 from __future__ import annotations
@@ -261,6 +264,91 @@ def person_view(out_root: str, bank: str, name: str) -> tuple[Any, str]:
     return str(refs_dir(out_root, bank) / ref["wav"]), info
 
 
+# ---------------------------------------------------------------- review tab
+
+def list_reviewed(out_root: str) -> list[str]:
+    return sorted(p.parent.name for p in _root(out_root).glob("*/review.json"))
+
+
+def _episode(out_root: str, episode: str) -> Path:
+    return _root(out_root) / episode
+
+
+def review_rows(out_root: str, episode: str) -> list[list[Any]]:
+    if not episode:
+        return []
+    folder = _episode(out_root, episode)
+    items = json.loads((folder / "review.json").read_text(encoding="utf-8"))
+    path = folder / "corrections.json"
+    fixed = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    rows = []
+    for item in items:
+        what = item.get("heard") and f"слышно {item['heard']}" or ""
+        if item.get("sounds_like"):
+            what = (what + "; " if what else "") + f"похоже на {item['sounds_like']}"
+        fix = fixed.get(str(item["line"]))
+        rows.append([item["line"], item["time"][:8], item["speaker"], item["voice"], what, item["text_ru"],
+                     json.dumps(fix, ensure_ascii=False) if fix else ""])
+    return rows
+
+
+def line_audio(out_root: str, episode: str, line: int, engines: list[str]) -> tuple[Any, Any, str]:
+    """(original, voice-over) clips of a line as (rate, samples), and its text."""
+    import soundfile as sf
+
+    folder = _episode(out_root, episode)
+    records = {r["index"]: r for r in json.loads((folder / "subs.ru.json").read_text(encoding="utf-8"))}
+    record = records.get(int(line))
+    if record is None:
+        return None, None, "Нет такой реплики."
+    source = json.loads((folder / "source.json").read_text(encoding="utf-8"))
+    offset = float(source.get("start") or 0.0)
+    start, end = record["start"] / 1000 - 0.5, record["end"] / 1000 + 1.0
+    audio, rate = sf.read(str(folder / "audio.wav"), dtype="float32")
+    original = (rate, audio[max(0, int((start - offset) * rate)):max(0, int((end - offset) * rate))])
+    dub = None
+    for engine in engines or ["vosk", "teratts"]:
+        track = folder / f"voiceover.{engine}" / "export" / "track.wav"
+        if track.exists():
+            info = sf.info(str(track))
+            samples, sr = sf.read(str(track), dtype="float32", start=int(max(0.0, start) * info.samplerate),
+                                  stop=int((end + 0.5) * info.samplerate))
+            dub = (sr, samples)
+            break
+    english = " ".join(record.get("text_en") or [])
+    return original, dub, f"**{line}** · {record.get('speaker_name') or record.get('speaker')}\n\n" \
+                          f"EN: {english}\n\nRU: {' '.join(record['text'])}"
+
+
+def add_correction(out_root: str, episode: str, line: int | None, fix: dict[str, Any]) -> str:
+    if not episode or line is None:
+        return "Выберите серию и реплику."
+    path = _episode(out_root, episode) / "corrections.json"
+    corrections = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    corrections[str(int(line))] = {**corrections.get(str(int(line)), {}), **fix}
+    path.write_text(json.dumps(corrections, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return f"Реплика {int(line)}: {json.dumps(fix, ensure_ascii=False)} → {path.name} " \
+           f"({len(corrections)} правок). Нажмите «Переозвучить серию», когда закончите."
+
+
+def speaker_choices(out_root: str, episode: str) -> list[str]:
+    if not episode:
+        return []
+    speakers = json.loads((_episode(out_root, episode) / "speakers.json").read_text(encoding="utf-8"))
+    return [f"{s['id']}: {s.get('name') or s.get('label_ru') or '?'} ({s.get('gender')})"
+            for s in speakers if s.get("cues")]
+
+
+def revoice(out_root: str, episode: str, engines: list[str]) -> str:
+    if not episode:
+        return "Выберите серию."
+    folder = _episode(out_root, episode)
+    media = Path(json.loads((folder / "source.json").read_text(encoding="utf-8"))["media"])
+    done = [e for e in ENGINES if (folder / f"voiceover.{ENGINES[e]}").exists()]
+    return start_job(str(media.parent), [media.name], str(_root(out_root)), engines or done or ["Vosk"],
+                     list(MODES)[0], MODELS[0], True, True, True, True, False, 0, 0)
+
+
 def build() -> gr.Blocks:
     with gr.Blocks(title="Озвучка сериалов") as app:
         gr.Markdown("# Озвучка сериалов\nАнглийское видео → русская закадровая озвучка.")
@@ -357,6 +445,73 @@ def build() -> gr.Blocks:
             person.change(lambda root, name, who: person_view(root, name, who), [bank_root, bank, person],
                           [reference, reference_info])
             another.click(run_another, [bank_root, bank, person], [reference, reference_info, people])
+
+        with gr.Tab("Проверка реплик"):
+            gr.Markdown("Реплики, где голос мог быть выбран неверно: по звуку реплики слышен другой пол или "
+                        "другой спикер. Послушайте оригинал и озвучку, при необходимости поправьте и "
+                        "переозвучьте серию: пересчитаются только сценарий и озвучка.")
+            with gr.Row():
+                review_root = gr.Textbox(label="Папка результатов", value="output/stt", scale=3)
+                review_episode = gr.Dropdown(label="Серия", choices=[], scale=4)
+                review_refresh = gr.Button("Обновить", scale=1)
+            review_table = gr.Dataframe(
+                headers=["№", "Время", "Спикер", "Голос", "Что слышно", "Текст", "Правка"],
+                label="Реплики для проверки (нажмите на строку)", interactive=False)
+            line_no = gr.Number(label="Реплика №", precision=0)
+            line_text = gr.Markdown()
+            with gr.Row():
+                original_audio = gr.Audio(label="Оригинал", interactive=False)
+                dub_audio = gr.Audio(label="Озвучка", interactive=False)
+            with gr.Row():
+                fix_female = gr.Button("Женский голос")
+                fix_male = gr.Button("Мужской голос")
+                fix_skip = gr.Button("Не озвучивать")
+            with gr.Row():
+                fix_speaker = gr.Dropdown(label="Другой спикер", choices=[], scale=3)
+                apply_speaker = gr.Button("Назначить спикера", scale=1)
+            with gr.Row():
+                fix_text = gr.Textbox(label="Исправленный текст", scale=3)
+                apply_text = gr.Button("Заменить текст", scale=1)
+            review_engines = gr.CheckboxGroup(label="Переозвучить движками", choices=list(ENGINES), value=[])
+            revoice_button = gr.Button("Переозвучить серию", variant="primary")
+            review_message = gr.Markdown()
+
+            def load_review(root: str, episode: str | None) -> tuple[Any, Any, Any]:
+                episodes = list_reviewed(root)
+                episode = episode if episode in episodes else (episodes[0] if episodes else None)
+                return (gr.update(choices=episodes, value=episode), gr.update(value=review_rows(root, episode)),
+                        gr.update(choices=speaker_choices(root, episode), value=None))
+
+            def pick_line(root: str, episode: str, engines: list[str], evt: gr.SelectData) -> tuple[Any, ...]:
+                rows = review_rows(root, episode)
+                line = rows[evt.index[0]][0] if rows else None
+                if line is None:
+                    return None, "", None, None
+                original, dub, text = line_audio(root, episode, line, [ENGINES[e] for e in engines])
+                return line, text, original, dub
+
+            def fixed(root: str, episode: str, line: Any, fix: dict[str, Any]) -> tuple[str, Any]:
+                message = add_correction(root, episode, line, fix)
+                return message, gr.update(value=review_rows(root, episode))
+
+            review_refresh.click(load_review, [review_root, review_episode], [review_episode, review_table, fix_speaker])
+            review_episode.change(load_review, [review_root, review_episode],
+                                  [review_episode, review_table, fix_speaker])
+            review_table.select(pick_line, [review_root, review_episode, review_engines],
+                                [line_no, line_text, original_audio, dub_audio])
+            fix_female.click(lambda r, e, n: fixed(r, e, n, {"gender": "female"}), [review_root, review_episode, line_no],
+                             [review_message, review_table])
+            fix_male.click(lambda r, e, n: fixed(r, e, n, {"gender": "male"}), [review_root, review_episode, line_no],
+                           [review_message, review_table])
+            fix_skip.click(lambda r, e, n: fixed(r, e, n, {"skip": True}), [review_root, review_episode, line_no],
+                           [review_message, review_table])
+            apply_speaker.click(lambda r, e, n, who: fixed(r, e, n, {"speaker": who.split(":")[0]}) if who
+                                else ("Выберите спикера.", gr.update()),
+                                [review_root, review_episode, line_no, fix_speaker], [review_message, review_table])
+            apply_text.click(lambda r, e, n, t: fixed(r, e, n, {"text": t}) if t.strip()
+                             else ("Введите текст.", gr.update()),
+                             [review_root, review_episode, line_no, fix_text], [review_message, review_table])
+            revoice_button.click(revoice, [review_root, review_episode, review_engines], review_message)
     return app
 
 

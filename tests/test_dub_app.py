@@ -53,3 +53,24 @@ def test_voice_bank_rows(tmp_path: Path) -> None:
                                                         "music_db": -10.0, "text": "I'm dating John Rocker"}]))
     audio, info = dub_app.person_view(str(tmp_path), "S1.voices.json", "Julie McGee")
     assert audio.endswith("Julie_McGee.wav") and "S29E01" in info and "0.93" in info
+
+
+def test_review_rows_and_corrections(tmp_path: Path) -> None:
+    import json
+
+    episode = tmp_path / "ep"
+    episode.mkdir()
+    (episode / "review.json").write_text(json.dumps([{"line": 19, "time": "00:01:00,265", "speaker": "Джефф",
+                                                      "voice": "male", "sounds_like": "John Rocker (0.64)",
+                                                      "text_ru": "Как фамилия?"}]))
+    (episode / "speakers.json").write_text(json.dumps([{"id": "S02", "name": "John Rocker", "gender": "male",
+                                                        "cues": 3}]))
+    assert dub_app.list_reviewed(str(tmp_path)) == ["ep"]
+    assert dub_app.review_rows(str(tmp_path), "ep")[0][:5] == [19, "00:01:00", "Джефф", "male",
+                                                              "похоже на John Rocker (0.64)"]
+    assert "1 правок" in dub_app.add_correction(str(tmp_path), "ep", 19, {"speaker": "S02"})
+    dub_app.add_correction(str(tmp_path), "ep", 19, {"text": "Как твоя фамилия?"})
+    assert json.loads((episode / "corrections.json").read_text()) == {"19": {"speaker": "S02",
+                                                                             "text": "Как твоя фамилия?"}}
+    assert dub_app.review_rows(str(tmp_path), "ep")[0][6].startswith('{"speaker": "S02"')
+    assert dub_app.speaker_choices(str(tmp_path), "ep") == ["S02: John Rocker (male)"]
