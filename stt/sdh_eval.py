@@ -6,6 +6,8 @@ labelled lines. Purity = share of a label's time on its main predicted speaker;
 merges = named people whose main predicted speaker is also another person's.
 
     subs_env/bin/python -m stt.sdh_eval --srt ep.en.srt output/stt/ep/diarization.*.json
+    # the cues that get voiced (subs.en.json): share of labelled lines on their person's main speaker
+    subs_env/bin/python -m stt.sdh_eval --srt ep.en.srt --cues output/stt/ep/subs.en.json other/subs.en.json
 """
 
 from __future__ import annotations
@@ -57,13 +59,29 @@ def evaluate(spans: list[tuple[str, float, float]], diarization: Diarization) ->
     }
 
 
+def cue_turns(subs_path: Path) -> list[dict[str, Any]]:
+    """Subtitle cues (subs.en.json, ms) as speaker turns in seconds."""
+    return [{"start": c["start"] / 1000, "end": c["end"] / 1000, "speaker": c.get("speaker") or "??"}
+            for c in load_json(subs_path)]
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Check diarization against SDH speaker labels")
     parser.add_argument("--srt", required=True, help="SDH subtitles with speaker labels")
-    parser.add_argument("diarizations", nargs="+", help="diarization JSON files (stt.worker diarize output)")
+    parser.add_argument("diarizations", nargs="*", help="diarization JSON files (stt.worker diarize output)")
+    parser.add_argument("--cues", nargs="*", default=[], help="subs.en.json files: score the cues instead")
     parser.add_argument("--offset", type=float, default=0.0, help="Audio start within the media, seconds")
     args = parser.parse_args(argv)
     spans = [(label, s - args.offset, e - args.offset) for label, s, e in labelled_spans(args.srt)]
+    if args.cues:
+        from stt.refine_speakers import sdh_score
+
+        print("| Cues | Labelled lines | On their person's main speaker | People merged |")
+        print("|---|---:|---:|---:|")
+        for path in args.cues:
+            r = sdh_score(spans, cue_turns(Path(path)))
+            print(f"| {path} | {r['lines']} | {r['correct'] / r['lines'] * 100:.1f}% | {r['merged']} of {r['people']} |")
+        return
     print("| Diarization | Speakers | Named people | Purity | People merged with another |")
     print("|---|---:|---:|---:|---:|")
     for path in args.diarizations:

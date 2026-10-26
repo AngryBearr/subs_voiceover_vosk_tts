@@ -8,7 +8,10 @@ moves there; speakers whose centroids are near-identical (``merge``) become one.
 Australian Survivor S10, all 24 episodes, 1300 lines with an SDH speaker label (mostly
 off-screen or unclear voices), exclusive turns (what words are labelled by): lines on their
 person's main speaker 63.6% -> 68.8% (margin 0.1; 68.9% at 0.05), ~17 s per episode.
-VoxConverse: DER 11.87% -> 11.43%.
+VoxConverse: DER 11.87% -> 11.43%. Splitting speakers whose turns cluster into clearly different
+voices (average linkage, similarity below 0.2-0.5) did not pay: fewer merged people (151 -> 126),
+but fewer lines on their person's main speaker (65.3-67.5%), since one person's narration and
+on-location voice split too.
 
     subs_env/bin/python -m stt.refine_speakers bench --data output/stt_bench/diar_voxconverse \\
         --hyp output/stt_bench/diar_voxconverse/hyp/pyannote-community-1 --models resnet293,pyannote
