@@ -44,8 +44,22 @@ log = logging.getLogger("stt.run")
 STAGES = ["transcribe", "glossary", "speakers", "translate", "dub", "stress", "voiceover", "check", "mix"]
 
 
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """``base`` with ``override`` on top: nested dicts merge, everything else is replaced."""
+    out = dict(base)
+    for key, value in override.items():
+        out[key] = deep_merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+
 def load_config(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """The config, with ``<name>.local.json`` next to it on top (personal settings, not in git:
+    e.g. LLM requests through a ChatGPT subscription in OpenCode)."""
+    config = json.loads(path.read_text(encoding="utf-8"))
+    local = path.with_name(path.stem + ".local.json")
+    if local.exists():
+        config = deep_merge(config, json.loads(local.read_text(encoding="utf-8")))
+    return config
 
 
 def dotenv(path: Path = REPO_ROOT / ".env") -> dict[str, str]:
@@ -200,14 +214,49 @@ class Episode:
         engine = dict(cfg.get("engines", {}).get(self.engine, {}))
         if "voices" not in engine:
             raise SystemExit(f"voiceover.engines.{self.engine}.voices missing in the config")
+        if self.engine == "f5":  # fallback voices: a Vosk voice per gender, cloned by F5
+            from voiceover.engine_f5 import fallback_references
+
+            vo = load_json(REPO_ROOT / cfg.get("config", "voiceover_config.json"))
+            vosk = cfg.get("engines", {}).get("vosk", {}).get("voices", {"female": 49, "male": 56})
+            refs = fallback_references(self.references.parent / "fallback_voices",
+                                       REPO_ROOT / vo["engine"]["model_path"], {g: int(v) for g, v in vosk.items()})
+            engine["voices"] = {g: refs[g] if v == "auto" else v for g, v in engine["voices"].items()}
         return engine
+
+    @property
+    def references(self) -> Path:
+        """Voice-cloning clips of the season's people (stt.voice_bank --export)."""
+        return self.voice_bank.with_name(self.voice_bank.name.replace(".voices.json", ".references"))
+
+    def _speaker_voices(self) -> Path:
+        """{speaker id: reference clip} of this episode's people with a clip (F5 engine)."""
+        from stt.voice_bank import same_person
+
+        if self.voice_bank.exists():  # people new in this episode get a clip; others keep theirs
+            self._module("voices", "stt.voice_bank", [str(self.voice_bank), "--export", str(self.references),
+                                                       "--missing"])
+        index = self.references / "references.json"
+        refs = load_json(index) if index.exists() else []
+        mapping = {}
+        for card in load_json(self.out / "speakers.json"):
+            ref = next((r for r in refs if card.get("name") and same_person(r["name"], card["name"])), None)
+            if ref:
+                mapping[card["id"]] = str((self.references / ref["wav"]).resolve())
+        path = self.out / "speaker_voices.f5.json"
+        save_json(path, mapping)
+        log.info("[%s] F5 voices: %d speakers with their own clip", self.media.stem, len(mapping))
+        return path
 
     def dub(self) -> None:
         from stt import dub
 
         voices = ",".join(f"{k}={v}" for k, v in self._engine()["voices"].items())
-        dub.main([str(self.out), "--voices", voices, "--interjections", self.config["dub"]["interjections"],
-                  "--output", f"dub.ru.{self.engine}.json"])
+        argv = [str(self.out), "--voices", voices, "--interjections", self.config["dub"]["interjections"],
+                "--output", f"dub.ru.{self.engine}.json"]
+        if self.engine == "f5":
+            argv += ["--speaker-voices", str(self._speaker_voices())]
+        dub.main(argv)
 
     def _module(self, name: str, module: str, args: list[str]) -> None:
         """Run a module of this repo in the current interpreter, logging to logs/<name>.log."""

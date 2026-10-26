@@ -1,0 +1,6 @@
+# f5_env reuses torch / onnxruntime of subs_env (subs_env.pth); keep uv from installing its own
+torch ; sys_platform == "never"
+torchaudio ; sys_platform == "never"
+torchvision ; sys_platform == "never"
+onnxruntime ; sys_platform == "never"
+onnxruntime-gpu ; sys_platform == "never"

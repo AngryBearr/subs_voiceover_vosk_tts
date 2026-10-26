@@ -30,13 +30,14 @@ from typing import Any
 
 import gradio as gr  # type: ignore
 
-from stt.run import STAGES
+from stt.run import STAGES, load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm"}
-ENGINES = {"Vosk": "vosk", "TeraTTS": "teratts"}
+ENGINES = {"Vosk": "vosk", "TeraTTS": "teratts", "ESpeech (голоса героев)": "f5"}
 MODES = {"Точный: Cohere + Whisper + LLM": "accurate", "Быстрый: только Whisper": "fast"}
-MODELS = ["openai/gpt-6.1-sol", "openai/gpt-6-luna"]
+MODELS = {"luna: дешевле, качество хорошее": "openai/gpt-6-luna", "Sol: лучше перевод, дороже": "openai/gpt-6.1-sol"}
+TRANSPORTS = {"Подписка (opencode)": "opencode", "API OpenRouter": "openrouter"}
 ENGINE_STAGES = {"dub", "voiceover", "check", "mix"}
 STAGE_RU = {"transcribe": "распознавание", "glossary": "словарь", "speakers": "спикеры", "translate": "перевод",
             "dub": "сценарий", "stress": "ударения", "voiceover": "озвучка", "check": "проверка речи",
@@ -69,15 +70,24 @@ def list_videos(folder: str) -> list[str]:
     return sorted(p.name for p in path.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXT)
 
 
-def job_config(mode: str, model: str, subtitles: bool, duck_voices: bool, stress: bool, refine: bool
-               ) -> dict[str, Any]:
-    """stt_config.json with the options of the form."""
-    config = json.loads((REPO_ROOT / "stt_config.json").read_text(encoding="utf-8"))
+def base_config() -> dict[str, Any]:
+    """stt_config.json with the personal stt_config.local.json on top."""
+    return load_config(REPO_ROOT / "stt_config.json")
+
+
+def job_config(mode: str, model: str, subtitles: bool, duck_voices: bool, stress: bool, refine: bool,
+               f5_fast: bool = False, transport: str | None = None) -> dict[str, Any]:
+    """stt_config.json (+ local settings) with the options of the form."""
+    config = base_config()
     config["mode"] = MODES.get(mode, mode)
-    config.setdefault("llm", {})["model"] = model
+    config.setdefault("llm", {})["model"] = MODELS.get(model, model)
+    if TRANSPORTS.get(transport or "") == "openrouter":  # pay per request instead of the subscription
+        config["llm"].update(opencode=[], router="openrouter")
     config.setdefault("mix", {}).update(subtitles=subtitles, duck="voices" if duck_voices else "all")
     config.setdefault("voiceover", {})["stress_check"] = stress
     config["speaker_refine"] = {**(config.get("speaker_refine") or {}), "model": "resnet293" if refine else "none"}
+    f5 = config["voiceover"].setdefault("engines", {}).setdefault("f5", {"voices": {"female": "auto", "male": "auto"}})
+    f5["nfe"] = 7 if f5_fast else f5.get("nfe", 32)  # 7 steps: ~2x faster, by ear almost the same
     return config
 
 
@@ -105,7 +115,7 @@ def _run(job: Job) -> None:
 
 def start_job(folder: str, names: list[str], out_root: str, engines: list[str], mode: str, model: str,
               subtitles: bool, duck_voices: bool, stress: bool, refine: bool, preview: bool,
-              preview_from: float, preview_minutes: float) -> str:
+              preview_from: float, preview_minutes: float, f5_fast: bool = False, transport: str | None = None) -> str:
     global JOB
     with LOCK:
         if JOB and JOB.state == "идёт":
@@ -125,8 +135,8 @@ def start_job(folder: str, names: list[str], out_root: str, engines: list[str], 
         ui_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         config_path = ui_dir / f"config_{stamp}.json"
-        config_path.write_text(json.dumps(job_config(mode, model, subtitles, duck_voices, stress, refine),
-                                          ensure_ascii=False, indent=2), encoding="utf-8")
+        config = job_config(mode, model, subtitles, duck_voices, stress, refine, f5_fast, transport)
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
         JOB = Job(files=[Path(folder).expanduser() / n for n in names], out_root=root,
                   engines=[ENGINES[e] for e in engines], config_path=config_path,
                   log_path=ui_dir / f"job_{stamp}.log", extra=extra)
@@ -346,10 +356,16 @@ def revoice(out_root: str, episode: str, engines: list[str]) -> str:
     media = Path(json.loads((folder / "source.json").read_text(encoding="utf-8"))["media"])
     done = [e for e in ENGINES if (folder / f"voiceover.{ENGINES[e]}").exists()]
     return start_job(str(media.parent), [media.name], str(_root(out_root)), engines or done or ["Vosk"],
-                     list(MODES)[0], MODELS[0], True, True, True, True, False, 0, 0)
+                     list(MODES)[0], default_model(), True, True, True, True, False, 0, 0)
+
+
+def default_model() -> str:
+    model = base_config().get("llm", {}).get("model")
+    return next((label for label, value in MODELS.items() if value == model), list(MODELS)[0])
 
 
 def build() -> gr.Blocks:
+    personal = base_config().get("ui", {})
     with gr.Blocks(title="Озвучка сериалов") as app:
         gr.Markdown("# Озвучка сериалов\nАнглийское видео → русская закадровая озвучка.")
         with gr.Tab("Обработка"):
@@ -365,12 +381,16 @@ def build() -> gr.Blocks:
             with gr.Row():
                 engines = gr.CheckboxGroup(label="Озвучка", choices=list(ENGINES), value=["Vosk"])
                 mode = gr.Radio(label="Распознавание", choices=list(MODES), value=list(MODES)[0])
-                model = gr.Dropdown(label="Языковая модель (через подписку)", choices=MODELS, value=MODELS[0])
+                with gr.Column():
+                    model = gr.Dropdown(label="Языковая модель", choices=list(MODELS), value=default_model())
+                    transport = gr.Radio(label="Запросы к модели", choices=list(TRANSPORTS),
+                                         value=list(TRANSPORTS)[0], visible=bool(personal.get("llm_transport_choice")))
             with gr.Row():
                 subtitles = gr.Checkbox(label="Вшить субтитры", value=True)
                 duck_voices = gr.Checkbox(label="Приглушать только голоса (музыку оставить)", value=True)
                 stress = gr.Checkbox(label="Проверять ударения", value=True)
                 refine = gr.Checkbox(label="Уточнять спикеров по голосу", value=True)
+                f5_fast = gr.Checkbox(label="ESpeech: быстрый режим (7 шагов)", value=False)
             with gr.Accordion("Пробный отрывок (быстро проверить настройки)", open=False):
                 preview = gr.Checkbox(label="Только отрывок (в папку _проба)", value=False)
                 with gr.Row():
@@ -389,7 +409,7 @@ def build() -> gr.Blocks:
             select_all.click(lambda f: gr.update(value=list_videos(f)), folder, episodes)
             select_none.click(lambda: gr.update(value=[]), None, episodes)
             start.click(start_job, [folder, episodes, out_root, engines, mode, model, subtitles, duck_voices, stress,
-                                    refine, preview, preview_from, preview_minutes], message)
+                                    refine, preview, preview_from, preview_minutes, f5_fast, transport], message)
             stop.click(stop_job, None, message)
             gr.Timer(2.0).tick(refresh, None, [status, progress, log, results])
 

@@ -8,12 +8,10 @@
   "speaker_refine": {"model": "resnet293", "margin": 0.1},
   "ocr": {"enabled": true, "fps": 2.0},
   "llm": {
-    "model": "openai/gpt-6.1-sol",
-    "opencode": ["openai/*"],
-    "router": "orcarouter",
-    "fallback": true,
+    "model": "openai/gpt-6-luna",
+    "router": "openrouter",
     "stages": {
-      "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "openrouter:google/gemini-4-argon"],
+      "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
       "stress_screen": "openai/gpt-6-luna"
     }
   },
@@ -33,7 +31,9 @@
     "engines": {
       "vosk": {"voices": {"female": 49, "male": 56}},
       "teratts": {"voices": {"female": "ru_f1", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.0,
-                  "sample_rate": 44100}
+                  "sample_rate": 44100},
+      "f5": {"voices": {"female": "auto", "male": "auto"}, "nfe": 32, "target_syl_per_sec": 5.0,
+             "sample_rate": 24000}
     },
     "policy": {"base_syl_per_sec": 5.0, "target_lag_ms": 250, "weight_early": 5.0},
     "units": {"enabled": false},

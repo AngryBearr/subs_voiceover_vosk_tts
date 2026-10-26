@@ -505,3 +505,15 @@ class CrowdTest(unittest.TestCase):
         clip = np.ones(100, dtype=np.float32)
         track = render(found, {(0, 56): clip, (0, 49): clip, (1, 56): clip}, 1000, 10.0, offset_ms=50, gain_db=0.0)
         self.assertEqual((track[1000], track[1060], track[9000]), (1.0, 2.0, 1.0))
+
+
+def test_local_config_on_top(tmp_path: Path) -> None:
+    import json
+
+    from stt.run import load_config
+
+    (tmp_path / "c.json").write_text(json.dumps({"llm": {"model": "luna", "stages": {"a": 1}}, "mode": "fast"}))
+    assert load_config(tmp_path / "c.json")["llm"]["model"] == "luna"
+    (tmp_path / "c.local.json").write_text(json.dumps({"llm": {"model": "sol", "opencode": ["openai/*"]}}))
+    assert load_config(tmp_path / "c.json") == {"llm": {"model": "sol", "stages": {"a": 1}, "opencode": ["openai/*"]},
+                                                 "mode": "fast"}

@@ -13,6 +13,9 @@ output/
 # virtual environments
 subs_env/
 stt_qwen_env/
+f5_env/
 vosk_env/
 stt_env/
 .venv/
+# personal settings on top of the shared configs (stt_config.local.json)
+*.local.json

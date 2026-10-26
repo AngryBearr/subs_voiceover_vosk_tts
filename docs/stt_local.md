@@ -60,9 +60,21 @@ inputs are optional files: `speakers.override.json`, an edited `glossary.txt`, a
 
 ### Language models
 
-One switch, `llm.model` in `stt_config.json` (default `openai/gpt-6.1-sol`), sets the model of
+One switch, `llm.model` in `stt_config.json` (default `openai/gpt-6-luna`), sets the model of
 every step; `llm.stages.<step>` overrides one step (`fuse`, `glossary`, `speakers`, `translate`,
 `voiceover`, `stress`, `stress_screen`). By default only the stress re-check uses other models.
+
+The shared default is OpenRouter with gpt-6-luna (good results, much cheaper than sol; the UI
+offers luna or sol). Personal settings go into `stt_config.local.json` next to `stt_config.json`
+(not in git, merged on top by `stt.run` and the UI), e.g. requests through a ChatGPT subscription:
+
+```json
+{"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": "orcarouter",
+         "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "openrouter:google/gemini-4-argon"]}},
+ "ui": {"llm_transport_choice": true}}
+```
+
+`ui.llm_transport_choice` shows the UI switch "Подписка (opencode) / API OpenRouter".
 
 Where requests go (`utils/llm_route.py`): transports in front of a model id, tried in order.
 `stt.run` adds them from the config:
@@ -148,6 +160,14 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   10 to 6 words not heard. Each TeraTTS clip is also transcribed right away (GigaAM); a clip with a word not
   heard, garbled or drawn out is synthesised again with other seeds (up to 3 takes) and the best
   one is kept. Vosk is not faster on the GPU, so it stays on the CPU.
+- **ESpeech F5 (`--engine f5`, UI "ESpeech (голоса героев)").** Every line in its speaker's own
+  voice, cloned from the voice bank's reference clips (`<out>/<season>.references/`, cut
+  automatically for people who have none yet; a person keeps one clip over the season). Speakers
+  without a clip get a fallback voice per gender: a Vosk sentence that F5 clones. F5 runs in
+  `f5_env` (`bash scripts/setup_envs.sh f5`, reuses torch of subs_env) as `voiceover.f5_worker`;
+  each line is synthesised at a natural length (5 syllables/s) and retried with other seeds when
+  GigaAM misses or mishears a word. 32 sampling steps by default, 7 in the UI's fast mode
+  (`voiceover.engines.f5.nfe`).
 - **Stress (before synthesis).** RUAccent is right for dictionary words; errors come from
   homographs and words it guesses. Stress is fixed in the text: from the audio it is heard only
   partly (TeraAnaly's stress head, given the text, on 159 phrases synthesised with a deliberately

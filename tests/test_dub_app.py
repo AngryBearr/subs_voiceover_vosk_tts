@@ -5,12 +5,23 @@ from pathlib import Path
 from ui import dub_app
 
 
-def test_job_config_applies_the_form() -> None:
+def test_job_config_applies_the_form(monkeypatch) -> None:
+    monkeypatch.setattr(dub_app, "base_config", lambda: {"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"],
+                                                                 "router": "orcarouter"}, "voiceover": {}})
+    via_api = dub_app.job_config("Быстрый: только Whisper", "Sol: лучше перевод, дороже", True, True, True, True,
+                                 transport="API OpenRouter")
+    assert via_api["llm"] == {"model": "openai/gpt-6.1-sol", "opencode": [], "router": "openrouter"}
+    subscription = dub_app.job_config("Быстрый: только Whisper", "openai/gpt-6.1-sol", True, True, True, True,
+                                      transport="Подписка (opencode)")
+    assert subscription["llm"]["opencode"] == ["openai/*"] and subscription["llm"]["router"] == "orcarouter"
     config = dub_app.job_config("Быстрый: только Whisper", "openai/gpt-6-luna", subtitles=False, duck_voices=False,
                                 stress=False, refine=False)
     assert config["mode"] == "fast" and config["llm"]["model"] == "openai/gpt-6-luna"
     assert config["mix"]["subtitles"] is False and config["mix"]["duck"] == "all"
     assert config["voiceover"]["stress_check"] is False and config["speaker_refine"]["model"] == "none"
+    assert config["voiceover"]["engines"]["f5"]["nfe"] == 32
+    fast = dub_app.job_config("Быстрый: только Whisper", "openai/gpt-6-luna", True, True, True, True, f5_fast=True)
+    assert fast["voiceover"]["engines"]["f5"]["nfe"] == 7
 
 
 def test_videos_and_progress(tmp_path: Path) -> None:

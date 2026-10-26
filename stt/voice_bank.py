@@ -50,7 +50,7 @@ STRONG = 0.75  # an unnamed cluster takes the name from this similarity on ...
 MARGIN = 0.1  # ... when the next other name is at least this much lower
 MIN_SPEECH_S = 20.0  # clusters with less speech give unreliable prints
 MIN_CONFIDENCE = 0.6  # LLM naming confidence needed to add a print
-SAMPLE_MIN_S, SAMPLE_MAX_S, SAMPLE_GAP_S = 6.0, 12.0, 0.4
+SAMPLE_MIN_S, SAMPLE_MAX_S, SAMPLE_GAP_S = 5.0, 9.0, 0.4  # F5 clips references over 12 s (with 1 s pad): keep them shorter
 SAMPLES_PER_EPISODE = 5
 CLONE_RATE = 24_000
 MIN_SAMPLE_SCORE = 0.6  # a reference clip must sound at least this much like the person's prints
@@ -373,8 +373,8 @@ def reject_reference(out_dir: Path, name: str) -> dict[str, Any] | None:
     return current
 
 
-def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only: str | None = None
-                      ) -> list[dict[str, Any]]:
+def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only: str | None = None,
+                      missing: bool = False) -> list[dict[str, Any]]:
     """Cut the cleanest reference stretch of every person (or only ``only``) into ``out_dir``.
 
     Returns the index (``references.json``; other people's entries are kept when ``only`` is set).
@@ -396,11 +396,12 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
     out_dir.mkdir(parents=True, exist_ok=True)
     index_path = out_dir / "references.json"
     index: list[dict[str, Any]] = []
-    if only and index_path.exists():
+    if (only or missing) and index_path.exists():  # keep the other people's clips
         index = [r for r in json.loads(index_path.read_text(encoding="utf-8")) if r["name"] != only]
+    have = {r["name"] for r in index} if missing else set()
     rejected = {(r["episode"], round(r["start"], 2)) for r in load_rejected(out_dir)}
     for person in bank.people():
-        if only and person["name"] != only:
+        if (only and person["name"] != only) or person["name"] in have:
             continue
         mine = [p for p in bank.prints if same_person(p["name"], person["name"])]
         prints = [_unit(p["embedding"]) for p in mine]
@@ -413,12 +414,15 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
             if p["episode"] not in audio_cache:
                 audio_cache[p["episode"]] = sf.read(str(episode_dir / "audio.wav"), dtype="float32")
             audio, sr = audio_cache[p["episode"]]
+            source = episode_dir / "source.json"  # a test piece's audio and diarization start mid-episode
+            offset = float(json.loads(source.read_text(encoding="utf-8")).get("start") or 0.0) if source.exists() else 0.0
             for sample in reference_samples(p["speaker"], records, limit=None):
                 if (p["episode"], round(sample["start"], 2)) in rejected:
                     continue
-                if other_voice_seconds(episode_dir, p["speaker"], sample["start"], sample["end"]) > MAX_OTHER_VOICE_S:
+                start, end = sample["start"] - offset, sample["end"] - offset
+                if start < 0 or other_voice_seconds(episode_dir, p["speaker"], start, end) > MAX_OTHER_VOICE_S:
                     continue
-                vector = embed(audio[int(sample["start"] * sr):int(sample["end"] * sr)], sr)
+                vector = embed(audio[int(start * sr):int(end * sr)], sr)
                 candidates.append({**sample, "episode": p["episode"], "speaker": p["speaker"],
                                    "score": round(max(float(vector @ q) for q in prints), 3)})
         candidates.sort(key=lambda c: -c["score"])
@@ -471,6 +475,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("bank", type=Path)
     parser.add_argument("--export", type=Path, default=None, help="Cut one reference clip per person into this folder")
     parser.add_argument("--person", default=None, help="With --export: only this person's clip")
+    parser.add_argument("--missing", action="store_true",
+                        help="With --export: only people without a clip yet (a person keeps one voice)")
     parser.add_argument("--reject", action="store_true",
                         help="With --export and --person: reject the current clip and pick another")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
@@ -483,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.export:
         if args.reject and args.person:
             reject_reference(args.export, args.person)
-        export_references(bank, args.export, args.device, only=args.person)
+        export_references(bank, args.export, args.device, only=args.person, missing=args.missing)
         return 0
     if args.recheck:
         suggestions = recheck(bank)

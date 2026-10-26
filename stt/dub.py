@@ -64,6 +64,7 @@ def plan(
     interjections: str = "dense",
     dense_gap_ms: int = 1000,
     skip: set[int] | frozenset[int] = frozenset(),
+    speaker_voices: dict[str, int | str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return (voiced lines, skipped lines with reasons)."""
     voiced: list[dict[str, Any]] = []
@@ -91,7 +92,8 @@ def plan(
                             "text_en": text_en, "text": rec["text"], "reason": reason})
             continue
         gender = rec.get("gender", "unknown")
-        voiced.append({**rec, "voice": voices.get(gender, voices["unknown"])})
+        voice = (speaker_voices or {}).get(rec.get("speaker") or "") or voices.get(gender, voices["unknown"])
+        voiced.append({**rec, "voice": voice})
     for i, rec in enumerate(voiced, start=1):  # contiguous numbering for downstream tools
         rec["source_index"] = rec["index"]
         rec["index"] = i
@@ -106,6 +108,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="TTS voice per gender: female=49,male=56[,unknown=56] (Vosk), female=ru_f1,male=ru_m5 (TeraTTS)")
     parser.add_argument("--output", default="dub.ru.json", help="Dubbing script file name inside the folder")
     parser.add_argument("--single-voice", type=int, default=None, help="One voice for every line")
+    parser.add_argument("--speaker-voices", default=None,
+                        help="JSON {speaker id: voice} (e.g. cloned voices of the F5 engine); others by gender")
     parser.add_argument("--interjections", default="dense", choices=["dense", "all", "keep"],
                         help="Skip interjections over other speech / in rapid exchanges (dense), always, or never")
     args = parser.parse_args(argv)
@@ -124,7 +128,8 @@ def main(argv: list[str] | None = None) -> None:
         voices = {"female": args.single_voice, "male": args.single_voice, "unknown": args.single_voice}
     else:
         voices = parse_voices(args.voices)
-    voiced, skipped = plan(records, voices, interjections=args.interjections, skip=skip)
+    speaker_voices = load_json(Path(args.speaker_voices)) if args.speaker_voices else None
+    voiced, skipped = plan(records, voices, interjections=args.interjections, skip=skip, speaker_voices=speaker_voices)
     save_json(folder / args.output, voiced)
     save_json(folder / "dub.report.json", {"voices": voices, "interjections": args.interjections,
                                            "voiced": len(voiced), "skipped": skipped})

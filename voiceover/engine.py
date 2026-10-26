@@ -362,6 +362,9 @@ def build_engine(config: dict[str, Any]) -> Engine:
     if name == "teratts":
         from voiceover.engine_teratts import TeraTTSEngine
         return TeraTTSEngine(config)
+    if name == "f5":
+        from voiceover.engine_f5 import F5Engine
+        return F5Engine(config)
     raise ValueError(f"unknown engine: {name}")
 
 
