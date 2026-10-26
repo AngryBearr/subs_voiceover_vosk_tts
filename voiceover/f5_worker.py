@@ -32,7 +32,7 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     from f5_tts.model import DiT
     from huggingface_hub import hf_hub_download
 
-    from voiceover.speech_check import Recognizer, check_audio, clip_score
+    from voiceover.speech_check import Recognizer, check_audio, clip_score, leading_extra
 
     repo = job.get("model", "ESpeech/ESpeech-TTS-1_RL-V2")
     model = load_model(DiT, MODEL_CFG, hf_hub_download(repo, job.get("checkpoint", "espeech_tts_rlv2.pt")),
@@ -55,6 +55,10 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
                                              nfe_step=int(job.get("nfe", 32)), show_info=quiet,
                                              fix_duration=ref_seconds[ref] + float(item["duration"]))
                 wav = np.asarray(wav, dtype=np.float32)
+                if recognizer:  # the end of the reference spoken before the line: cut it off
+                    cut = leading_extra(item["text"], recognizer(wav, rate)[1])
+                    if cut and cut > 0.15:
+                        wav = wav[int((cut - 0.05) * rate):]
                 check = check_audio(recognizer, item["text"], wav, rate) if recognizer else None
                 score = clip_score(check) if check else 0.0
                 if best is None or score < best[0]:

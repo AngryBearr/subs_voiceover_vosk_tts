@@ -16,7 +16,8 @@ are two clusters, 0.70-0.82); different people mostly under 0.5, twins 0.67. The
 lists, per person, stretches of solo speech (6-12 s). ``export`` picks the cleanest one per
 person (no other diarized voice inside, every 3 s window sounding like the person, the least
 music) and writes its separated vocals (Hybrid Demucs) as a voice-cloning reference: 24 kHz
-mono, 1 s of silence at the end, transcript from the aligned words.
+mono, 1 s of silence at the end, transcript by Whisper from the clip itself (F5 speaks any
+mismatch between clip and transcript into the cloned line).
 
 Once several episodes are in, ``--recheck`` looks for prints whose voice other episodes
 know under another name (S29E01's "Jaclyn" cluster is Baylor's voice in most lines) and can
@@ -392,6 +393,7 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
 
     embed = SegmentEmbedder(device)
     separate = VocalSeparator(device)
+    transcriber: Any = None
     audio_cache: dict[str, tuple[np.ndarray, int]] = {}
     out_dir.mkdir(parents=True, exist_ok=True)
     index_path = out_dir / "references.json"
@@ -451,7 +453,14 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
         voice = np.concatenate([voice, np.zeros(CLONE_RATE, dtype=np.float32)])
         stem = _safe_name(person["name"])
         sf.write(str(out_dir / f"{stem}.wav"), voice, CLONE_RATE, subtype="PCM_16")
-        text = _words(bank.path.parent / best["episode"], best["start"], best["end"]) or best["text"]
+        if transcriber is None:  # what is actually said in the clip: its edges may cut a word of the cue
+            from stt.asr import create_backend
+
+            transcriber = create_backend("whisper-large-v3", device=device)
+            transcriber.load()
+        heard = " ".join(seg.text for seg in transcriber.transcribe(
+            soxr.resample(voice, CLONE_RATE, 16_000).astype(np.float32), [(0.0, len(voice) / CLONE_RATE)]))
+        text = heard.strip() or _words(bank.path.parent / best["episode"], best["start"], best["end"]) or best["text"]
         (out_dir / f"{stem}.txt").write_text(text + "\n", encoding="utf-8")
         index.append({"name": person["name"], "label_ru": person.get("label_ru"), "gender": person.get("gender"),
                       "wav": f"{stem}.wav", "text": text, "candidates": len(candidates),

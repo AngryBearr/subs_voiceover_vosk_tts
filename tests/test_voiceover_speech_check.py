@@ -30,3 +30,13 @@ def test_spelled_abbreviation_matches_asr_spelling() -> None:
     clip = {"unit_id": "u2", "start_ms": 0, "tempo": 1.0, "tts_text": "Ведомства Сэ-Ш+э-А.", "path": "x.wav"}
     result = check_clip(clip, "ведомства сша", [("ведомства", 0.0, 0.6), ("сша", 0.7, 1.0)], 1.1)
     assert result["diffs"] == [] and "pronunciation" not in result["flags"]
+
+
+def test_leading_extra_finds_a_leaked_reference_end() -> None:
+    from voiceover.speech_check import leading_extra
+
+    words = [("ай", 0.0, 0.2), ("долт", 0.2, 0.5), ("фор", 0.5, 0.7), ("хим", 0.7, 0.9),
+             ("нам", 1.0, 1.2), ("нужно", 1.2, 1.5), ("четыре", 1.5, 1.9), ("голоса", 1.9, 2.3)]
+    assert leading_extra("Нам н+ужно чет+ыре г+олоса.", words) == 1.0
+    assert leading_extra("Нам н+ужно чет+ыре г+олоса.", words[4:]) is None
+    assert leading_extra("Привет.", []) is None

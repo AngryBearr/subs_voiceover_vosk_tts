@@ -167,7 +167,11 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   `f5_env` (`bash scripts/setup_envs.sh f5`, reuses torch of subs_env) as `voiceover.f5_worker`;
   each line is synthesised at a natural length (5 syllables/s) and retried with other seeds when
   GigaAM misses or mishears a word. 32 sampling steps by default, 7 in the UI's fast mode
-  (`voiceover.engines.f5.nfe`).
+  (`voiceover.engines.f5.nfe`). Reference clips are 5-9 s (F5 cuts longer ones, and a cut
+  clip no longer matches its transcript) with Whisper's transcript of the clip itself; when F5
+  still speaks the end of the reference before the line, GigaAM's word times show it and the
+  start is cut off. S29E03 (640 lines, 15 voices): 19 min; character errors 5.1% (12 s clips)
+  -> 2.5% (5-9 s) -> 1.5% (with the cut), Vosk 0.6%, TeraTTS 0.5%.
 - **Stress (before synthesis).** RUAccent is right for dictionary words; errors come from
   homographs and words it guesses. Stress is fixed in the text: from the audio it is heard only
   partly (TeraAnaly's stress head, given the text, on 159 phrases synthesised with a deliberately
@@ -213,7 +217,7 @@ episode; a stretch with more than 0.15 s of another diarized speaker is dropped;
 WeSpeaker embedding is closest to the person's prints go through vocal separation (Hybrid
 Demucs from torchaudio); every 3 s window of the vocals must still sound like the person
 (0.45+), which drops stretches with a second voice. The clip is the separated vocals, 24 kHz
-mono, with 1 s of silence at the end and the transcript from the aligned words (`<Name>.wav`,
+mono, with 1 s of silence at the end and its transcript by Whisper (`<Name>.wav`,
 `<Name>.txt`, `references.json`). S29E01-E04: 19 people; the music bed is 6-16 dB under the
 voice in every candidate (reality TV), and 22-46 dB under it in the separated clips.
 

@@ -155,6 +155,23 @@ def clip_score(result: dict[str, Any]) -> float:
             + 0.1 * max(0.0, result["stretch"] - 2.0))
 
 
+def leading_extra(tts_text: str, words: list[tuple[str, float, float]]) -> float | None:
+    """Start (s) of the line's first word when the ASR heard extra words before it, else None.
+
+    A cloning TTS sometimes speaks the end of its reference clip before the line ("idol for
+    himself" in front of a Russian sentence): cutting there keeps the line itself."""
+    target = plain_words(tts_text)
+    heard = [(token[0], start) for text, start, _ in words if (token := plain_words(text))]
+    if not target or not heard:
+        return None
+    matcher = difflib.SequenceMatcher(a=target, b=[w for w, _ in heard], autojunk=False)
+    first = next((block for block in matcher.get_matching_blocks() if block.size), None)
+    if first is None:
+        return None
+    extra = first.b - first.a  # heard words before the first matching one, beyond the target's own
+    return heard[extra][1] if extra > 0 else None
+
+
 def check_audio(recognizer: "Recognizer", tts_text: str, audio: np.ndarray, sample_rate: int) -> dict[str, Any]:
     """Speech check of one synthesized clip (used by engines to retry bad takes)."""
     heard, words = recognizer(audio, sample_rate)

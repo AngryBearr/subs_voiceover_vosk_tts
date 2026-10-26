@@ -143,7 +143,9 @@ class Episode:
             "glossary": (self.glossary, [self.out / "glossary.json"]),
             "speakers": (self.speakers, [self.out / "speakers.llm.json"], [self.out / "speakers.override.json"]),
             "translate": (self.translate, [self.out / "subs.ru.json"]),
-            "dub": (self.dub, [self.out / f"dub.ru.{self.engine}.json"], [self.out / "corrections.json"]),
+            "dub": (self.dub, [self.out / f"dub.ru.{self.engine}.json"],
+                    [self.out / "corrections.json"]  # manual fixes; for F5 also new or replaced voice clips
+                    + ([self.references / "references.json"] if self.engine == "f5" else [])),
             "stress": (self.stress, [self.out / "stress.json"]),
             "voiceover": (self.voiceover, [self.vo_dir / "export" / "track.wav"]),
             "check": (self.check, [self.vo_dir / "speech_check.json"]),
@@ -221,7 +223,9 @@ class Episode:
             vosk = cfg.get("engines", {}).get("vosk", {}).get("voices", {"female": 49, "male": 56})
             refs = fallback_references(self.references.parent / "fallback_voices",
                                        REPO_ROOT / vo["engine"]["model_path"], {g: int(v) for g, v in vosk.items()})
-            engine["voices"] = {g: refs[g] if v == "auto" else v for g, v in engine["voices"].items()}
+            from voiceover.engine_f5 import voice_id
+
+            engine["voices"] = {g: voice_id(refs[g] if v == "auto" else v) for g, v in engine["voices"].items()}
         return engine
 
     @property
@@ -242,7 +246,9 @@ class Episode:
         for card in load_json(self.out / "speakers.json"):
             ref = next((r for r in refs if card.get("name") and same_person(r["name"], card["name"])), None)
             if ref:
-                mapping[card["id"]] = str((self.references / ref["wav"]).resolve())
+                from voiceover.engine_f5 import voice_id
+
+                mapping[card["id"]] = voice_id((self.references / ref["wav"]).resolve())
         path = self.out / "speaker_voices.f5.json"
         save_json(path, mapping)
         log.info("[%s] F5 voices: %d speakers with their own clip", self.media.stem, len(mapping))

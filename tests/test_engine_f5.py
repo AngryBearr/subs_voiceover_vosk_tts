@@ -56,3 +56,12 @@ def test_f5_engine_caches_by_text_and_voice_clip(tmp_path: Path, monkeypatch: py
     sf.write(julie, np.ones(24000, dtype=np.float32) * 0.1, 24000)  # another clip under the same name
     engine.synthesize_many(rows, tmp_path / "cache")
     assert len(runs) == 2 and [item["ref_wav"] for item in runs[1]] == [julie]
+
+
+def test_voice_id_names_the_clip_content(tmp_path: Path) -> None:
+    from voiceover.engine_f5 import clip_path, voice_id
+
+    clip = _ref(tmp_path, "julie")
+    first = voice_id(clip)
+    sf.write(clip, np.ones(24000, dtype=np.float32) * 0.1, 24000)
+    assert first != voice_id(clip) and clip_path(first) == clip

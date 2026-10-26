@@ -1,7 +1,9 @@
 """ESpeech F5-TTS (ESpeech-TTS-1_RL-V2) behind the ``Engine`` protocol: lines in cloned voices.
 
 A voice is a reference clip (WAV + transcript in ``<name>.txt`` next to it, as written by
-``stt.voice_bank --export``); the dubbing script gives every line its speaker's clip. Text
+``stt.voice_bank --export``); the dubbing script gives every line its speaker's clip as
+``<path>#<content hash>`` (``voice_id``), so a new clip under the same name changes the script and
+the voice-over is redone. Text
 preparation is the Vosk one (rule-based expansion, RUAccent stress with ``+``, which ESpeech
 reads). Each line is synthesised at a natural length (``target_syl_per_sec``), heard by GigaAM
 and retried with other seeds when a word is missing or garbled (``verify.attempts``).
@@ -31,6 +33,21 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FALLBACK_TEXT = "Сегодня на острове снова жарко, и всех ждёт непростое испытание. Посмотрим, кто справится лучше."
+
+
+def voice_id(path: str | Path) -> str:
+    """A reference clip as a voice: its path plus a hash of the clip and its transcript."""
+    import hashlib
+
+    path = Path(path)
+    text = path.with_suffix(".txt")
+    digest = hashlib.sha256((_sha256_file(path) + (text.read_text(encoding="utf-8") if text.exists() else ""))
+                            .encode("utf-8")).hexdigest()
+    return f"{path}#{digest[:12]}"
+
+
+def clip_path(voice: str) -> str:
+    return voice.split("#", 1)[0]
 
 
 def fallback_references(folder: Path, model_path: Path, voices: dict[str, int]) -> dict[str, str]:
@@ -73,18 +90,19 @@ class F5Engine(VoskEngine):
         self._accentizer: Any = None
         if not self.python.exists():
             raise FileNotFoundError(f"{self.python} missing: create f5_env with `bash scripts/setup_envs.sh f5`")
-        if not Path(self.voice).is_file():
+        if not Path(clip_path(self.voice)).is_file():
             raise FileNotFoundError(f"F5 default voice (reference WAV) not found: {self.voice!r}")
 
     def synth_identity(self) -> dict[str, Any]:
         return {"engine": "f5", "model": self.repo, "nfe": self.nfe, "target_syl_per_sec": self.target_syl_per_sec,
                 "base_rate": self.base_rate, "attempts": self.attempts, "trim": dict(self.trim),
+                "worker": 2,  # bump when voiceover.f5_worker changes the audio (2: leaked reference cut off)
                 "voice": self._voice_key(self.voice)}
 
     @staticmethod
-    def _voice_key(path: str) -> str:
+    def _voice_key(voice: str) -> str:
         """The clip's path and content: another clip under the same name is another voice."""
-        return f"{path}#{_sha256_file(Path(path))[:12]}"
+        return voice_id(clip_path(voice))
 
     def _voice(self, row: PreparedText) -> str:  # type: ignore[override]
         return self.voice if row.voice is None else str(row.voice)
@@ -112,8 +130,9 @@ class F5Engine(VoskEngine):
                 if entry.get("tts_text") == row.tts_text and not entry.get("error"):
                     entries[key] = entry
                     continue
-            todo[key] = {"key": key, "text": row.tts_text, "ref_wav": voice,
-                         "ref_text": Path(voice).with_suffix(".txt").read_text(encoding="utf-8").strip(),
+            ref = clip_path(voice)
+            todo[key] = {"key": key, "text": row.tts_text, "ref_wav": ref,
+                         "ref_text": Path(ref).with_suffix(".txt").read_text(encoding="utf-8").strip(),
                          "duration": round(self.duration(row.tts_text), 3), "out_wav": str(cache_dir / f"{key}.wav")}
         log.info("synthesis: %d distinct texts, %d cached, %d to synthesize (F5, %d voices)",
                  len(entries) + len(todo), len(entries), len(todo), len(voice_keys))
