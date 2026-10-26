@@ -3,12 +3,15 @@
 Each voiced line of ``subs.ru.json`` is heard twice:
 
 - the age/gender model (the one that profiles the speakers) on the line's own audio: a
-  confident (0.9+) other gender than the voice used;
+  confident (0.9+) other gender than the voice used, when the line does not clearly sound like
+  its own speaker (print similarity under 0.35);
 - its WeSpeaker voice print against the episode's speakers: clearly closer (0.15+) to another
   speaker than to its own.
 
-Shouts and crowd noise fool the gender model (a host's shouting can sound "female" to it), so
-this is a list for a person, not an automatic fix. Writes:
+The gender model hears the voices separated from music and effects (Hybrid Demucs, as in the
+mix): music under narration made it hear the host as "female" (S29E01-E04: 30 of 72 gender flags
+before). Shouts and crowd noise still fool it, so this is a list for a person, not an automatic
+fix. Writes:
 
 - ``review.json``: one entry per suspicious line - its number in ``subs.ru.srt``, time,
   speaker, the voice used, what the audio sounds like, English and Russian text, and a
@@ -43,6 +46,8 @@ MAX_GENDER_S = 10.0  # longer lines: their first seconds are enough
 VOICE_MIN = 0.6  # another speaker's print must be at least this close ...
 VOICE_MARGIN = 0.15  # ... and this much closer than the line's own speaker
 MIN_VOICE_S = 1.0
+OWN_VOICE_OK = 0.35  # a line this close to its own speaker's print is not flagged for gender alone
+# (S29: the host's shouts heard as "female" matched his print at 0.36-0.76; other gender flags under 0.31)
 
 
 def _clock(seconds: float) -> str:
@@ -51,10 +56,12 @@ def _clock(seconds: float) -> str:
 
 
 def suspects(records: list[dict[str, Any]], speakers: list[dict[str, Any]], audio: np.ndarray, rate: int,
-             gender_of: Any, embed: Any, skip: set[int] = frozenset(), offset: float = 0.0) -> list[dict[str, Any]]:
+             gender_of: Any, embed: Any, skip: set[int] = frozenset(), offset: float = 0.0,
+             voices: np.ndarray | None = None) -> list[dict[str, Any]]:
     """Suspicious voiced lines; ``gender_of(audio) -> (p_female, p_male)``, ``embed(audio, rate) -> unit vector``.
 
-    ``offset``: media time of the first sample of ``audio`` (a test piece starts mid-episode)."""
+    ``offset``: media time of the first sample of ``audio`` (a test piece starts mid-episode);
+    ``voices``: the audio's separated voices (same rate and length), heard by the gender model."""
     from stt.voice_bank import _unit
 
     cards = {s["id"]: s for s in speakers}
@@ -64,20 +71,24 @@ def suspects(records: list[dict[str, Any]], speakers: list[dict[str, Any]], audi
         if r["index"] in skip or not " ".join(r["text"]).strip():
             continue
         start, end = r["start"] / 1000, r["end"] / 1000
-        segment = audio[max(0, int((start - offset) * rate)):max(0, int((end - offset) * rate))]
+        span = slice(max(0, int((start - offset) * rate)), max(0, int((end - offset) * rate)))
+        segment = audio[span]
         if len(segment) < rate // 10:  # outside the decoded audio
             continue
+        voice_only = voices[span] if voices is not None else segment
         voice = r.get("gender")
         entry: dict[str, Any] = {}
-        if end - start >= MIN_GENDER_S and voice in ("male", "female"):
-            p_female, p_male = gender_of(segment[: int(MAX_GENDER_S * rate)])
-            heard, p = ("female", p_female) if p_female > p_male else ("male", p_male)
-            if heard != voice and p >= GENDER_P:
-                entry.update(heard=f"{heard} ({p:.2f})", fix={"gender": heard})
         own = r.get("speaker")
+        sims: dict[str, float] = {}
         if end - start >= MIN_VOICE_S and own in prints and len(prints) > 1:
             vector = embed(segment, rate)
             sims = {sid: float(vector @ p) for sid, p in prints.items()}
+        if end - start >= MIN_GENDER_S and voice in ("male", "female") and sims.get(own, 0.0) < OWN_VOICE_OK:
+            p_female, p_male = gender_of(voice_only[: int(MAX_GENDER_S * rate)])
+            heard, p = ("female", p_female) if p_female > p_male else ("male", p_male)
+            if heard != voice and p >= GENDER_P:
+                entry.update(heard=f"{heard} ({p:.2f})", fix={"gender": heard})
+        if sims:
             best = max(sims, key=lambda sid: sims[sid])
             if best != own and sims[best] >= VOICE_MIN and sims[best] - sims[own] >= VOICE_MARGIN:
                 other = cards[best]
@@ -111,6 +122,18 @@ def write_review(folder: Path, items: list[dict[str, Any]]) -> None:
     (folder / "review.srt").write_text("\n".join(blocks), encoding="utf-8")
 
 
+def separated_voices(audio: np.ndarray, rate: int, device: str = "cuda") -> np.ndarray:
+    """The voices of a mono recording without music and effects (same rate and length)."""
+    import soxr
+
+    from stt.separate import VocalSeparator
+
+    separator = VocalSeparator(device)
+    up = soxr.resample(audio.astype(np.float32), rate, separator.rate)
+    vocals = separator.separate_long(np.stack([up, up])).mean(0)
+    return soxr.resample(vocals, separator.rate, rate)[: len(audio)].astype(np.float32)
+
+
 def review(folder: Path, device: str = "cuda") -> list[dict[str, Any]]:
     import soundfile as sf
 
@@ -123,6 +146,7 @@ def review(folder: Path, device: str = "cuda") -> list[dict[str, Any]]:
     audio, rate = sf.read(str(folder / "audio.wav"), dtype="float32")
     source = folder / "source.json"
     offset = float(load_json(source).get("start") or 0.0) if source.exists() else 0.0
+    voices = separated_voices(audio, rate, device)
     estimator = AgeGenderEstimator(device)
     estimator.load()
 
@@ -130,7 +154,7 @@ def review(folder: Path, device: str = "cuda") -> list[dict[str, Any]]:
         _, probs = estimator.predict(segment)
         return float(probs[0]), float(probs[1])
 
-    items = suspects(records, speakers, audio, rate, gender_of, SegmentEmbedder(device), skip, offset)
+    items = suspects(records, speakers, audio, rate, gender_of, SegmentEmbedder(device), skip, offset, voices)
     write_review(folder, items)
     log.info("review: %d of %d lines to check (%d with both signals) -> %s", len(items), len(records),
              sum(i["both_signals"] for i in items), folder / "review.json")

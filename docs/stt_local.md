@@ -208,10 +208,12 @@ matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own lin
 ## Checking by ear and fixing lines
 
 After the speech check, `stt.review` lists voiced lines that may have the wrong voice: the
-age/gender model hears the other gender with 0.9+ on the line's own audio, or the line's voice
-print is clearly (0.15+) closer to another speaker than to its own. Shouts and crowd noise fool
-the gender model, so this is a list for a person, not an automatic fix (S29E01-E04: 12-35 lines
-per episode).
+age/gender model hears the other gender with 0.9+ on the line's voice separated from music (Hybrid
+Demucs) while the line does not clearly sound like its own speaker (print similarity under 0.35),
+or the line's voice print is clearly (0.15+) closer to another speaker than to its own. On
+S29E01-E04 this brought the list from 100 to 65 lines (9-26 per episode) and the host's
+narration and shouts "heard as female" from 30 to 6. Shouts and crowd noise still fool the
+gender model, so this is a list for a person, not an automatic fix.
 
 - `review.json`: line number (as in `subs.ru.srt`), time, speaker, voice used, what was heard,
   English and Russian text, and a ready `fix`;

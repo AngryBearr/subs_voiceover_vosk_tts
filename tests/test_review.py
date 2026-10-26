@@ -16,8 +16,9 @@ def _rec(index: int, start: float, end: float, speaker: str, gender: str, text: 
             "gender": gender, "speaker_name": speaker, "text": [text], "text_en": ["Hi"]}
 
 
-SPEAKERS = [{"id": "S01", "name": "Jeff Probst", "label_ru": "Джефф", "gender": "male", "embedding": [1.0, 0.0]},
-            {"id": "S02", "name": "Julie McGee", "label_ru": "Джули", "gender": "female", "embedding": [0.0, 1.0]}]
+SPEAKERS = [{"id": "S01", "name": "Jeff Probst", "label_ru": "Джефф", "gender": "male", "embedding": [1.0, 0.0, 0.0]},
+            {"id": "S02", "name": "Julie McGee", "label_ru": "Джули", "gender": "female",
+             "embedding": [0.0, 1.0, 0.0]}]
 
 
 def test_suspects_by_gender_and_by_voice(tmp_path: Path) -> None:
@@ -32,7 +33,11 @@ def test_suspects_by_gender_and_by_voice(tmp_path: Path) -> None:
         return (0.95, 0.05) if segment.mean() > 0.9 else (0.05, 0.95)
 
     def embed(segment: np.ndarray, rate: int) -> np.ndarray:
-        return np.array([0.0, 1.0]) if abs(segment.mean() - 0.5) < 0.01 else np.array([1.0, 0.0])
+        if abs(segment.mean() - 0.5) < 0.01:
+            return np.array([0.0, 1.0, 0.0])  # sounds like S02
+        if segment.mean() > 0.9:
+            return np.array([0.0, 0.0, 1.0])  # like nobody known: the gender model decides
+        return np.array([1.0, 0.0, 0.0])  # clearly its own speaker
 
     items = suspects(records, SPEAKERS, audio, rate, gender_of, embed, skip={4})
     assert [(i["line"], i["fix"]) for i in items] == [(2, {"gender": "female"}), (3, {"speaker": "Julie McGee"})]
@@ -53,3 +58,12 @@ def test_corrections_change_gender_speaker_text_and_skip() -> None:
     assert [v["voice"] for v in voiced] == [49, 49, 56] and skipped[0]["reason"] == "skipped in corrections.json"
     with pytest.raises(ValueError):
         apply_corrections(records, {"1": {"speaker": "Nobody Here"}}, SPEAKERS)
+
+
+def test_no_gender_flag_when_the_line_sounds_like_its_speaker() -> None:
+    rate = 100
+    audio = np.ones(3 * rate, dtype=np.float32)
+    records = [_rec(1, 0, 2, "S01", "male")]
+    items = suspects(records, SPEAKERS, audio, rate, lambda seg: (0.99, 0.01),
+                     lambda seg, r: np.array([1.0, 0.0, 0.0]))
+    assert items == []  # the host's shout "heard female" while it clearly is his voice
