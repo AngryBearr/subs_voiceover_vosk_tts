@@ -96,19 +96,21 @@ class Episode:
 
         The model id gets its route (``utils.llm_route``): models matching a pattern of
         ``llm.opencode`` (e.g. "openai/*") go through the OpenCode login of a subscription, with
-        ``llm.router`` (openrouter | orcarouter) as fallback unless ``llm.fallback`` is false;
-        the rest go to ``llm.router``. Ids that already carry a route keep it.
+        ``llm.router`` (openrouter | orcarouter, or a list tried in order) as fallback unless
+        ``llm.fallback`` is false; the rest go to ``llm.router``. Ids that already carry a route
+        keep it.
         """
         llm = self.config.get("llm") or {"model": self.config.get("llm_model", "openai/gpt-6-luna")}
         stages = llm.get("stages") or {}
         model = stages[stage] if stages.get(stage) is not None else llm["model"]
         patterns = llm.get("opencode") or []
         router = llm.get("router", "openrouter")
+        routers = [router] if isinstance(router, str) else list(router)
 
         def route(name: str) -> str:
             if any(fnmatch.fnmatchcase(name, p) for p in patterns):
-                return with_route(name, ["opencode", router] if llm.get("fallback", True) else ["opencode"])
-            return with_route(name, [router])
+                return with_route(name, ["opencode", *routers] if llm.get("fallback", True) else ["opencode"])
+            return with_route(name, routers)
 
         return [route(m) for m in model] if isinstance(model, list) else route(model)
 

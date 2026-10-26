@@ -244,6 +244,10 @@ class RunTest(unittest.TestCase):
         self.assertEqual(routed.llm("translate"), "opencode+orcarouter:openai/gpt-6-luna")
         self.assertEqual(routed.llm("stress"), ["opencode+orcarouter:openai/gpt-6.1-sol",
                                                 "orcarouter:anthropic/claude-sonnet-5.5", "openrouter:google/g"])
+        chain = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"]}})
+        self.assertEqual(chain.llm("fuse"), "opencode+orcarouter+openrouter:openai/gpt-6-luna")
+        self.assertEqual(chain.llm("stress"), "opencode+orcarouter+openrouter:openai/gpt-6-luna")
         no_fallback = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
             "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "fallback": False}})
         self.assertEqual(no_fallback.llm("fuse"), "opencode:openai/gpt-6-luna")
