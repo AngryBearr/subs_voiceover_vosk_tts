@@ -58,6 +58,39 @@ def test_f5_engine_caches_by_text_and_voice_clip(tmp_path: Path, monkeypatch: py
     assert len(runs) == 2 and [item["ref_wav"] for item in runs[1]] == [julie]
 
 
+def test_f5_engine_resumes_an_interrupted_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    python = tmp_path / "python"
+    python.write_text("")
+    engine = F5Engine({"voice": _ref(tmp_path, "default"), "python": str(python), "trim": {"pauses_enabled": False}})
+    runs: list[list[str]] = []
+
+    def worker(items: list[dict[str, Any]], cache_dir: Path, stop_after: int | None = None) -> None:
+        runs.append([item["text"] for item in items])
+        for n, item in enumerate(items):
+            if stop_after is not None and n == stop_after:
+                raise RuntimeError("F5 worker failed (exit -15)")  # killed: earlier lines are on disk
+            audio = np.zeros(int(24000 * item["duration"]), dtype=np.float32)
+            audio[2400:-2400] = 0.3
+            sf.write(item["out_wav"], audio, 24000)
+            take = {"key": item["key"], "seed": 1234, "takes": 1, "error": None}
+            Path(item["out_wav"]).with_suffix(".take.json").write_text(json.dumps(take))
+            item["result"] = take
+
+    rows = [PreparedText(f"c{n}", "x", f"Строк+а {n}.", "ok") for n in range(4)]
+    monkeypatch.setattr(engine, "_run_worker", lambda items, cache_dir: worker(items, cache_dir, stop_after=2))
+    with pytest.raises(RuntimeError):
+        engine.synthesize_many(rows, tmp_path / "cache")
+    monkeypatch.setattr(engine, "_run_worker", worker)
+    results = engine.synthesize_many(rows, tmp_path / "cache")
+    assert runs[1] == ["Строк+а 2.", "Строк+а 3."]  # only the lines the killed worker had not finished
+    assert all(r.error is None and Path(r.path).exists() for r in results)
+    assert not list((tmp_path / "cache").rglob("*.take.json"))  # turned into cache entries
+    engine.synthesize_many(rows, tmp_path / "cache")
+    assert len(runs) == 2
+
+
 def test_voice_id_names_the_clip_content(tmp_path: Path) -> None:
     from voiceover.engine_f5 import clip_path, voice_id
 

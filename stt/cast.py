@@ -1,6 +1,6 @@
 """The cast of a season from the web: names, spelling, gender and relations of everyone who speaks.
 
-A cheap LLM with web search (OpenRouter ":online") reads the show and season off the folder and
+A cheap LLM with web search (OpenRouter ":online", another vendor's model if it fails) reads the show and season off the folder and
 file names, once per season (``<out-root>/<folder>.cast.json``). The glossary takes the cast's
 spellings, the speaker naming gets the cast as evidence, and after naming every speaker is
 checked against it (``check_speakers``):
@@ -9,7 +9,8 @@ checked against it (``check_speakers``):
   Misch" -> "Jon Misch"); nicknames stay as they are;
 - a name not in the cast is listed (likely an ASR mistake or a one-off guest);
 - a gender that contradicts the cast is listed, never changed: the web can be wrong too (S10:
-  Stevie Khouw came back "female"; the voice and the transcript said male, correctly).
+  Stevie Khouw came back "female" from luna, S29 Reed Kelly "female" from Haiku; the voice and the
+  transcript said male, correctly).
 
 S29 (San Juan del Sur): 18 contestants + host with their relations (twins, mother and daughter,
 couples) in 14-20 s for $0.01-0.02; Australian Survivor S10: 25 people, $0.01-0.03. On the S10
@@ -33,7 +34,9 @@ from stt.runner import load_json, save_json
 
 log = logging.getLogger("stt.cast")
 
-DEFAULT_MODEL = "openrouter:openai/gpt-6-luna:online"
+# tried in order: another vendor answers when one refuses or fails (Claude Haiku: S29 as complete)
+DEFAULT_MODELS = ["openrouter:openai/gpt-6-luna:online", "openrouter:anthropic/claude-haiku-5.5:online"]
+MIN_PEOPLE = 3  # fewer is a refusal or a wrong show, not a cast
 SYSTEM_PROMPT = """You compile the cast of one season of a TV show for a dubbing pipeline. Use web search.
 The user gives the video folder and file names (they name the show and season) and names heard
 in the episodes (automatic speech recognition: may be misspelled).
@@ -54,12 +57,29 @@ def fetch_cast(client: OpenRouterClient, folder_name: str, file_name: str, heard
             "sources": answer.get("sources") or [], "model": client.model, "usage": client.usage.to_dict()}
 
 
+def find_cast(models: list[str], folder_name: str, file_name: str, heard: list[str]) -> dict[str, Any]:
+    """The first answer with a real cast; a failure or refusal moves on to the next model."""
+    errors = []
+    for model in models:
+        try:
+            cast = fetch_cast(OpenRouterClient(model, reasoning="low"), folder_name, file_name, heard)
+        except Exception as error:  # noqa: BLE001 - the next model may answer
+            errors.append(f"{model}: {error}"[:300])
+            log.warning("cast: %s failed: %s", model, error)
+            continue
+        if len(cast["cast"]) >= MIN_PEOPLE:
+            return {**cast, **({"failed": errors} if errors else {})}
+        errors.append(f"{model}: {len(cast['cast'])} people")
+        log.warning("cast: %s found %d people, trying the next model", model, len(cast["cast"]))
+    raise RuntimeError("no model found the cast: " + "; ".join(errors))
+
+
 def cast_text(cast: dict[str, Any]) -> str:
     """The cast as prompt lines: name (aliases) - gender, role; relations."""
     lines = []
     for p in cast.get("cast", []):
         aliases = f" ({', '.join(p['aliases'])})" if p.get("aliases") else ""
-        relations = f"; {p['relations']}" if p.get("relations") else ""
+        relations = f"; {p['relations']}" if str(p.get("relations") or "").lower() not in ("", "none", "null", "-") else ""
         lines.append(f"- {p['name']}{aliases} - {p.get('gender') or '?'}, {p.get('role') or '?'}{relations}")
     return f"{cast.get('show') or ''} {cast.get('season') or ''}".strip() + ":\n" + "\n".join(lines)
 
@@ -106,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Find the cast of a season on the web (once per season)")
     parser.add_argument("folder", type=Path, help="Episode output folder (its source.json names the video)")
     parser.add_argument("--cast", type=Path, required=True, help="Season cast JSON to write (kept if it exists)")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", default=",".join(DEFAULT_MODELS),
+                        help="Models with web search, comma-separated: the next one if one fails or refuses")
     parser.add_argument("--force", action="store_true", help="Look up again even if the cast file exists")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
@@ -116,11 +137,10 @@ def main(argv: list[str] | None = None) -> int:
     media = Path(load_json(args.folder / "source.json")["media"])
     glossary = args.folder / "glossary.json"
     heard = [e["en"] for e in load_json(glossary) if e.get("type") == "person"] if glossary.exists() else []
-    client = OpenRouterClient(args.model, reasoning="low")
-    cast = fetch_cast(client, media.parent.name, media.name, heard)
+    cast = find_cast([m for m in args.model.split(",") if m], media.parent.name, media.name, heard)
     save_json(args.cast, cast)
     log.info("cast: %s %s, %d people -> %s (%s)", cast["show"], cast["season"], len(cast["cast"]), args.cast,
-             client.usage.to_dict())
+             cast["usage"])
     return 0
 
 

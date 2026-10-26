@@ -302,7 +302,8 @@ class VoskEngine:
         """Synthesize every distinct engine text once; ``cache_dir`` is keyed by text.
 
         A cached entry is a ``<key>.wav`` plus ``<key>.json`` with the measured
-        values.  Failed syntheses are not cached, so they are retried next time.
+        values, written as each line is done (an interrupted run resumes where it stopped).
+        Failed syntheses are not cached, so they are retried next time.
         """
         cache_dir = cache_dir / self.synth_identity_sha()[:16]
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -324,18 +325,8 @@ class VoskEngine:
         log.info("synthesis: %d distinct texts, %d cached, %d to synthesize", len(cached) + len(jobs),
                  len(cached), len(jobs))
         job_list = list(jobs.values())
-        if not job_list:
-            raw: list[dict[str, Any]] = []
-        elif workers <= 1:
-            _worker_init(str(self.model_path), self.device)
-            raw = [_worker_synth(job) for job in job_list]
-        else:
-            threads = max(1, (os.cpu_count() or workers) // workers)
-            context = multiprocessing.get_context("spawn")
-            with context.Pool(min(workers, len(job_list)), initializer=_worker_init,
-                              initargs=(str(self.model_path), self.device, threads)) as pool:
-                raw = pool.map(_worker_synth, job_list, chunksize=4)
-        for job, result in zip(job_list, raw):
+
+        def store(job: dict[str, Any], result: dict[str, Any]) -> None:
             key = job["cue_id"]
             entry = {**result, "tts_text": job["tts_text"]}
             entry.pop("cue_id", None)
@@ -343,6 +334,18 @@ class VoskEngine:
                 (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1),
                                                        encoding="utf-8")
             cached[key] = entry
+
+        if job_list and workers <= 1:
+            _worker_init(str(self.model_path), self.device)
+            for job in job_list:
+                store(job, _worker_synth(job))
+        elif job_list:
+            threads = max(1, (os.cpu_count() or workers) // workers)
+            context = multiprocessing.get_context("spawn")
+            with context.Pool(min(workers, len(job_list)), initializer=_worker_init,
+                              initargs=(str(self.model_path), self.device, threads)) as pool:
+                for job, result in zip(job_list, pool.imap(_worker_synth, job_list, chunksize=4)):
+                    store(job, result)
         results: list[SynthResult] = []
         for row in prepared:
             voice = self._voice(row)

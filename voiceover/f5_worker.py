@@ -6,7 +6,8 @@ The job lists lines: engine text (``+`` stress marks), a reference clip with its
 target length and the output WAV. Each line is synthesised at exactly that length (F5's own
 length estimate counts UTF-8 bytes, so Cyrillic text would come out twice too long), heard by
 GigaAM, and synthesised again with other seeds when a word is missing, garbled or drawn out;
-the best take is kept. One model load for the whole job.
+the best take is kept. One model load for the whole job. Each finished line also gets
+``<key>.take.json`` next to its WAV, so an interrupted job is resumed by the engine, not redone.
 """
 
 from __future__ import annotations
@@ -70,6 +71,9 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
             entry: dict[str, Any] = {"key": item["key"], "seed": 1234 + best[2], "takes": best[2] + 1, "error": None}
             if best[3]:
                 entry["check"] = {k: best[3][k] for k in ("cer", "stretch", "flags", "heard")}
+            # written after the WAV: an interrupted job leaves its finished lines for the next run
+            Path(item["out_wav"]).with_suffix(".take.json").write_text(json.dumps(entry, ensure_ascii=False),
+                                                                       encoding="utf-8")
         except Exception as exc:  # noqa: BLE001 - recorded per line, never hidden
             entry = {"key": item["key"], "error": f"{type(exc).__name__}: {exc}"[:500]}
         results.append(entry)

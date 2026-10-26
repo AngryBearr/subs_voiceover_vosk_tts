@@ -45,6 +45,12 @@ Defaults live in `stt_config.json` (mode, models, OCR, LLM, TTS engine and voice
 ducking). Stages already done are skipped; `--force STAGE` recomputes it and the following
 ones; `--mode fast` uses Whisper only.
 
+A run can be stopped at any time (Ctrl+C, or "Стоп" in the UI) and started again with the same
+command: finished episodes and stages are skipped, the recognition keeps its finished parts
+(each ASR model, alignment, OCR, diarization), and the voice-over keeps every line already
+synthesised (Vosk, TeraTTS and ESpeech write each line to the cache as it is done). An LLM step
+that was cut off (glossary, naming, translation, stress check) starts over; they take minutes.
+
 ## What runs where
 
 | Step | Where | What is sent out |
@@ -232,14 +238,16 @@ matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own lin
 ### Cast of the season from the web
 
 Once per season (before the first glossary) a cheap LLM with web search,
-`openrouter:openai/gpt-6-luna:online` (`llm.stages.cast`), reads the show and season off the
-folder and file names and writes `<out-root>/<folder>.cast.json`: every person who speaks, with
+`openrouter:openai/gpt-6-luna:online` (`llm.stages.cast`; if it fails, refuses or finds fewer
+than 3 people, the next model of the list: `anthropic/claude-haiku-5.5:online`, same price,
+S29 and S10 as complete), reads the show and season off the folder and file names and writes `<out-root>/<folder>.cast.json`: every person who speaks, with
 spellings, nicknames, gender, role and relations (twins, couples, parent and child). The
 glossary uses its spellings, the speaker naming gets it as evidence, and after naming
 `stt.cast.check_speakers` turns other spellings of a cast name into the cast's ("John Misch" ->
 "Jon Misch"), and logs names not in the cast and genders that contradict it (`cast_check` in
 `speakers.json`). The gender is never changed from the cast: the web is wrong too (S10 Stevie
-Khouw came back "female"; the voice and the transcript said male, correctly).
+Khouw came back "female" from luna, S29 Reed Kelly "female" from Haiku; the voice and the
+transcript said male, correctly).
 
 Measured: 15-20 s and $0.01-0.03 per season; S29: 19 people, S10: 26. Names on the S10 SDH
 speaker labels (E01, E12, E16) were as right with the cast as without it (gpt-6.1-sol: 65.5% of

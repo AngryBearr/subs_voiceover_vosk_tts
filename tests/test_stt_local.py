@@ -218,7 +218,7 @@ class RunTest(unittest.TestCase):
                 self.assertTrue(ep._find_cast())
                 self.assertTrue(ep._find_cast())  # the file is there: no second lookup
             self.assertEqual(len(calls), 1)
-            self.assertIn("openrouter:openai/gpt-6-luna:online", calls[0])
+            self.assertIn("openrouter:openai/gpt-6-luna:online,openrouter:anthropic/claude-haiku-5.5:online", calls[0])
             ep.cast.unlink()
             with mock.patch("stt.cast.main", side_effect=RuntimeError("no web")):
                 self.assertFalse(ep._find_cast())  # a failed lookup is only a warning

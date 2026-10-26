@@ -134,10 +134,17 @@ class F5Engine(VoskEngine):
             todo[key] = {"key": key, "text": row.tts_text, "ref_wav": ref,
                          "ref_text": Path(ref).with_suffix(".txt").read_text(encoding="utf-8").strip(),
                          "duration": round(self.duration(row.tts_text), 3), "out_wav": str(cache_dir / f"{key}.wav")}
-        log.info("synthesis: %d distinct texts, %d cached, %d to synthesize (F5, %d voices)",
-                 len(entries) + len(todo), len(entries), len(todo), len(voice_keys))
-        if todo:
-            self._run_worker(list(todo.values()), cache_dir)
+        resumed = 0  # lines an interrupted worker finished (WAV + take, no cache entry yet)
+        for key, item in todo.items():
+            take = cache_dir / f"{key}.take.json"
+            if take.exists() and Path(item["out_wav"]).exists():
+                item["result"] = json.loads(take.read_text(encoding="utf-8"))
+                resumed += 1
+        log.info("synthesis: %d distinct texts, %d cached, %d to synthesize (F5, %d voices)%s",
+                 len(entries) + len(todo), len(entries), len(todo) - resumed, len(voice_keys),
+                 f", {resumed} finished by an interrupted run" if resumed else "")
+        if len(todo) > resumed:
+            self._run_worker([item for item in todo.values() if "result" not in item], cache_dir)
         for key, item in todo.items():
             wav = Path(item["out_wav"])
             result = item.get("result") or {"error": "no result from the F5 worker"}
@@ -150,6 +157,7 @@ class F5Engine(VoskEngine):
                          "edge_trimmed_ms": edge_ms, "reduced_pauses": reduced, "error": None, "tts_text": item["text"],
                          "voice": item["ref_wav"], **{k: result[k] for k in ("seed", "takes", "check") if k in result}}
                 (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
+                (cache_dir / f"{key}.take.json").unlink(missing_ok=True)
             entries[key] = entry
         results = []
         for row in prepared:

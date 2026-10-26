@@ -198,9 +198,10 @@ class Episode:
         if not self.cast.exists():
             from stt import cast
 
-            model = (self.config.get("llm") or {}).get("stages", {}).get("cast") or cast.DEFAULT_MODEL
+            models = (self.config.get("llm") or {}).get("stages", {}).get("cast") or cast.DEFAULT_MODELS
             try:
-                cast.main([str(self.out), "--cast", str(self.cast), "--model", model])
+                cast.main([str(self.out), "--cast", str(self.cast), "--model",
+                           ",".join([models] if isinstance(models, str) else models)])
             except Exception as error:  # noqa: BLE001 - names still come from the transcript and the voices
                 log.warning("[%s] cast lookup failed: %s", self.media.stem, error)
         return self.cast.exists()
