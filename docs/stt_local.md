@@ -266,7 +266,15 @@ Word times of the fused text: character CTC forced alignment with the English wa
 `WAV2VEC2_ASR_LARGE_LV60K_960H` (11 s per hour of audio). Qwen3-ForcedAligner (`--aligner qwen`)
 gave 7-11% zero-length words on these shows; with CTC, cues starting >1 s before the speech in
 S10E01 (against hand-synced subtitles) went from 25 to 15.
-Diarization: `pyannote-community-1`. Gender/age: `audeering/wav2vec2-large-robust-24-ft-age-gender`
+Diarization: `pyannote-community-1`, then speaker refinement (`stt.refine_speakers`,
+`"speaker_refine"` in `stt_config.json`): every diarized turn gets an embedding of the stronger
+WeSpeaker ResNet293 (pyannote's PyTorch port of the checkpoint, ~17 s per episode), every speaker a
+centroid of its turns of 1.5+ s, and a turn that sounds clearly (0.1) closer to another speaker
+moves there before the words get their speakers. Measured against SDH speaker labels of
+Australian Survivor S10 (mostly off-screen or unclear voices): voiced cues on their person's main
+speaker 63.5% -> 71.1% on E01/E12/E16 (249 lines), diarization turns 63.6% -> 68.8% on all 24
+episodes (1300 lines); 10-28 cues per episode change the voice gender. Splitting speakers into
+sub-voices and the CAM++ model did worse. Gender/age: `audeering/wav2vec2-large-robust-24-ft-age-gender`
 (CC-BY-NC-SA-4.0, abstains below 0.7).
 
 Benchmarked and dropped (summary below): Parakeet v2/v3/Unified/TDT 1.1B, Canary 1B v2/180M/Qwen

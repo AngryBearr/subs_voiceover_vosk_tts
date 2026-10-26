@@ -5,6 +5,7 @@
     "accurate": {"asr": "cohere-transcribe", "fuse": ["whisper-large-v3"]}
   },
   "diarizer": "pyannote-community-1",
+  "speaker_refine": {"model": "resnet293", "margin": 0.1},
   "ocr": {"enabled": true, "fps": 2.0},
   "llm": {
     "model": "openai/gpt-6.1-sol",
