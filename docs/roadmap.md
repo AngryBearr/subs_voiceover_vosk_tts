@@ -92,7 +92,23 @@ Shmyrev's table of 20.10.2026 lists Vosk TTS 0.11: same speed as 0.10, fewer str
 When it is out: download it, set `voiceover.engines.vosk.model_path` in `stt_config.json` to it, re-voice S29E01 and
 compare the speech check and the stress errors with 0.10.
 
-## 5. To test (tips from Telegram and 4pda)
+## 5. One-command setup and a settings page (after the core is done)
+
+So that a new user only clones the branch, runs one script and then works in the browser:
+
+- `setup` script: checks the NVIDIA driver and `uv`, creates the environments (`subs_env`, and
+  `f5_env` if wanted), downloads the models (Vosk TTS, TeraTTS, ESpeech F5, pyannote with the
+  Hugging Face login and its terms, GigaAM, WeSpeaker ResNet293, Hybrid Demucs), asks for the
+  OpenRouter key and writes it into `.env` (never printed), runs a short self-test, then opens the
+  UI;
+- `run` script (or the setup script run again): only starts the UI and opens the browser;
+- a "Настройки" page in the UI built from `stt_config.json`: the options people actually change
+  (engines and voices, LLM model, recognition mode, subtitles in the mkv, duck only voices,
+  stress check, speaker refinement, the review list on/off, ESpeech fast mode, default folders),
+  saved into `stt_config.local.json` so the shared config stays untouched and "reset" is just
+  deleting the local file. For example: no review step at all, just the finished voice-over file.
+
+## 6. To test (tips from Telegram and 4pda)
 
 - **Spoken stress check.** TeraAnaly's stress head, given the text: on 159 phrases synthesised
   with a deliberately wrong stress it heard the wrong stress in 73% (Vosk) / 62% (TeraTTS) of
