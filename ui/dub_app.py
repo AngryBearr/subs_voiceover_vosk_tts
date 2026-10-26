@@ -5,6 +5,9 @@
 Tab "Обработка": pick episodes in a folder, engines and options, start, watch the stages of every
 episode, find the finished mkv files. A job runs ``stt.run`` in a background process (one job at
 a time, engines one after the other); its config and log are kept in ``<out-root>/.ui/``.
+
+Tab "Банк голосов": the season voice bank (``stt.voice_bank``): people, episodes, speech; cut
+the voice-cloning references, listen, ask for another clip, re-check names across the season.
 """
 
 from __future__ import annotations
@@ -204,6 +207,60 @@ def refresh() -> tuple[str, Any, str, Any]:
     return status, progress, log_tail(job), gr.update(value=results_rows(job))
 
 
+# ---------------------------------------------------------------- voice bank tab
+
+def _root(out_root: str) -> Path:
+    root = Path(out_root).expanduser()
+    return root if root.is_absolute() else REPO_ROOT / root
+
+
+def list_banks(out_root: str) -> list[str]:
+    return sorted(p.name for p in _root(out_root).glob("*.voices.json"))
+
+
+def refs_dir(out_root: str, bank: str) -> Path:
+    return _root(out_root) / bank.replace(".voices.json", ".references")
+
+
+def _bank_cmd(out_root: str, bank: str, *args: str) -> tuple[int, str]:
+    cmd = [sys.executable, "-m", "stt.voice_bank", str(_root(out_root) / bank), *args]
+    done = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    lines = [line for line in (done.stdout + done.stderr).splitlines()
+             if not any(k in line.lower() for k in ("warn", "tf32", ">>>", "issues/"))]
+    return done.returncode, "\n".join(lines[-40:])
+
+
+def people_rows(out_root: str, bank: str) -> list[list[Any]]:
+    if not bank:
+        return []
+    from stt.voice_bank import VoiceBank
+
+    vb = VoiceBank.load(_root(out_root) / bank)
+    index_path = refs_dir(out_root, bank) / "references.json"
+    refs = {r["name"]: r for r in json.loads(index_path.read_text(encoding="utf-8"))} if index_path.exists() else {}
+    rows = []
+    for person in vb.people():
+        ref = refs.get(person["name"])
+        rows.append([person["name"], person.get("label_ru") or "", person.get("gender") or "",
+                     len(person["episodes"]), round(person["speech_s"] / 60, 1),
+                     f"{ref['score']:.2f}" if ref else "нет"])
+    return rows
+
+
+def person_view(out_root: str, bank: str, name: str) -> tuple[Any, str]:
+    index_path = refs_dir(out_root, bank) / "references.json"
+    if not name or not index_path.exists():
+        return None, "Образца пока нет: нажмите «Собрать образцы»."
+    ref = next((r for r in json.loads(index_path.read_text(encoding="utf-8")) if r["name"] == name), None)
+    if ref is None:
+        return None, "Для этого человека чистый образец не нашёлся."
+    episode = re.search(r"S\d+E\d+", ref["episode"])
+    info = (f"**{ref['name']}** · {episode.group(0) if episode else ref['episode']} "
+            f"{ref['start']:.1f}–{ref['end']:.1f} с · похожесть {ref['score']:.2f} · "
+            f"музыка {ref['music_db']:+.0f} дБ до очистки\n\n> {ref['text']}")
+    return str(refs_dir(out_root, bank) / ref["wav"]), info
+
+
 def build() -> gr.Blocks:
     with gr.Blocks(title="Озвучка сериалов") as app:
         gr.Markdown("# Озвучка сериалов\nАнглийское видео → русская закадровая озвучка.")
@@ -247,6 +304,59 @@ def build() -> gr.Blocks:
                                     refine, preview, preview_from, preview_minutes], message)
             stop.click(stop_job, None, message)
             gr.Timer(2.0).tick(refresh, None, [status, progress, log, results])
+
+        with gr.Tab("Банк голосов"):
+            gr.Markdown("Банк собирается сам при обработке серий: голоса названных героев сезона. "
+                        "Здесь можно вырезать образцы голосов для будущей озвучки голосами героев, "
+                        "послушать их и заменить неудачные.")
+            with gr.Row():
+                bank_root = gr.Textbox(label="Папка результатов", value="output/stt", scale=3)
+                bank = gr.Dropdown(label="Сезон", choices=[], scale=3)
+                bank_refresh = gr.Button("Обновить", scale=1)
+            people = gr.Dataframe(headers=["Имя", "По-русски", "Пол", "Серий", "Речи, мин", "Образец"],
+                                  label="Люди сезона", interactive=False)
+            with gr.Row():
+                export_all = gr.Button("Собрать образцы (все)", variant="primary")
+                recheck = gr.Button("Перепроверить имена по сезону")
+                write_fixes = gr.Button("Записать исправления имён")
+            bank_message = gr.Textbox(label="Результат", lines=6)
+            person = gr.Dropdown(label="Человек", choices=[])
+            with gr.Row():
+                reference = gr.Audio(label="Образец голоса", type="filepath", interactive=False)
+                reference_info = gr.Markdown()
+            another = gr.Button("Другой образец для этого человека")
+
+            def load_bank(root: str, name: str | None) -> tuple[Any, Any, Any]:
+                banks = list_banks(root)
+                name = name if name in banks else (banks[0] if banks else None)
+                rows = people_rows(root, name) if name else []
+                return (gr.update(choices=banks, value=name), gr.update(value=rows),
+                        gr.update(choices=[r[0] for r in rows], value=None))
+
+            def run_export(root: str, name: str) -> tuple[str, Any]:
+                if not name:
+                    return "Выберите сезон.", gr.update()
+                code, out = _bank_cmd(root, name, "--export", str(refs_dir(root, name)))
+                return (out if code == 0 else f"Ошибка (код {code}):\n{out}"), gr.update(value=people_rows(root, name))
+
+            def run_another(root: str, name: str, who: str) -> tuple[Any, str, Any]:
+                if not (name and who):
+                    return None, "Выберите сезон и человека.", gr.update()
+                code, out = _bank_cmd(root, name, "--export", str(refs_dir(root, name)), "--person", who, "--reject")
+                audio, info = person_view(root, name, who)
+                return audio, info if code == 0 else f"Ошибка (код {code}):\n{out}", gr.update(
+                    value=people_rows(root, name))
+
+            bank_refresh.click(load_bank, [bank_root, bank], [bank, people, person])
+            bank.change(load_bank, [bank_root, bank], [bank, people, person])
+            export_all.click(run_export, [bank_root, bank], [bank_message, people])
+            recheck.click(lambda root, name: _bank_cmd(root, name, "--recheck")[1] if name else "Выберите сезон.",
+                          [bank_root, bank], bank_message)
+            write_fixes.click(lambda root, name: _bank_cmd(root, name, "--recheck", "--write-overrides")[1]
+                              if name else "Выберите сезон.", [bank_root, bank], bank_message)
+            person.change(lambda root, name, who: person_view(root, name, who), [bank_root, bank, person],
+                          [reference, reference_info])
+            another.click(run_another, [bank_root, bank, person], [reference, reference_info, people])
     return app
 
 
@@ -255,7 +365,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=7861)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args(argv)
-    build().launch(server_name=args.host, server_port=args.port)
+    # clips and videos may live outside the repo (an absolute output folder, the media drive)
+    build().launch(server_name=args.host, server_port=args.port, allowed_paths=[str(REPO_ROOT / "output"), "/media"])
 
 
 if __name__ == "__main__":

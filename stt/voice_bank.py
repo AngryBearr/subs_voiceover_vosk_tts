@@ -356,8 +356,28 @@ def _window_scores(embed: "SegmentEmbedder", audio: np.ndarray, rate: int, print
     return [max(float(embed(audio[i:i + size], rate) @ p) for p in prints) for i in starts]
 
 
-def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> list[dict[str, Any]]:
-    """Cut the cleanest reference stretch of every person into ``out_dir``; returns the index.
+def load_rejected(out_dir: Path) -> list[dict[str, Any]]:
+    path = out_dir / "rejected.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+def reject_reference(out_dir: Path, name: str) -> dict[str, Any] | None:
+    """Mark a person's current clip as rejected (``rejected.json``); the next export picks another."""
+    index = json.loads((out_dir / "references.json").read_text(encoding="utf-8"))
+    current = next((r for r in index if r["name"] == name), None)
+    if current is None:
+        return None
+    rejected = load_rejected(out_dir)
+    rejected.append({"name": name, "episode": current["episode"], "start": current["start"]})
+    (out_dir / "rejected.json").write_text(json.dumps(rejected, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return current
+
+
+def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only: str | None = None
+                      ) -> list[dict[str, Any]]:
+    """Cut the cleanest reference stretch of every person (or only ``only``) into ``out_dir``.
+
+    Returns the index (``references.json``; other people's entries are kept when ``only`` is set).
 
     Candidates: the person's solo stretches in every episode of the bank, without another
     diarized speaker inside. The closest to the person's prints go through vocal separation;
@@ -374,8 +394,14 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> l
     separate = VocalSeparator(device)
     audio_cache: dict[str, tuple[np.ndarray, int]] = {}
     out_dir.mkdir(parents=True, exist_ok=True)
-    index = []
+    index_path = out_dir / "references.json"
+    index: list[dict[str, Any]] = []
+    if only and index_path.exists():
+        index = [r for r in json.loads(index_path.read_text(encoding="utf-8")) if r["name"] != only]
+    rejected = {(r["episode"], round(r["start"], 2)) for r in load_rejected(out_dir)}
     for person in bank.people():
+        if only and person["name"] != only:
+            continue
         mine = [p for p in bank.prints if same_person(p["name"], person["name"])]
         prints = [_unit(p["embedding"]) for p in mine]
         candidates = []
@@ -388,6 +414,8 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> l
                 audio_cache[p["episode"]] = sf.read(str(episode_dir / "audio.wav"), dtype="float32")
             audio, sr = audio_cache[p["episode"]]
             for sample in reference_samples(p["speaker"], records, limit=None):
+                if (p["episode"], round(sample["start"], 2)) in rejected:
+                    continue
                 if other_voice_seconds(episode_dir, p["speaker"], sample["start"], sample["end"]) > MAX_OTHER_VOICE_S:
                     continue
                 vector = embed(audio[int(sample["start"] * sr):int(sample["end"] * sr)], sr)
@@ -410,6 +438,7 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> l
                 best = c
         if best is None:
             log.info("%s: no clean reference among %d candidates", person["name"], len(candidates))
+            (out_dir / f"{_safe_name(person['name'])}.wav").unlink(missing_ok=True)
             continue
         voice = soxr.resample(best.pop("_vocals").mean(0), separate.rate, CLONE_RATE).astype(np.float32)
         fade = int(0.05 * CLONE_RATE)
@@ -426,8 +455,8 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda") -> l
         log.info("%-24s %s %.1f-%.1fs score %.2f, windows >= %.2f, music %+.0f dB (%d candidates)", person["name"],
                  short(best["episode"]), best["start"], best["end"], best["score"], best["min_window"],
                  best["music_db"], len(candidates))
-    (out_dir / "references.json").write_text(json.dumps(index, ensure_ascii=False, indent=1) + "\n",
-                                             encoding="utf-8")
+    index.sort(key=lambda r: r["name"])
+    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return index
 
 
@@ -441,6 +470,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Show a season voice bank, or export voice-cloning references")
     parser.add_argument("bank", type=Path)
     parser.add_argument("--export", type=Path, default=None, help="Cut one reference clip per person into this folder")
+    parser.add_argument("--person", default=None, help="With --export: only this person's clip")
+    parser.add_argument("--reject", action="store_true",
+                        help="With --export and --person: reject the current clip and pick another")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--recheck", action="store_true", help="List prints other episodes know by another name")
     parser.add_argument("--write-overrides", action="store_true",
@@ -449,7 +481,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     bank = VoiceBank.load(args.bank)
     if args.export:
-        export_references(bank, args.export, args.device)
+        if args.reject and args.person:
+            reject_reference(args.export, args.person)
+        export_references(bank, args.export, args.device, only=args.person)
         return 0
     if args.recheck:
         suggestions = recheck(bank)

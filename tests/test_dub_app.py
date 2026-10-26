@@ -33,3 +33,23 @@ def test_videos_and_progress(tmp_path: Path) -> None:
     job.state = "готово"
     assert dub_app.progress_rows(job)[0][1] == "✅ готово"
     assert dub_app.results_rows(job) == [["a", "vosk", str(out / "a" / "a.ru.vosk.mkv")]]
+
+
+def test_voice_bank_rows(tmp_path: Path) -> None:
+    import json
+
+    from stt.voice_bank import VoiceBank
+
+    bank = VoiceBank(tmp_path / "S1.voices.json")
+    bank.add_episode("ep1", [{"id": "S01", "name": "Julie McGee", "label_ru": "Джули", "gender": "female",
+                              "speech_s": 120.0, "llm_confidence": 0.9, "embedding": [1.0, 0.0]}], [])
+    bank.save()
+    assert dub_app.list_banks(str(tmp_path)) == ["S1.voices.json"]
+    assert dub_app.people_rows(str(tmp_path), "S1.voices.json") == [["Julie McGee", "Джули", "female", 1, 2.0, "нет"]]
+    refs = dub_app.refs_dir(str(tmp_path), "S1.voices.json")
+    refs.mkdir()
+    (refs / "references.json").write_text(json.dumps([{"name": "Julie McGee", "wav": "Julie_McGee.wav",
+                                                        "episode": "S29E01x", "start": 1.0, "end": 9.0, "score": 0.93,
+                                                        "music_db": -10.0, "text": "I'm dating John Rocker"}]))
+    audio, info = dub_app.person_view(str(tmp_path), "S1.voices.json", "Julie McGee")
+    assert audio.endswith("Julie_McGee.wav") and "S29E01" in info and "0.93" in info

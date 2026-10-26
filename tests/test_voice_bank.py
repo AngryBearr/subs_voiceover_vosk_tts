@@ -120,3 +120,13 @@ def test_recheck_leaves_relatives_alone(tmp_path: Path) -> None:
     assert voice_bank.relatives("Nadiya Anderson", "Natalie Anderson")
     assert not voice_bank.relatives("Jon Misch", "John Misch")
     assert voice_bank.recheck(bank) == []
+
+
+def test_reject_reference_remembers_the_clip(tmp_path: Path) -> None:
+    import json
+
+    index = [{"name": "Julie McGee", "episode": "ep1", "start": 1976.6, "end": 1985.1}]
+    (tmp_path / "references.json").write_text(json.dumps(index))
+    assert voice_bank.reject_reference(tmp_path, "Julie McGee")["start"] == 1976.6
+    assert voice_bank.reject_reference(tmp_path, "Nobody") is None
+    assert voice_bank.load_rejected(tmp_path) == [{"name": "Julie McGee", "episode": "ep1", "start": 1976.6}]
