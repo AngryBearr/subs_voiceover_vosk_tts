@@ -469,8 +469,17 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
                  short(best["episode"]), best["start"], best["end"], best["score"], best["min_window"],
                  best["music_db"], len(candidates))
     index.sort(key=lambda r: r["name"])
-    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    write_if_changed(index_path, json.dumps(index, ensure_ascii=False, indent=1) + "\n")
     return index
+
+
+def write_if_changed(path: Path, text: str) -> bool:
+    """Write ``text`` unless the file already holds it: an unchanged clip index keeps its time, so
+    the episodes voiced with these clips are not voiced again (stt.run compares the times)."""
+    if path.exists() and path.read_text(encoding="utf-8") == text:
+        return False
+    path.write_text(text, encoding="utf-8")
+    return True
 
 
 def short(episode: str) -> str:

@@ -130,3 +130,15 @@ def test_reject_reference_remembers_the_clip(tmp_path: Path) -> None:
     assert voice_bank.reject_reference(tmp_path, "Julie McGee")["start"] == 1976.6
     assert voice_bank.reject_reference(tmp_path, "Nobody") is None
     assert voice_bank.load_rejected(tmp_path) == [{"name": "Julie McGee", "episode": "ep1", "start": 1976.6}]
+
+
+def test_unchanged_clip_index_keeps_its_time(tmp_path: Path) -> None:
+    # a rewritten but equal references.json made every F5 episode look stale and voiced again
+    import os
+
+    index = tmp_path / "references.json"
+    assert voice_bank.write_if_changed(index, "[]\n")
+    os.utime(index, (1000, 1000))
+    assert not voice_bank.write_if_changed(index, "[]\n")
+    assert index.stat().st_mtime == 1000
+    assert voice_bank.write_if_changed(index, '[{"name": "Jeff"}]\n')
