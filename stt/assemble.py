@@ -22,6 +22,11 @@ class CueOptions:
 
     max_gap_s: float = 0.8  # pause that starts a new cue after a finished sentence
     max_gap_mid_s: float = 1.0  # pause that splits an unfinished sentence (the dub must not run ahead of it)
+    # ...except a pause up to max_join_s between words without punctuation that would leave a phrase
+    # of at most fragment_words words on one side: voiced alone, "Google | it." became "Проверь |
+    # в Гугле" a few seconds apart. A pause after a comma ("First vote, | Sugar.") still splits.
+    fragment_words: int = 2
+    max_join_s: float = 4.0
     max_duration_s: float = 7.0
     max_chars: int = 120
     sentence_split_s: float = 2.5  # close a cue at sentence end once it is this long
@@ -340,6 +345,30 @@ def _split_point(words: list[Word]) -> int:
     return max(gaps)[1]
 
 
+def _fragment_pause(words: list[Word], i: int, current: list[Word], options: CueOptions) -> bool:
+    """A pause before words[i] inside a phrase (no punctuation before it) that would cut off a
+    fragment of at most ``options.fragment_words`` words on either side."""
+    prev, word = current[-1], words[i]
+    if word.speaker != prev.speaker or word.start - prev.end > options.max_join_s:
+        return False
+    marks = _SENTENCE_END + _CLAUSE_END
+    if prev.text.endswith(marks):
+        return False
+    head = 0  # words of the phrase before the pause
+    for w in reversed(current):
+        if w.text.endswith(marks):
+            break
+        head += 1
+    tail = 0  # words of the phrase after it, up to its punctuation or another speaker
+    for w in words[i:]:
+        if w.speaker != word.speaker:
+            break
+        tail += 1
+        if w.text.endswith(marks) or tail > options.fragment_words:
+            break
+    return min(head, tail) <= options.fragment_words
+
+
 def build_cues(words: list[Word], options: CueOptions) -> list[Cue]:
     """Group speaker-labelled words into cues: speaker change, pauses, sentence ends, length limits."""
     cues: list[Cue] = []
@@ -349,14 +378,14 @@ def build_cues(words: list[Word], options: CueOptions) -> list[Cue]:
         if run:
             cues.append(Cue(run[0].start, run[-1].end, run[0].speaker, list(run)))
 
-    for word in words:
+    for i, word in enumerate(words):
         if current:
             prev = current[-1]
             duration = word.end - current[0].start
             chars = sum(len(w.text) + 1 for w in current) + len(word.text)
             gap = word.start - prev.end
             limit = options.max_gap_s if _ends_sentence(prev) else options.max_gap_mid_s
-            if word.speaker != prev.speaker or gap > limit:
+            if word.speaker != prev.speaker or (gap > limit and not _fragment_pause(words, i, current, options)):
                 flush(current)
                 current = []
             elif _ends_sentence(prev) and prev.end - current[0].start >= options.sentence_split_s:

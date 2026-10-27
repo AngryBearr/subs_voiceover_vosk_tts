@@ -513,10 +513,27 @@ class AssembleTest(unittest.TestCase):
 
     def test_long_pause_inside_sentence_splits(self) -> None:
         # the Russian line of one cue would be said in the pause, ahead of the English second half
-        spec = [(0.0, 0.3, "I"), (0.4, 0.8, "went"), (2.0, 2.4, "home."), (3.5, 3.8, "Bye.")]
+        spec = [(0.0, 0.3, "I"), (0.4, 0.6, "went"), (0.7, 0.8, "back"), (2.0, 2.2, "to"), (2.3, 2.5, "the"),
+                (2.6, 2.9, "camp."), (4.0, 4.3, "Bye.")]
         words = [Word(s, e, t, speaker="A") for s, e, t in spec]
         cues = build_cues(words, CueOptions())
-        self.assertEqual([c.text for c in cues], ["I went", "home.", "Bye."])
+        self.assertEqual([c.text for c in cues], ["I went back", "to the camp.", "Bye."])
+
+    def test_pause_does_not_split_off_a_fragment(self) -> None:
+        # "Google | it." voiced as two cues became "Проверь" ... "в Гугле" seconds apart
+        spec = [(0.0, 0.4, "Google"), (3.1, 3.3, "it."), (5.0, 5.4, "Colby"), (5.5, 5.8, "ready"), (5.9, 6.0, "to"),
+                (6.1, 6.3, "make"), (7.6, 7.7, "a"), (11.1, 11.5, "move.")]
+        words = [Word(s, e, t, speaker="A") for s, e, t in spec]
+        cues = build_cues(words, CueOptions())
+        self.assertEqual([c.text for c in cues], ["Google it.", "Colby ready to make a move."])
+        self.assertEqual([c.text for c in build_cues(words, CueOptions(fragment_words=0))],
+                         ["Google", "it.", "Colby ready to make", "a", "move."])
+
+    def test_pause_after_a_comma_still_splits(self) -> None:
+        # the host's pause before the name of the vote stays in the voice-over
+        spec = [(0.0, 0.3, "First"), (0.4, 0.8, "vote,"), (2.5, 3.0, "Sugar.")]
+        words = [Word(s, e, t, speaker="A") for s, e, t in spec]
+        self.assertEqual([c.text for c in build_cues(words, CueOptions())], ["First vote,", "Sugar."])
 
     def test_overlap_flag(self) -> None:
         words = assign_speakers(_words([(2.85, 3.0, "Wait"), (3.1, 3.3, "what")]), self.diarization, self.options)

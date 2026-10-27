@@ -147,7 +147,13 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
 - Word times come from CTC forced alignment (see Models); cue starts match hand-synced
   subtitles within a few hundred ms (S10E01: median +0.19 s, 15 of 610 cues >1 s early).
 - A pause of 1 s inside a sentence, or 0.8 s after one, starts a new cue, so the Russian of the
-  second half is not said during the pause (S10E01 had 79 cues with such pauses).
+  second half is not said during the pause (S10E01 had 79 cues with such pauses). Except a pause
+  of up to 4 s between words without punctuation that would cut off one or two words: voiced
+  alone they sounded smeared ("Google | it." became "Проверь" ... "в Гугле" 3 s later; "Colby
+  ready to make | a | move."), so the phrase stays one cue and is said at once (S20: ~9 per
+  episode, `--fragment-words`, `--max-join`). A pause after a comma still splits ("First vote, |
+  Sugar." keeps the host's pause before the name). The pauses are real: Whisper decoded no words
+  in 92 of 99 such gaps where it had put the words side by side.
 - The timeline solver prefers to start a line 250 ms after the English (voice-over style) and
   prices an early start 6x a late one (`policy.target_lag_ms`, `policy.weight_early`); base
   tempo 5.0 syllables/s, faster only where a line does not fit (`stt_config.json`).

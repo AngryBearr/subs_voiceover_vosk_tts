@@ -205,7 +205,7 @@ def transcribe(args: argparse.Namespace) -> Path:
     # ---- assemble
     diarization = Diarization.from_dict(diar_data)
     options = CueOptions(max_gap_s=args.max_gap, max_gap_mid_s=args.max_gap_mid, max_duration_s=args.max_cue_duration,
-                         max_chars=args.max_chars)
+                         max_chars=args.max_chars, fragment_words=args.fragment_words, max_join_s=args.max_join)
     segments, loop_words = collapse_repeats([Segment.from_dict(s) for s in asr_data["segments"]])
     if loop_words:
         log.info("Repetition guard removed %d looped words", loop_words)
@@ -311,6 +311,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--ocr-fps", type=float, default=2.0, help="Frames per second scanned for on-screen text")
     parser.add_argument("--max-gap", type=float, default=0.8, help="Pause (s) after a sentence that starts a new cue")
     parser.add_argument("--max-gap-mid", type=float, default=1.0, help="Pause (s) inside a sentence that starts a new cue")
+    parser.add_argument("--fragment-words", type=int, default=2,
+                        help="Keep a phrase together over a pause (up to --max-join) that would split off this many "
+                             "words or fewer (0: off)")
+    parser.add_argument("--max-join", type=float, default=4.0, help="Longest pause (s) --fragment-words bridges")
     parser.add_argument("--max-cue-duration", type=float, default=7.0)
     parser.add_argument("--max-chars", type=int, default=120)
     parser.add_argument(
