@@ -97,6 +97,15 @@ TeraTTS's own cloning is weak (its author: not worth the effort); Supertonic-3 v
 to TeraTTS are unstable (azimutspb on 4pda); Fish S2 ignores RUAccent marks; Chatterbox is poor
 in Russian.
 
+F5 loses the first word of a line more often than Vosk/TeraTTS (S20E01-E09: the speech check
+misses it in 5-7% of lines vs 2.5-3.5%). Two causes on 80 re-synthesized lines: the leaked-reference
+cut fired on a name the ASR split in two ("Кортни" -> "корт ни", fixed 27.10: the cut is kept only
+when it checks better), and F5 itself swallows a short first word ("Да! Так и есть" -> "так и
+есть", "Роб, принеси" -> "принеси"), also over three takes. First take, 40 such lines / 40 normal
+ones: a "— " before the text kept the word in 19/40 vs 14/40 but checked a little worse on the
+normal lines; 0.3 s more length kept it in 17/40 and checked better on both. To measure on a few
+hundred lines with the three takes before changing anything (`output/stt_s20/eval/f5_prefix_probe.py`).
+
 Open problems: picking clean references automatically (reality TV is loud and emotional),
 music under the reference (ClearerVoice separation?), licences of the models.
 
