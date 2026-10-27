@@ -113,6 +113,31 @@ class OcrTest(unittest.TestCase):
         caps = captions(events)
         self.assertEqual([(c.label, c.text) for c in caps], [("Shonee", "I love your tattoo, George.")])
 
+    def test_damaged_video_packet_is_skipped(self) -> None:
+        import av
+
+        from stt.ocr import _decoded_frames
+
+        class Packet:
+            def __init__(self, pts: int, bad: bool = False) -> None:
+                self.pts, self.bad = pts, bad
+
+            def decode(self) -> list[str]:
+                if self.bad:
+                    raise av.error.InvalidDataError(1094995529, "Invalid data found when processing input")
+                return [f"frame{self.pts}"]
+
+        class Container:
+            def demux(self, stream: object) -> list[Packet]:
+                return [Packet(0), Packet(1000, bad=True), Packet(2000)]
+
+        class Stream:
+            time_base = 0.001
+
+        stats: dict = {}
+        self.assertEqual(list(_decoded_frames(Container(), Stream(), stats)), ["frame0", "frame2000"])
+        self.assertEqual(stats, {"bad_packets": 1, "bad_packet_times": [1.0]})
+
     def test_credits_roll_is_not_dialogue(self) -> None:
         box = (0.3, 0.8, 0.7, 0.86)
         events = [self._event(3819.3 + i, text, box, end=3820.3 + i) for i, text in enumerate(

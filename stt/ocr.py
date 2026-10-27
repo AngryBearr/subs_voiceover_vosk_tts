@@ -15,7 +15,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -125,6 +125,22 @@ class FrameOcr:
         return out
 
 
+def _decoded_frames(container: Any, stream: Any, stats: dict[str, Any]) -> Iterator[Any]:
+    """Frames of the stream; a damaged packet is skipped, as ffmpeg does, instead of ending the scan
+    (S20E06 of an old Survivor repack has one)."""
+    import av
+
+    for packet in container.demux(stream):
+        try:
+            frames = packet.decode()
+        except av.error.InvalidDataError:
+            stats["bad_packets"] = stats.get("bad_packets", 0) + 1
+            if packet.pts is not None:
+                stats.setdefault("bad_packet_times", []).append(round(float(packet.pts * stream.time_base), 1))
+            continue
+        yield from frames
+
+
 def scan_video(
     path: str | Path,
     ocr: FrameOcr,
@@ -144,7 +160,7 @@ def scan_video(
     next_time = start
     last_thumb: np.ndarray | None = None
     last_result: list[Detection] = []
-    stats = {"sampled": 0, "ocr_runs": 0}
+    stats: dict[str, Any] = {"sampled": 0, "ocr_runs": 0}
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
@@ -152,7 +168,7 @@ def scan_video(
         if start > 0:
             container.seek(int(start / stream.time_base), stream=stream, backward=True)
         height = int(round(width * stream.codec_context.height / stream.codec_context.width / 2) * 2)
-        for frame in container.decode(stream):
+        for frame in _decoded_frames(container, stream, stats):
             t = frame.time
             if t is None or t < next_time:
                 continue
