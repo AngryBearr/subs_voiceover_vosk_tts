@@ -65,19 +65,18 @@ reference = 8 s of an English confessional of Jon Misch + 1 s of silence and its
 - 7 steps (EPSS schedule, a 4pda tip; F5 applies it by itself for 5-7, 10, 12, 16 steps):
   0.50 s per line with the check (64 takes), ~7.5 min per episode, 0.77% after retries;
   16 steps: 0.71 s, 0.76%. By ear almost the same as 32 steps (maybe a little less emotion):
-  32 steps for the normal voice-over, 7 as a fast mode (`output/demo/f5_espeech/nfe7/`);
+  32 steps for the normal voice-over, 7 as a fast mode;
 - each line must get its exact length (`fix_duration` = reference + slot length). F5's default
   length estimate counts UTF-8 bytes, so Cyrillic text came out about twice too long and the end
   of the English reference leaked into the speech (31% character errors);
 - voice similarity judged by ear: good. Den4ik (Telegram): ESpeech-F5 keeps the acoustics but
-  not hoarseness or breathiness, and has no accent cross-lingually. Samples:
-  `output/demo/f5_espeech/`.
+  not hoarseness or breathiness, and has no accent cross-lingually. (The listening samples of
+  `output/demo/` were deleted on 27.10.)
 
 First listening demo (23.10): three 75 s scenes of S29E02-E04 (23-30 lines, 6-7 people each)
 voiced line by line in each speaker's cloned voice, in the TeraTTS slots and at their
 loudness: 1.1 s per line with up to 3 takes, 2.0-2.5% character errors (short exclamations
 and names are the hard part). References: the voice bank's cleaned clips (vocals only).
-Prototype scripts and videos (F5 / TeraTTS / Vosk / original tracks): `output/demo/s29_f5/`.
 F5 runs in its own venv (f5-tts pins differ from subs_env); an engine would call it there.
 
 Other engines discussed in the Telegram chat (Shmyrev's table of 20.10.2026, 1270 Russian

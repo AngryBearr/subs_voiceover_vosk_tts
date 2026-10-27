@@ -24,9 +24,9 @@ know under another name (S29E01's "Jaclyn" cluster is Baylor's voice in most lin
 write the fix as ``speakers.override.json`` of that episode (``--write-overrides``); then
 ``stt.run --force speakers`` redoes its naming and translation.
 
-    uv run -m stt.voice_bank output/stt_s29/<season>.voices.json            # what the bank holds
-    uv run -m stt.voice_bank output/stt_s29/<season>.voices.json --export output/voices/s29
-    uv run -m stt.voice_bank output/stt_s29/<season>.voices.json --recheck [--write-overrides]
+    uv run -m stt.voice_bank "output/stt_s20/Season 20.voices.json"            # what the bank holds
+    uv run -m stt.voice_bank "output/stt_s20/Season 20.voices.json" --export "output/stt_s20/Season 20.references"
+    uv run -m stt.voice_bank "output/stt_s20/Season 20.voices.json" --recheck [--write-overrides]
 """
 
 from __future__ import annotations

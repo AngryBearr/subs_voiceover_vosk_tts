@@ -368,6 +368,8 @@ Whisper medium.en, Distil-Whisper large-v3.5, Qwen3-ASR 0.6B, DiariZen, TeraAnal
 
 ## Benchmarks
 
+Past experiments, what came of them and which outputs were deleted: `docs/experiments.md`.
+
 ```bash
 # ASR vs English subtitles (clip snapped to subtitle gaps, SDH markup removed)
 subs_env/bin/python -m stt.bench asr --media ep.mkv --srt ep.en.srt --start 600 --duration 600 --out output/stt_bench/ep_10m
@@ -382,8 +384,7 @@ subs_env/bin/python -m stt.compare_translations output/stt/ep --variants a b --a
 Why these models (Australian Survivor S10, three 10-minute clips, WER against English SDH
 subtitles): LLM fusion of Cohere + Whisper (+ Qwen3) ~17%, Cohere 19.6%, Whisper large-v3 20.2%,
 Qwen3-ASR 20.5%, the other 15 models 21–27% (Canary 180M loops). pyannote vs DiariZen on a real
-episode: equal speaker purity, pyannote 2.5x faster. Full tables: `output/stt_bench/RESULTS.md`
-(local report, not committed).
+episode: equal speaker purity, pyannote 2.5x faster. Full tables: `docs/stt_benchmarks.md`.
 
 ## Outputs (`<paths.work>/<episode>/`, default `output/stt/<episode>/`)
 
