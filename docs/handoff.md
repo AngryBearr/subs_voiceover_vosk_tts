@@ -72,10 +72,28 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
 - **S20**: done, 15 episodes, three tracks each, levelled. Recognition vs CBS captions: fusion
   6.5-12.9% of words differ; speech check ESpeech 1.45%, Vosk 0.66%, TeraTTS 0.55% character
   errors. E02/E03 cloned voices still use the fallback voice for Courtney and Danielle.
-- **S29** (`output/stt_s29_v2`): E01, E02, E04 Vosk + TeraTTS; E03 all three; E05-E08 ESpeech
-  only; E09-E15 not voiced (E09's run was stopped during ASR). All voiced ones are in
-  `STT_Season 29 - San Juan Del Sur 1080p/` and levelled.
-- 283 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
+- **S29** (`output/stt_s29_v2`): E01, E02, E04 Vosk + TeraTTS; E03 all three; E05-E10 ESpeech
+  only; E11 stopped at its glossary step (recognition done), E13-E15 not started (there is no E12
+  file; E11 is 86 min, two episodes in one). Resume: `bash output/stt_s29_v2/run_s29_rest.sh`
+  (detached, as below): E09-E11 in all three engines, then the missing tracks of E01-E08, then
+  E13-E15; a file `output/stt_s29_v2/PAUSE` holds it between passes. The videos' own English
+  subtitles (CBS roll-up captions) are extracted in `output/s29_subs/` for checks.
+- **27.10 evening, open experiments** (scripts in `output/`, not in git):
+  - DiariZen v2 (`"diarizer": "diarizen-v2"`, `diarizen_env`): speaker changes vs the captions'
+    `>>` marks F1 0.73 -> 0.82-0.83 on S29E05-E08 and S20E01/E05/E10 (with the ResNet293
+    refinement both), but it merged Wes into Alec in S29E05. Before making it the default:
+    the S10 SDH identity check (`models/diarizen/run_s10.sh`: pyannote vs DiariZen, lines on
+    their person's main speaker, people merged) and the VBx clustering sweep (Fb / AHC threshold,
+    `models/diarizen/sweep.py`, scored by `output/stt_dz_sweep/score.py`). E05 end to end with
+    DiariZen: `output/stt_dz_test/`.
+  - FireRedTTS3 (`models/fireredtts3/`, own env, weights 12 GB): works with the backbone in bf16
+    (~9 GB VRAM: does not fit next to the ESpeech pass); no duration control (stops by itself);
+    '+' stress marks seem to lengthen the line. Test set and scripts: `output/tts_eval/firered/`
+    (`run2.sh`: 64 lines of S29E05 x plain / '+' / acute accent, a homograph probe, speech check,
+    the stress heard by TeraAnaly; ESpeech hears 255/255 stresses as marked).
+  - GPU experiments next to a season run: `output/tts_eval/gpu_window.sh <run log> <cmd>` waits
+    while an episode is transcribing and stops the command when the next transcription starts.
+- 293 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
 - Disk: `/home` ~100 GB free after the cleanup (it was at 99% on 27.10 morning).
 
 ## Working with this user
