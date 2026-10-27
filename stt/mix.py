@@ -84,24 +84,49 @@ def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: f
     return out.astype(np.float32)
 
 
-def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None, start: float = 0.0,
-        duration: float | None = None) -> None:
-    """Video copy with the mix as the first audio track; a test piece (``start``) is cut and re-encoded."""
+def encode_track(wav: Path, out: Path, bitrate: str = "192k") -> None:
+    """A mixed WAV as an AAC track (``.m4a``): a tenth of the size, muxed into videos without re-encoding."""
+    subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(wav), "-c:a", "aac",
+                    "-b:a", bitrate, str(out)], check=True)
+
+
+def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path | None, start: float = 0.0,
+               duration: float | None = None) -> None:
+    """Video copy with voice-over mixes as audio tracks (``(file, title)``, the first is the default),
+    the original audio after them and optional Russian subtitles. WAV tracks are encoded to AAC,
+    others copied; a test piece (``start``) is cut and its video re-encoded. The file appears only
+    when complete."""
     piece = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}"] if start and duration else []
-    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *piece, "-i", str(video), "-i", str(mixed_wav)]
+    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *piece, "-i", str(video)]
+    for path, _ in tracks:
+        cmd += ["-i", str(path)]
     if srt and not piece:  # subtitle times are on the episode timeline
         cmd += ["-i", str(srt)]
     else:
         srt = None
-    cmd += ["-map", "0:v:0", "-map", "1:a:0", "-map", "0:a:0"]
+    cmd += ["-map", "0:v:0"]
+    for n in range(len(tracks)):
+        cmd += ["-map", f"{n + 1}:a:0"]
+    cmd += ["-map", "0:a:0"]
     if srt:
-        cmd += ["-map", "2:s:0", "-c:s", "srt", "-metadata:s:s:0", "language=rus"]
-    video_codec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"] if piece else ["-c:v", "copy"]
-    cmd += [*video_codec, "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "aac" if piece else "copy",
-            "-metadata:s:a:0", "language=rus", "-metadata:s:a:0", "title=Russian voice-over",
-            "-metadata:s:a:1", "title=Original", "-disposition:a:0", "default", "-disposition:a:1", "0",
-            str(out)]
-    subprocess.run(cmd, check=True)
+        cmd += ["-map", f"{len(tracks) + 1}:s:0", "-c:s", "srt", "-metadata:s:s:0", "language=rus"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"] if piece else ["-c:v", "copy"]
+    for n, (path, title) in enumerate(tracks):
+        cmd += [f"-c:a:{n}", *(["aac", f"-b:a:{n}", "192k"] if path.suffix.lower() == ".wav" else ["copy"]),
+                f"-metadata:s:a:{n}", "language=rus", f"-metadata:s:a:{n}", f"title={title}",
+                f"-disposition:a:{n}", "default" if n == 0 else "0"]
+    original = len(tracks)
+    cmd += [f"-c:a:{original}", "aac" if piece else "copy", f"-metadata:s:a:{original}", "title=Original",
+            f"-disposition:a:{original}", "0"]
+    partial = out.with_name(out.stem + ".partial" + out.suffix)
+    subprocess.run([*cmd, str(partial)], check=True)
+    partial.replace(out)
+
+
+def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None, start: float = 0.0,
+        duration: float | None = None) -> None:
+    """Video copy with the mix as the first audio track; a test piece (``start``) is cut and re-encoded."""
+    mux_tracks(video, [(mixed_wav, "Russian voice-over")], out, srt, start, duration)
 
 
 def main(argv: list[str] | None = None) -> None:

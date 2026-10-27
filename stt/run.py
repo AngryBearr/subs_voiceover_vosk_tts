@@ -12,12 +12,19 @@ Per episode, in `<out-root>/<video name>/`:
     voiceover   synthesis (Vosk or TeraTTS) + timeline fitting        voiceover.<engine>/export/track.wav
     check       Russian ASR check of the spoken clips                 voiceover.<engine>/speech_check.md
                 + lines to check by ear (gender / speaker)            review.json, review.srt
-    mix         voice over the ducked original (+ mkv with tracks)    <name>.ru.<engine>.wav / .mkv
+    mix         voice over the ducked original as an AAC track        <name>.ru.<engine>.m4a
+                + the finished video                                  <name>.ru.mkv (or .ru.<engine>.mkv)
 
 Finished stages are skipped (no repeated LLM costs) unless an earlier stage was redone since;
 `--force STAGE` recomputes it and everything after it. Defaults come from `stt_config.json`. Episodes in the same folder share a
-season glossary (`<out-root>/<folder name>.glossary.json`) and voice bank
-(`<out-root>/<folder name>.voices.json`, `stt.voice_bank`).
+season glossary (`<season dir>/<folder name>.glossary.json`) and voice bank
+(`<season dir>/<folder name>.voices.json`, `stt.voice_bank`).
+
+Folders (`paths` in the config): `work` holds the episode folders (default `output/stt`, `--out-root`
+overrides it), `season` the season's files (glossary, cast, voice bank and voice clips; default:
+`work`), `finished` the finished videos in a sub-folder per season (default: each episode's folder).
+`mix.tracks`: "combined" puts every voice-over finished so far into one video as its own audio
+track (`mix.track_order` first, the first is the default track), "separate" writes a video per engine.
 """
 
 from __future__ import annotations
@@ -83,7 +90,9 @@ class Episode:
         self.out = out_root / media.stem
         self.args = args
         self.config = config
-        default_season = out_root / f"{media.parent.name}.glossary.json"
+        paths = config.get("paths") or {}
+        season_dir = Path(paths["season"]).expanduser() if paths.get("season") else out_root
+        default_season = season_dir / f"{media.parent.name}.glossary.json"
         self.season = Path(args.season_glossary) if args.season_glossary else default_season
         self.voice_bank = self.season.with_name(self.season.name.replace(".glossary.json", "") + ".voices.json")
         self.forced_from: int | None = STAGES.index(args.force) if args.force else None
@@ -151,7 +160,7 @@ class Episode:
             "stress": (self.stress, [self.out / "stress.json"]),
             "voiceover": (self.voiceover, [self.vo_dir / "export" / "track.wav"]),
             "check": (self.check, [self.vo_dir / "speech_check.json"]),
-            "mix": (self.mix, [self.out / f"{self.media.stem}.ru.{self.engine}.wav"]),
+            "mix": (self.mix, [self.track(self.engine)]),
         }
         for position, stage in enumerate(STAGES[: until + 1]):
             func, outputs, *inputs = steps[stage]
@@ -373,6 +382,42 @@ class Episode:
             except SystemExit as error:
                 log.warning("[%s] %s", self.media.stem, error)
 
+    def track(self, engine: str) -> Path:
+        """The engine's finished voice-over mix (AAC), kept for the videos."""
+        return self.out / f"{self.media.stem}.ru.{engine}.m4a"
+
+    @property
+    def finished(self) -> Path:
+        """Folder of the finished video: ``paths.finished/<season folder>``, else the episode folder
+        (always for a test piece)."""
+        root = (self.config.get("paths") or {}).get("finished")
+        if not root or self.args.start or self.args.duration:
+            return self.out
+        return Path(root).expanduser() / self.media.parent.name
+
+    def finished_video(self, engine: str | None = None) -> Path:
+        """The video with all voice-overs (``mix.tracks: combined``) or with ``engine``'s (separate)."""
+        combined = (self.config.get("mix") or {}).get("tracks", "combined") == "combined"
+        return self.finished / f"{self.media.stem}.ru{'' if combined else f'.{engine or self.engine}'}.mkv"
+
+    def mux(self) -> None:
+        """The finished video: the voice-overs finished so far (combined) or this engine's (separate)."""
+        from stt import mix
+
+        cfg = self.config["mix"]
+        if cfg.get("tracks", "combined") == "combined":
+            order = [*cfg.get("track_order", []), *self.config["voiceover"].get("engines", {}), self.engine]
+            engines = [e for e in dict.fromkeys(order) if self.track(e).exists()]
+        else:
+            engines = [self.engine]
+        titles = cfg.get("track_titles") or {}
+        tracks = [(self.track(e), titles.get(e, f"Русский ({e})")) for e in engines]
+        srt = self.out / "subs.ru.srt" if cfg.get("subtitles", True) else None
+        out = self.finished_video()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        mix.mux_tracks(self.media, tracks, out, srt, self.args.start or 0.0, self.args.duration)
+        log.info("[%s] %s: %s", self.media.stem, out, ", ".join(engines))
+
     def mix(self) -> None:
         from stt import mix
 
@@ -390,17 +435,19 @@ class Episode:
 
             crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 3))])
             argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -4.0)}"]
-        if cfg.get("mux"):  # a test piece gets a short re-encoded video of the piece
-            argv += ["--mux", str(self.out / f"{self.media.stem}.ru.{self.engine}.mkv")]
-            if cfg.get("subtitles", True):  # Russian subtitles as a track of the mkv
-                argv += ["--srt", str(self.out / "subs.ru.srt")]
         mix.main(argv)
+        mix.encode_track(out_wav, self.track(self.engine))
+        if not cfg.get("keep_wav"):  # ~0.5 GB per episode and engine; the AAC track is what the video gets
+            out_wav.unlink()
+        if cfg.get("mux"):  # a test piece gets a short re-encoded video of the piece
+            self.mux()
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="English video -> Russian voice-over, end to end")
     parser.add_argument("media", nargs="+", help="Video files or glob patterns (a whole season works)")
-    parser.add_argument("--out-root", default="output/stt", help="One sub-folder per episode")
+    parser.add_argument("--out-root", default=None,
+                        help="One sub-folder per episode (default: paths.work in the config, else output/stt)")
     parser.add_argument("--config", default=str(REPO_ROOT / "stt_config.json"))
     parser.add_argument("--mode", choices=["fast", "accurate"], default=None, help="Default from the config")
     parser.add_argument("--until", choices=STAGES, default="mix", help="Last stage to run")
@@ -421,8 +468,9 @@ def main(argv: list[str] | None = None) -> None:
     missing = [f for f in files if not f.is_file()]
     if missing or not files:
         raise SystemExit(f"Media not found: {missing or args.media}")
+    out_root = Path(args.out_root or (config.get("paths") or {}).get("work") or "output/stt").expanduser()
     for media in files:
-        Episode(media, Path(args.out_root), args, config).run()
+        Episode(media, out_root, args, config).run()
 
 
 if __name__ == "__main__":

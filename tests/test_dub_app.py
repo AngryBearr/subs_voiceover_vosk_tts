@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ui import dub_app
@@ -44,6 +45,13 @@ def test_videos_and_progress(tmp_path: Path) -> None:
     job.state = "готово"
     assert dub_app.progress_rows(job)[0][1] == "✅ готово"
     assert dub_app.results_rows(job) == [["a", "vosk", str(out / "a" / "a.ru.vosk.mkv")]]
+    # one video with every voice-over, in the folder of finished videos (paths.finished/<season folder>)
+    done = tmp_path / "done" / tmp_path.name
+    done.mkdir(parents=True)
+    (done / "a.ru.mkv").write_text("")
+    (out / "a" / "a.ru.vosk.m4a").write_text("")
+    job.config_path.write_text(json.dumps({"paths": {"finished": str(tmp_path / "done")}}))
+    assert dub_app.results_rows(job) == [["a", "vosk", str(done / "a.ru.mkv")]]
 
 
 def test_voice_bank_rows(tmp_path: Path) -> None:

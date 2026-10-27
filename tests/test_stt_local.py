@@ -250,6 +250,39 @@ class RunTest(unittest.TestCase):
             ep.config = {"cast": {"enabled": False}}
             self.assertFalse(ep._find_cast())
 
+    def test_output_folders_and_one_video_with_all_voiceovers(self) -> None:
+        import argparse
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(season_glossary=None, force=None, until="mix", engine="vosk", start=None,
+                                      duration=None)
+            config = {"paths": {"season": f"{tmp}/voices", "finished": f"{tmp}/done"},
+                      "voiceover": {"engines": {"vosk": {}, "teratts": {}, "f5": {}}},
+                      "mix": {"tracks": "combined", "track_order": ["f5", "teratts", "vosk"],
+                              "track_titles": {"f5": "Голоса героев"}, "subtitles": False}}
+            ep = Episode(Path(tmp) / "Season 1" / "ep01.mkv", Path(tmp) / "out", args, config)
+            self.assertEqual(ep.voice_bank, Path(tmp) / "voices" / "Season 1.voices.json")
+            self.assertEqual(ep.references.parent, Path(tmp) / "voices")
+            self.assertEqual(ep.out, Path(tmp) / "out" / "ep01")
+            ep.out.mkdir(parents=True)
+            for engine in ("vosk", "f5"):  # TeraTTS not voiced yet
+                ep.track(engine).write_bytes(b"aac")
+            with mock.patch("stt.mix.mux_tracks") as mux:
+                ep.mux()
+            video, tracks, out, srt, *_ = mux.call_args.args
+            self.assertEqual([(p.name, title) for p, title in tracks],
+                             [("ep01.ru.f5.m4a", "Голоса героев"), ("ep01.ru.vosk.m4a", "Русский (vosk)")])
+            self.assertEqual(out, Path(tmp) / "done" / "Season 1" / "ep01.ru.mkv")
+            self.assertIsNone(srt)
+            ep.config["mix"]["tracks"] = "separate"
+            with mock.patch("stt.mix.mux_tracks") as mux:
+                ep.mux()
+            self.assertEqual([p.name for p, _ in mux.call_args.args[1]], ["ep01.ru.vosk.m4a"])
+            self.assertEqual(mux.call_args.args[2].name, "ep01.ru.vosk.mkv")
+            args.start, args.duration = 600.0, 60.0  # a test piece stays in the episode folder
+            self.assertEqual(ep.finished_video().parent, ep.out)
+
     def test_llm_model_per_stage(self) -> None:
         import argparse
 

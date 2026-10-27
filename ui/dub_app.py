@@ -4,7 +4,8 @@
 
 Tab "Обработка": pick episodes in a folder, engines and options, start, watch the stages of every
 episode, find the finished mkv files. A job runs ``stt.run`` in a background process (one job at
-a time, engines one after the other); its config and log are kept in ``<out-root>/.ui/``.
+a time, engines one after the other); its config and log are kept in ``<out-root>/.ui/``. The
+folders default to ``paths`` of the config (work, season files, finished videos).
 
 Tab "Банк голосов": the season voice bank (``stt.voice_bank``): people, episodes, speech; cut
 the voice-cloning references, listen, ask for another clip, re-check names across the season.
@@ -128,14 +129,15 @@ def start_job(folder: str, names: list[str], out_root: str, engines: list[str], 
         if not root.is_absolute():
             root = REPO_ROOT / root
         extra: list[str] = []
+        config = job_config(mode, model, subtitles, duck_voices, stress, refine, f5_fast, transport)
         if preview:  # a short piece in its own folder, so it never mixes with full episodes
             root = root / "_проба"
             extra = ["--start", str(preview_from * 60), "--duration", str(preview_minutes * 60)]
+            config["paths"] = {**(config.get("paths") or {}), "season": None, "finished": None}
         ui_dir = root / ".ui"
         ui_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         config_path = ui_dir / f"config_{stamp}.json"
-        config = job_config(mode, model, subtitles, duck_voices, stress, refine, f5_fast, transport)
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
         JOB = Job(files=[Path(folder).expanduser() / n for n in names], out_root=root,
                   engines=[ENGINES[e] for e in engines], config_path=config_path,
@@ -184,9 +186,18 @@ def progress_rows(job: Job | None) -> list[list[str]]:
 
 
 def result_file(job: Job, media: Path, engine: str) -> Path | None:
-    """The finished video (or, for a test piece, the mixed audio) of an episode and engine."""
-    for suffix in ("mkv", "wav"):
-        path = job.out_root / media.stem / f"{media.stem}.ru.{engine}.{suffix}"
+    """The finished video with the engine's voice-over (or, without a video, its mixed audio)."""
+    work = job.out_root / media.stem
+    config = json.loads(job.config_path.read_text(encoding="utf-8")) if job.config_path.exists() else {}
+    finished = (config.get("paths") or {}).get("finished")
+    folders = [Path(finished).expanduser() / media.parent.name, work] if finished else [work]
+    track = work / f"{media.stem}.ru.{engine}.m4a"
+    for folder in folders:
+        if track.exists() and (folder / f"{media.stem}.ru.mkv").exists():  # all voice-overs in one video
+            return folder / f"{media.stem}.ru.mkv"
+        if (folder / f"{media.stem}.ru.{engine}.mkv").exists():
+            return folder / f"{media.stem}.ru.{engine}.mkv"
+    for path in (track, work / f"{media.stem}.ru.{engine}.wav"):
         if path.exists():
             return path
     return None
@@ -227,16 +238,22 @@ def _root(out_root: str) -> Path:
     return root if root.is_absolute() else REPO_ROOT / root
 
 
+def _season_root(out_root: str) -> Path:
+    """Folder of the season files (voice banks, voice clips): ``paths.season``, else the work folder."""
+    season = (base_config().get("paths") or {}).get("season")
+    return _root(season) if season else _root(out_root)
+
+
 def list_banks(out_root: str) -> list[str]:
-    return sorted(p.name for p in _root(out_root).glob("*.voices.json"))
+    return sorted(p.name for p in _season_root(out_root).glob("*.voices.json"))
 
 
 def refs_dir(out_root: str, bank: str) -> Path:
-    return _root(out_root) / bank.replace(".voices.json", ".references")
+    return _season_root(out_root) / bank.replace(".voices.json", ".references")
 
 
 def _bank_cmd(out_root: str, bank: str, *args: str) -> tuple[int, str]:
-    cmd = [sys.executable, "-m", "stt.voice_bank", str(_root(out_root) / bank), *args]
+    cmd = [sys.executable, "-m", "stt.voice_bank", str(_season_root(out_root) / bank), *args]
     done = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     lines = [line for line in (done.stdout + done.stderr).splitlines()
              if not any(k in line.lower() for k in ("warn", "tf32", ">>>", "issues/"))]
@@ -248,7 +265,7 @@ def people_rows(out_root: str, bank: str) -> list[list[Any]]:
         return []
     from stt.voice_bank import VoiceBank
 
-    vb = VoiceBank.load(_root(out_root) / bank)
+    vb = VoiceBank.load(_season_root(out_root) / bank)
     index_path = refs_dir(out_root, bank) / "references.json"
     refs = {r["name"]: r for r in json.loads(index_path.read_text(encoding="utf-8"))} if index_path.exists() else {}
     rows = []
@@ -377,7 +394,8 @@ def build() -> gr.Blocks:
             with gr.Row():
                 select_all = gr.Button("Выбрать все", size="sm")
                 select_none = gr.Button("Снять выбор", size="sm")
-            out_root = gr.Textbox(label="Куда сохранять", value="output/stt")
+            out_root = gr.Textbox(label="Рабочая папка (готовые видео: paths.finished в настройках)",
+                                  value=(base_config().get("paths") or {}).get("work") or "output/stt")
             with gr.Row():
                 engines = gr.CheckboxGroup(label="Озвучка", choices=list(ENGINES), value=["Vosk"])
                 mode = gr.Radio(label="Распознавание", choices=list(MODES), value=list(MODES)[0])

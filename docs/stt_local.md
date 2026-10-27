@@ -19,7 +19,8 @@ video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.js
         stress: guessed words / homographs re-checked by 3 LLMs       stress.json
         voiceover: TTS + timeline solver + shortening                 voiceover.<engine>/export/track.wav
         check: Russian ASR (GigaAM-v3) of every spoken clip           voiceover.<engine>/speech_check.md
-        mix: voice over ducked original, mkv with Russian + original  <name>.ru.<engine>.wav / .mkv
+        mix: voice over ducked original (AAC), one video with every   <name>.ru.<engine>.m4a
+             voice-over as its own track + original + subtitles   <name>.ru.mkv
 ```
 
 ## Quick start
@@ -44,6 +45,17 @@ the other; progress per episode and stage, the log, the finished files.
 Defaults live in `stt_config.json` (mode, models, OCR, LLM, TTS engine and voices, checks,
 ducking). Stages already done are skipped; `--force STAGE` recomputes it and the following
 ones; `--mode fast` uses Whisper only.
+
+Folders (`"paths"`, personal ones in `stt_config.local.json`): `work` — episode work folders
+(default `output/stt`; `--out-root` overrides it); `season` — the season's glossary, cast, voice
+bank and voice clips (default: `work`); `finished` — finished videos, in a sub-folder named
+like the season's video folder (default: each episode's work folder). Finished videos
+(`"mix": {"tracks": ...}`): `"combined"` (default) is one `<name>.ru.mkv` per episode with every
+voice-over voiced so far as its own Russian audio track (order and default track:
+`track_order`, ESpeech first; titles: `track_titles`), then the original audio and the Russian
+subtitles; each engine's run adds its track. `"separate"` writes `<name>.ru.<engine>.mkv` per
+engine, each with a full copy of the video. The mixed WAV (~0.5 GB per episode and engine) is
+deleted once encoded to AAC unless `"keep_wav": true`.
 
 A run can be stopped at any time (Ctrl+C, or "Стоп" in the UI) and started again with the same
 command: finished episodes and stages are skipped, the recognition keeps its finished parts
@@ -203,7 +215,7 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
 
 ## Season voice bank
 
-Episodes of one folder share `<out-root>/<folder>.voices.json` (`stt.voice_bank`, on with
+Episodes of one folder share `<season dir>/<folder>.voices.json` (`stt.voice_bank`, on with
 `"voice_bank": {"enabled": true}`). Every named speaker cluster with 20+ s of speech becomes a
 voice print (its pyannote/WeSpeaker embedding with name, Russian label and gender). In the next
 episode, before the LLM names the speakers:
@@ -246,7 +258,7 @@ matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own lin
 Once per season (before the first glossary) a cheap LLM with web search,
 `openrouter:openai/gpt-6-luna:online` (`llm.stages.cast`; if it fails, refuses or finds fewer
 than 3 people, the next model of the list: `anthropic/claude-haiku-5.5:online`, same price,
-S29 and S10 as complete), reads the show and season off the folder and file names and writes `<out-root>/<folder>.cast.json`: every person who speaks, with
+S29 and S10 as complete), reads the show and season off the folder and file names and writes `<season dir>/<folder>.cast.json`: every person who speaks, with
 spellings, nicknames, gender, role and relations (twins, couples, parent and child). The
 glossary uses its spellings, the speaker naming gets it as evidence, and after naming
 `stt.cast.check_speakers` turns other spellings of a cast name into the cast's ("John Misch" ->
@@ -373,7 +385,7 @@ Qwen3-ASR 20.5%, the other 15 models 21–27% (Canary 180M loops). pyannote vs D
 episode: equal speaker purity, pyannote 2.5x faster. Full tables: `output/stt_bench/RESULTS.md`
 (local report, not committed).
 
-## Outputs (`output/stt/<episode>/`)
+## Outputs (`<paths.work>/<episode>/`, default `output/stt/<episode>/`)
 
 - `subs.en.json`, `subs.ru.json` — project subtitle schema (`index`, `start`, `end`, `duration`
   in ms, `text: list[str]`, `gender`) plus `speaker`, `speaker_name`, `overlap`; the Russian
@@ -385,7 +397,8 @@ episode: equal speaker purity, pyannote 2.5x faster. Full tables: `output/stt_be
   `gender_source` (`voice`, `voice+text`, `text`, `manual`), speaker embedding.
 - `glossary.json/.txt`, `hotwords.txt`; the season glossary sits next to the episode folders.
 - `voiceover.<engine>/` (voice-over run: `export/track.wav`, `report.md`, `speech_check.md`),
-  `<name>.ru.<engine>.wav`, `<name>.ru.<engine>.mkv`.
+  `<name>.ru.<engine>.m4a` (the engine's mix), `<name>.ru.mkv` (all voice-overs; in
+  `paths.finished/<season folder>/` when set) or `<name>.ru.<engine>.mkv` (`"tracks": "separate"`).
 - `ocr.json` — captions, name cards and all text events with times and boxes.
 - `words.json`, `diarization.*.json`, `asr.*.json`, `voice.*.json`, `timings.json`, `logs/`.
 
