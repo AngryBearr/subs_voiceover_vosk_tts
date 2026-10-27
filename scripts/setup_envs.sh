@@ -6,6 +6,8 @@
 #                                       # qwen-asr pins transformers 4.57
 #   bash scripts/setup_envs.sh f5       # optional f5_env: ESpeech F5-TTS voice-over in the speakers' own voices
 #                                       # (engine "f5"); reuses torch of subs_env, so create subs_env first
+#   bash scripts/setup_envs.sh diarizen # optional diarizen_env: DiariZen v2 diarization ("diarizer": "diarizen-v2");
+#                                       # its own torch 2.1 and pyannote 3.1 fork; weights CC BY-NC 4.0
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export UV_HTTP_TIMEOUT=300
@@ -34,4 +36,21 @@ if has f5; then
   echo "$PWD/subs_env/lib/python3.12/site-packages" > f5_env/lib/python3.12/site-packages/subs_env.pth
   VIRTUAL_ENV=$PWD/f5_env uv pip install f5-tts==1.1.22 --override overrides-f5.txt
   f5_env/bin/python -c "import f5_tts, torch; print('f5-tts ok, CUDA:', torch.cuda.is_available())"
+fi
+
+if has diarizen; then
+  repo=models/diarizen/repo
+  if [ ! -d "$repo" ]; then
+    git clone --recursive https://github.com/BUTSpeechFIT/DiariZen.git "$repo"
+    git -C "$repo" checkout 844f5555b0a98acd0931511fc641a8c5b8ba92c7  # the version tested on Survivor (27.10.2026)
+    git -C "$repo" submodule update --init
+  fi
+  uv venv diarizen_env --python 3.10
+  export VIRTUAL_ENV=$PWD/diarizen_env
+  uv pip install torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 --index-url https://download.pytorch.org/whl/cu121
+  uv pip install -r "$repo/requirements.txt" -c "$repo/constraints.txt"
+  uv pip install -e "$repo" -e "$repo/pyannote-audio" -c "$repo/constraints.txt"
+  uv pip install av nvidia-ml-py -c "$repo/constraints.txt"  # stt.audio and stt.gpu in the worker
+  unset VIRTUAL_ENV
+  diarizen_env/bin/python -c "import diarizen, torch; print('DiariZen ok, CUDA:', torch.cuda.is_available())"
 fi

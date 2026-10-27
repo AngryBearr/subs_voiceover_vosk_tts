@@ -314,6 +314,38 @@ class SegmentEmbedder:
         return _unit(list(np.asarray(vector).ravel()))
 
 
+def solo_stretches(turns: list[dict[str, Any]], min_s: float = 1.5) -> list[tuple[str, float, float]]:
+    """(speaker, start, end) of every stretch of a turn that no other speaker's turn overlaps."""
+    ordered = sorted(turns, key=lambda t: t["start"])
+    longest = max((t["end"] - t["start"] for t in ordered), default=0.0)
+    stretches = []
+    for i, turn in enumerate(ordered):
+        pieces = [(turn["start"], turn["end"])]
+        for other in ordered:
+            if other["start"] >= turn["end"]:
+                break
+            if other["speaker"] == turn["speaker"] or other["end"] <= turn["start"] or \
+                    other["start"] < turn["start"] - longest:
+                continue
+            pieces = [part for a, b in pieces for part in ((a, min(b, other["start"])), (max(a, other["end"]), b))
+                      if part[1] > part[0]]
+        stretches += [(turn["speaker"], a, b) for a, b in pieces if b - a >= min_s]
+    return stretches
+
+
+def cluster_prints(turns: list[dict[str, Any]], audio: np.ndarray, embed: "SegmentEmbedder", rate: int = 16_000,
+                   max_piece_s: float = 10.0) -> dict[str, list[float]]:
+    """A print per diarized speaker, as pyannote community-1 gives its clusters: the length-weighted
+    mean embedding of the speaker's solo stretches (for diarizers without prints, e.g. DiariZen).
+    On S29E05 these match pyannote's own prints of the same clusters at 0.99 (median, min 0.88)."""
+    sums: dict[str, np.ndarray] = {}
+    for speaker, start, end in solo_stretches(turns):
+        piece = audio[int(start * rate):int(min(end, start + max_piece_s) * rate)]
+        vector = embed(piece, rate) * min(end - start, max_piece_s)
+        sums[speaker] = sums.get(speaker, 0) + vector
+    return {speaker: [round(float(x), 6) for x in _unit(list(total))] for speaker, total in sums.items()}
+
+
 def _words(episode_dir: Path, start: float, end: float) -> str | None:
     """Aligned words whose middle falls inside the stretch (exact text for a voice-cloning reference)."""
     path = episode_dir / "words.json"

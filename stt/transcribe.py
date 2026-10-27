@@ -131,6 +131,10 @@ def transcribe(args: argparse.Namespace) -> Path:
             diar_args += [flag, str(value)]
     diar_data = run_stage("diarize", DIARIZERS[args.diarizer].env, diar_args, diar_path, logs,
                           all_forced or "diarize" in stages)
+    if diar_data["turns"] and not diar_data.get("embeddings"):  # DiariZen: prints for speakers.json / the bank
+        prints_args = ["prints", "--audio", audio, "--diarization", str(diar_path), "--out", str(diar_path),
+                       "--device", args.device]
+        diar_data = run_stage("prints", "subs_env", prints_args, diar_path, logs, True)
     if args.refine_speakers != "none":
         refined_path = out / f"diarization.{args.diarizer}.refined.{args.refine_speakers}.json"
         refine_args = ["refine", "--audio", audio, "--diarization", str(diar_path), "--out", str(refined_path),

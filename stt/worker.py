@@ -3,6 +3,7 @@
 Internal entry point used by `stt.transcribe` and the benchmarks:
     python -m stt.worker asr --audio a.wav --chunks c.json --model whisper-large-v3 --out asr.json
     python -m stt.worker diarize --audio a.wav [a2.wav ...] --model pyannote-community-1 --out d.json
+    python -m stt.worker prints --audio a.wav --diarization d.json --out d.json   (cluster prints, subs_env)
     python -m stt.worker voice --audio a.wav --diarization d.json --out voice.json
     python -m stt.worker align --audio a.wav --asr asr.json --out asr.aligned.json [--aligner ctc|qwen]
                                                      (ctc: subs_env, qwen: stt_qwen_env)
@@ -99,6 +100,19 @@ def run_diarize(
         data = load_json(out)
         data["peak_vram_mb"] = _vram(vram.peak_mb)
         save_json(out, data)
+
+
+def run_prints(audio_path: Path, diarization_path: Path, out: Path, device: str) -> None:
+    """Add cluster prints (the voice bank's embedding space) to a diarization that has none."""
+    from stt.audio import read_wav
+    from stt.voice_bank import SegmentEmbedder, cluster_prints
+
+    data = load_json(diarization_path)
+    t0 = time.perf_counter()
+    data["embeddings"] = cluster_prints(data["turns"], read_wav(audio_path), SegmentEmbedder(device))
+    data["prints_s"] = round(time.perf_counter() - t0, 1)
+    save_json(out, data)
+    log.info("prints: %d speakers in %.1fs", len(data["embeddings"]), data["prints_s"])
 
 
 def run_voice(audio_path: Path, diarization_path: Path, out: Path, device: str, threshold: float) -> None:
@@ -262,6 +276,12 @@ def main(argv: list[str] | None = None) -> None:
     p_voice.add_argument("--device", default="cuda")
     p_voice.add_argument("--threshold", type=float, default=0.7)
 
+    p_prints = sub.add_parser("prints")
+    p_prints.add_argument("--audio", required=True)
+    p_prints.add_argument("--diarization", required=True)
+    p_prints.add_argument("--out", required=True)
+    p_prints.add_argument("--device", default="cuda")
+
     p_refine = sub.add_parser("refine")
     p_refine.add_argument("--audio", required=True)
     p_refine.add_argument("--diarization", required=True)
@@ -303,6 +323,8 @@ def main(argv: list[str] | None = None) -> None:
         run_ocr(Path(args.media), Path(args.out), args.device, args.start, args.duration, args.fps)
     elif args.command == "align":
         run_align(Path(args.audio), Path(args.asr), Path(args.out), args.device, args.aligner)
+    elif args.command == "prints":
+        run_prints(Path(args.audio), Path(args.diarization), Path(args.out), args.device)
     elif args.command == "refine":
         run_refine(Path(args.audio), Path(args.diarization), Path(args.out), args.model, args.margin, args.device)
     elif args.command == "voice":

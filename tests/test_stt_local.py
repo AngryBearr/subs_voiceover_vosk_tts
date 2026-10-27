@@ -770,3 +770,35 @@ Game everybody.
             self.assertEqual((merged["recall"], merged["our_changes"]), (0.0, 0))
             wrong = evaluate(srt, words("A A B B B B B B B B B"))
             self.assertEqual((wrong["recall"], wrong["precision"]), (0.0, 0.0))
+
+
+class DiarizenTest(unittest.TestCase):
+    def test_solo_stretches_leave_out_other_voices(self) -> None:
+        from stt.voice_bank import solo_stretches
+
+        turns = [{"start": 0.0, "end": 10.0, "speaker": "A"}, {"start": 4.0, "end": 5.0, "speaker": "B"},
+                 {"start": 9.0, "end": 12.0, "speaker": "B"}]
+        self.assertEqual(solo_stretches(turns), [("A", 0.0, 4.0), ("A", 5.0, 9.0), ("B", 10.0, 12.0)])
+
+    def test_cluster_prints_are_unit_means_of_solo_stretches(self) -> None:
+        from stt.voice_bank import cluster_prints
+
+        audio = np.zeros(16_000 * 20, dtype=np.float32)
+        audio[16_000 * 10:] = 1.0  # B's stretch is loud, A's silent: the fake embedder tells them apart
+        embed = lambda piece, rate: np.array([1.0, 0.0]) if piece.mean() < 0.5 else np.array([0.0, 1.0])
+        prints = cluster_prints([{"start": 0.0, "end": 8.0, "speaker": "A"},
+                                 {"start": 10.0, "end": 20.0, "speaker": "B"}], audio, embed)
+        self.assertEqual(prints, {"A": [1.0, 0.0], "B": [0.0, 1.0]})
+
+    def test_diarizen_backend_returns_turns(self) -> None:
+        from unittest import mock
+
+        from stt.diarize import DIARIZERS, DiarizenDiarizer
+
+        segment = mock.Mock(start=1.0, end=2.5)
+        annotation = mock.Mock(itertracks=lambda yield_label: [(segment, None, 0)])
+        diarizer = DiarizenDiarizer(DIARIZERS["diarizen-v2"])
+        diarizer._pipeline = mock.Mock(return_value=annotation)
+        result = diarizer.diarize(np.zeros(16_000, dtype=np.float32), max_speakers=25)
+        self.assertEqual([(t.start, t.end, t.speaker) for t in result.turns], [(1.0, 2.5, "0")])
+        self.assertEqual((result.exclusive, result.embeddings, diarizer._pipeline.max_speakers), ([], {}, 25))

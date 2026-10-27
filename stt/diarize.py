@@ -1,7 +1,12 @@
-"""Speaker diarization (who speaks when): pyannote community-1 behind a small interface.
+"""Speaker diarization (who speaks when): pyannote community-1 or DiariZen v2 behind a small interface.
 
-DiariZen was also benchmarked (better DER on VoxConverse, but on real episodes not better,
-2.5x slower, non-commercial weights and its own torch 2.1 venv), see docs/stt_local.md.
+DiariZen v2 (BUT, WavLM Large pruned to 20%, Conformer, VBx; CC BY-NC 4.0 weights) runs in its own
+venv (`diarizen_env`, torch 2.1 and a pyannote 3.1 fork: `bash scripts/setup_envs.sh diarizen`).
+It gives no exclusive turns and no cluster prints; `stt.transcribe` adds the prints (the voice
+bank's embedding space) in subs_env. S29E05-E08 against the captions' turn marks (`stt.turn_eval`),
+both with the ResNet293 refinement: speaker changes found 64% -> 80% at the same precision;
+~4x slower than pyannote (~2.5 min per 43-min episode, ~4.5 GB VRAM). The first DiariZen
+(2025) was not better than pyannote on Survivor, see docs/stt_local.md.
 """
 
 from __future__ import annotations
@@ -34,6 +39,12 @@ DIARIZERS: dict[str, DiarSpec] = {
         "pyannote",
         "pyannote/speaker-diarization-community-1",
         note="pyannote.audio 4, CC-BY-4.0, gated: accept terms + HF token",
+    ),
+    "diarizen-v2": DiarSpec(
+        "diarizen",
+        "BUT-FIT/diarizen-wavlm-large-s80-md-v2",
+        env="diarizen_env",
+        note="DiariZen v2, CC-BY-NC-4.0 weights, own venv: bash scripts/setup_envs.sh diarizen",
     ),
 }
 
@@ -144,8 +155,41 @@ class PyannoteDiarizer(Diarizer):
         )
 
 
+class DiarizenDiarizer(Diarizer):
+    """DiariZen (pyannote 3.1 fork): WavLM-Conformer segmentation + WeSpeaker ResNet34 + VBx clustering."""
+
+    batch_size = 8  # segmentation and embedding batches: ~4.5 GB VRAM (32 by default: ~13 GB)
+
+    def load(self) -> None:
+        from diarizen.pipelines.inference import DiariZenPipeline
+
+        self._pipeline = DiariZenPipeline.from_pretrained(self.spec.model_id)
+        self._pipeline.segmentation_batch_size = self.batch_size
+        self._pipeline.embedding_batch_size = self.batch_size
+
+    def diarize(
+        self,
+        audio: np.ndarray,
+        *,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> Diarization:
+        import io
+
+        import soundfile as sf
+
+        self._pipeline.min_speakers = num_speakers or min_speakers or 1
+        self._pipeline.max_speakers = num_speakers or max_speakers or 20
+        buffer = io.BytesIO()  # the pipeline reads a file (torchaudio): an in-memory WAV
+        sf.write(buffer, np.ascontiguousarray(audio, dtype=np.float32), SAMPLE_RATE, format="WAV", subtype="FLOAT")
+        buffer.seek(0)
+        return Diarization(turns=_annotation_turns(self._pipeline(buffer)))
+
+
 _BACKENDS: dict[str, type[Diarizer]] = {
     "pyannote": PyannoteDiarizer,
+    "diarizen": DiarizenDiarizer,
 }
 
 
