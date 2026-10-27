@@ -58,6 +58,12 @@ subtitles; each engine's run adds its track. `"separate"` writes `<name>.ru.<eng
 engine, each with a full copy of the video. The mixed WAV (~0.5 GB per episode and engine) is
 deleted once encoded to AAC unless `"keep_wav": true`.
 
+Before the episodes `stt.run` asks the OpenCode subscription once (`llm.opencode` models): an
+expired login is logged as a warning (the LLM steps then go through the paid router; with
+`"fallback": false` the run stops instead) and shown in the UI status, as is a fallback in the
+middle of a run. A stage that runs out of GPU memory (another program on the card) is started
+again after a minute, up to twice; ASR with half the batch size.
+
 A run can be stopped at any time (Ctrl+C, or "Стоп" in the UI) and started again with the same
 command: finished episodes and stages are skipped, the recognition keeps its finished parts
 (each ASR model, alignment, OCR, diarization), and the voice-over keeps every line already
@@ -378,6 +384,8 @@ subs_env/bin/python -m stt.bench summary output/stt_bench/ep_10m ...
 # diarization: VoxConverse DER, or SDH speaker labels of a real episode
 subs_env/bin/python -m stt.bench_diar --parquet voxconverse-test.parquet --out output/stt_bench/diar
 subs_env/bin/python -m stt.sdh_eval --srt ep.en.srt output/stt/ep/diarization.*.json
+# speaker changes vs the '>>' turn marks of CBS captions (S20, S29 WEB-DL; roll-up lines de-duplicated)
+subs_env/bin/python -m stt.turn_eval --srt ep.en.srt output/stt/ep/words.json
 # translations side by side
 subs_env/bin/python -m stt.compare_translations output/stt/ep --variants a b --ass ep.ru.ass
 ```
