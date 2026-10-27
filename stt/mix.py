@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -91,7 +92,7 @@ def encode_track(wav: Path, out: Path, bitrate: str = "192k") -> None:
 
 
 def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path | None, start: float = 0.0,
-               duration: float | None = None) -> None:
+               duration: float | None = None, srt_title: str = "Русские (озвученный текст)") -> None:
     """Video copy with voice-over mixes as audio tracks (``(file, title)``, the first is the default),
     the original audio after them and optional Russian subtitles. WAV tracks are encoded to AAC,
     others copied; a test piece (``start``) is cut and its video re-encoded. The file appears only
@@ -109,7 +110,8 @@ def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path
         cmd += ["-map", f"{n + 1}:a:0"]
     cmd += ["-map", "0:a:0"]
     if srt:
-        cmd += ["-map", f"{len(tracks) + 1}:s:0", "-c:s", "srt", "-metadata:s:s:0", "language=rus"]
+        cmd += ["-map", f"{len(tracks) + 1}:s:0", "-c:s", "srt", "-metadata:s:s:0", "language=rus",
+                "-metadata:s:s:0", f"title={srt_title}"]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"] if piece else ["-c:v", "copy"]
     for n, (path, title) in enumerate(tracks):
         cmd += [f"-c:a:{n}", *(["aac", f"-b:a:{n}", "192k"] if path.suffix.lower() == ".wav" else ["copy"]),
@@ -121,6 +123,20 @@ def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path
     partial = out.with_name(out.stem + ".partial" + out.suffix)
     subprocess.run([*cmd, str(partial)], check=True)
     partial.replace(out)
+
+
+def streams(path: Path) -> list[tuple[str, str]]:
+    """``(kind, title)`` of every stream of a media file (kind: video, audio, subtitle), as ffmpeg lists them."""
+    info = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", str(path)], capture_output=True, text=True).stderr
+    found: list[tuple[str, str]] = []
+    for line in info.splitlines():
+        kind = re.match(r"\s*Stream #\d+:\d+(?:\[\w+\])?(?:\(\w+\))?: (Video|Audio|Subtitle)", line)
+        if kind:
+            found.append((kind.group(1).lower(), ""))
+        title = re.match(r"\s*title\s*:\s*(.*)$", line)
+        if title and found:
+            found[-1] = (found[-1][0], title.group(1).strip())
+    return found
 
 
 def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None, start: float = 0.0,

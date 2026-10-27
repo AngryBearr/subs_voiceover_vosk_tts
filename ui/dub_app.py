@@ -31,7 +31,7 @@ from typing import Any
 
 import gradio as gr  # type: ignore
 
-from stt.run import STAGES, load_config
+from stt.run import STAGES, finished_folder, load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm"}
@@ -189,8 +189,8 @@ def result_file(job: Job, media: Path, engine: str) -> Path | None:
     """The finished video with the engine's voice-over (or, without a video, its mixed audio)."""
     work = job.out_root / media.stem
     config = json.loads(job.config_path.read_text(encoding="utf-8")) if job.config_path.exists() else {}
-    finished = (config.get("paths") or {}).get("finished")
-    folders = [Path(finished).expanduser() / media.parent.name, work] if finished else [work]
+    finished = finished_folder(config, media)
+    folders = [finished, work] if finished else [work]
     track = work / f"{media.stem}.ru.{engine}.m4a"
     for folder in folders:
         if track.exists() and (folder / f"{media.stem}.ru.mkv").exists():  # all voice-overs in one video

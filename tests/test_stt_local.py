@@ -257,7 +257,7 @@ class RunTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             args = argparse.Namespace(season_glossary=None, force=None, until="mix", engine="vosk", start=None,
                                       duration=None)
-            config = {"paths": {"season": f"{tmp}/voices", "finished": f"{tmp}/done"},
+            config = {"paths": {"season": f"{tmp}/voices", "finished": f"{tmp}/done", "finished_folder": "STT_{season}"},
                       "voiceover": {"engines": {"vosk": {}, "teratts": {}, "f5": {}}},
                       "mix": {"tracks": "combined", "track_order": ["f5", "teratts", "vosk"],
                               "track_titles": {"f5": "Голоса героев"}, "subtitles": False}}
@@ -273,8 +273,15 @@ class RunTest(unittest.TestCase):
             video, tracks, out, srt, *_ = mux.call_args.args
             self.assertEqual([(p.name, title) for p, title in tracks],
                              [("ep01.ru.f5.m4a", "Голоса героев"), ("ep01.ru.vosk.m4a", "Русский (vosk)")])
-            self.assertEqual(out, Path(tmp) / "done" / "Season 1" / "ep01.ru.mkv")
+            self.assertEqual(out, Path(tmp) / "done" / "STT_Season 1" / "ep01.ru.mkv")
             self.assertIsNone(srt)
+            ep.config["mix"]["subtitles"] = True  # the voiced lines of the default track's engine
+            voiced = ep.out / "voiceover.f5" / "export" / "display.srt"
+            voiced.parent.mkdir(parents=True)
+            voiced.write_text("")
+            with mock.patch("stt.mix.mux_tracks") as mux:
+                ep.mux()
+            self.assertEqual(mux.call_args.args[3], voiced)
             ep.config["mix"]["tracks"] = "separate"
             with mock.patch("stt.mix.mux_tracks") as mux:
                 ep.mux()
@@ -621,3 +628,24 @@ def test_local_config_on_top(tmp_path: Path) -> None:
     (tmp_path / "c.local.json").write_text(json.dumps({"llm": {"model": "sol", "opencode": ["openai/*"]}}))
     assert load_config(tmp_path / "c.json") == {"llm": {"model": "sol", "stages": {"a": 1}, "opencode": ["openai/*"]},
                                                  "mode": "fast"}
+
+
+class CombineTest(unittest.TestCase):
+    def test_streams_of_a_combined_video(self) -> None:
+        from unittest import mock
+
+        from stt.mix import streams
+
+        info = """Input #0, matroska,webm, from 'ep.ru.mkv':
+  Stream #0:0: Video: h264 (Main), yuv420p, 960x720 (default)
+  Stream #0:1(rus): Audio: aac (LC), 48000 Hz, stereo, fltp (default)
+      Metadata:
+        title           : Многоголосый закадровый
+  Stream #0:2: Audio: aac (LC), 48000 Hz, stereo, fltp
+      Metadata:
+        title           : Original
+  Stream #0:3(rus): Subtitle: subrip (srt)
+"""
+        with mock.patch("subprocess.run", return_value=mock.Mock(stderr=info)):
+            self.assertEqual(streams(Path("ep.ru.mkv")), [("video", ""), ("audio", "Многоголосый закадровый"),
+                                                          ("audio", "Original"), ("subtitle", "")])

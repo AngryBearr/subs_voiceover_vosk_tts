@@ -1,5 +1,5 @@
 {
-  "paths": {"work": "output/stt", "season": null, "finished": null},
+  "paths": {"work": "output/stt", "season": null, "finished": null, "finished_folder": "STT_{season}"},
   "mode": "accurate",
   "modes": {
     "fast": {"asr": "whisper-large-v3", "fuse": []},

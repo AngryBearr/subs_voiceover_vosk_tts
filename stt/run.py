@@ -84,6 +84,16 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def finished_folder(config: dict[str, Any], media: Path) -> Path | None:
+    """``paths.finished`` / ``paths.finished_folder`` with ``{season}`` = the video's folder name
+    ("STT_{season}" -> "STT_Season 20"); None when finished videos stay in the episode folders."""
+    paths = config.get("paths") or {}
+    if not paths.get("finished"):
+        return None
+    return Path(paths["finished"]).expanduser() / str(paths.get("finished_folder") or "{season}").format(
+        season=media.parent.name)
+
+
 class Episode:
     def __init__(self, media: Path, out_root: Path, args: argparse.Namespace, config: dict[str, Any]) -> None:
         self.media = media
@@ -388,12 +398,10 @@ class Episode:
 
     @property
     def finished(self) -> Path:
-        """Folder of the finished video: ``paths.finished/<season folder>``, else the episode folder
-        (always for a test piece)."""
-        root = (self.config.get("paths") or {}).get("finished")
-        if not root or self.args.start or self.args.duration:
-            return self.out
-        return Path(root).expanduser() / self.media.parent.name
+        """Folder of the finished video: ``paths.finished`` / ``paths.finished_folder`` (``{season}``:
+        the video's folder name), else the episode folder (always for a test piece)."""
+        folder = finished_folder(self.config, self.media)
+        return self.out if folder is None or self.args.start or self.args.duration else folder
 
     def finished_video(self, engine: str | None = None) -> Path:
         """The video with all voice-overs (``mix.tracks: combined``) or with ``engine``'s (separate)."""
@@ -412,7 +420,10 @@ class Episode:
             engines = [self.engine]
         titles = cfg.get("track_titles") or {}
         tracks = [(self.track(e), titles.get(e, f"Русский ({e})")) for e in engines]
-        srt = self.out / "subs.ru.srt" if cfg.get("subtitles", True) else None
+        srt = None
+        if cfg.get("subtitles", True):  # the voiced lines (the same in every engine); the translation if none
+            voiced = self.out / f"voiceover.{engines[0]}" / "export" / "display.srt"
+            srt = voiced if voiced.exists() else self.out / "subs.ru.srt"
         out = self.finished_video()
         out.parent.mkdir(parents=True, exist_ok=True)
         mix.mux_tracks(self.media, tracks, out, srt, self.args.start or 0.0, self.args.duration)
