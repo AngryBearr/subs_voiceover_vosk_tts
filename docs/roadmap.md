@@ -18,6 +18,10 @@ The first goal: any episode of a season, from the video to the mkv, without manu
 - Done since (26.10): speaker refinement by WeSpeaker ResNet293 (voiced cues on their person's
   main speaker 63.5% -> 71.1% on S10 SDH labels), ducking only the original voices, the browser
   UI (processing, voice bank, review), the review list with corrections, ESpeech F5 engine.
+- Done (27.10): Survivor US S20 (Heroes vs. Villains) whole season, 15 episodes in all three
+  voice-overs, one video per episode with every voice-over as a track and the voiced Russian
+  subtitles (`paths.finished`, `stt.combine`), every line levelled to -20 dBFS. ~16 h for the
+  season with a second pass; numbers in `docs/experiments.md`.
 - Known weak spot: diarization merges similar voices. S29E01 has one voice cluster with two
   women (Jaclyn and Baylor), so one of them gets the other's name and voice. The season
   speaker bank (below) is the planned fix.
@@ -164,9 +168,43 @@ So that a new user only clones the branch, runs one script and then works in the
   21.6% for pyannote community-1). The older DiariZen was as accurate as pyannote on Survivor
   and 2.5x slower; v2 is worth one run on S29E01 against the SDH speaker labels.
 
+- **FireRedTTS3** (Den4ik in the Telegram chat, 27.10, as the best local Russian voice cloning
+  now): https://huggingface.co/FireRedTeam/FireRedTTS3, code github.com/FireRedTeam/FireRedTTS3,
+  Apache-2.0, released 08.2026. Base = zero-shot cloning in 24 languages (Russian included; its
+  card: Russian WER 3.28%, speaker similarity 84.7% on MiniMax-MLS), needs the reference's
+  transcript (the voice bank clips have one); Instruct = voice design and speech editing.
+  Built on Qwen3 / DiTAR (patch-level diffusion autoregression). Unknown from the card: size,
+  speed, VRAM, and whether a line's length can be set (F5's `fix_duration` is what makes it fit
+  the slots; without it the timeline solver has to stretch). Test like ESpeech was tested: the
+  same 60 lines of S29E01 / a S20 scene with the voice bank clips, speech check, stress marks
+  (does it read `+`?), speed, then by ear against ESpeech.
+- **Emotion for the cloned voices** (Telegram 27.10): GigaAM emo, LAION Empathic-Insight-Voice-Small,
+  NVIDIA Audio Flamingo recognise emotion in speech; they could pick a calm and an excited clip per
+  person (section 3, "several clips per person") and the clip matching the original line.
+- **Interruptions at speaker boundaries** (Telegram 27.10, the same weak spot as ours): words at
+  a turn change without a pause go to the wrong speaker. Ideas there: an overlap classifier, a
+  speech separator on the overlapped stretches, punctuation / LLM at the boundary. Measure first
+  on S20 against the CBS captions' `>>` speaker-change marks.
 - **Look again on GitHub / Hugging Face** for diarization and speaker-embedding models newer
   than pyannote community-1 and WeSpeaker ResNet293 (the S10 SDH benchmark,
   `stt.refine_speakers sdh`, measures any of them in minutes).
+
+## 7. Smaller follow-ups from the S20 run (27.10)
+
+- **F5 first-word losses**: measure the "— " prefix and +0.3 s of length on a few hundred lines
+  with the three takes (section 3); only then change the worker.
+- **Short phrases split by a pause** are now kept in one cue (`--fragment-words`); S20 was
+  voiced before that fix and is left as it is (the user, 27.10). New seasons get it.
+- **Speaker changes against the S20 captions**: the CBS captions mark every speaker change with
+  `>>` (and name only the host): a metric for turn boundaries, the diarization refinement and the
+  interruption idea above.
+- **S20E02 / E03 in cloned voices** were voiced before Courtney's and Danielle's clips existed,
+  so these two speak with the fallback voice there (E01, E04, E05, E07 were re-voiced). A
+  `stt.run ... --engine f5` of the two would give them their own voices.
+- **A warning in the UI when the ChatGPT subscription login of opencode has expired**: runs fall
+  back to the paid routers silently (26.10 the token expired mid-season).
+- **TTS cache**: sets of older engine versions pile up in `output/tts_cache/` (40 of 45 were
+  stale on 27.10); a cleanup command that keeps the sets the episode folders use.
 
 ## Not planned
 

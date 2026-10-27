@@ -5,7 +5,8 @@ speakers, determines their gender (Russian grammar, voice choice), translates to
 to the timing and prepares the dubbing script. The `voiceover` package synthesises it (Vosk or
 TeraTTS, a voice per speaker gender), fits the lines to the timeline and exports the voice
 track; `stt.mix` puts it over the ducked original and muxes a video copy. What comes next
-(speaker bank, voice cloning, tips to test): `docs/roadmap.md`.
+(speaker bank, voice cloning, tips to test): `docs/roadmap.md`; state and pitfalls for a new
+agent: `docs/handoff.md`.
 
 ```
 video ─► audio 16 kHz ─┬─► VAD chunks ─► Whisper  (fast)
