@@ -26,11 +26,15 @@ LLM cache and the TTS cache sets in use.
 
 ## S20 checks against the reference subtitles (27.10.2026)
 
-- English recognition of whole episodes against the CBS captions (`output/s20_subs/srt/`):
-  fusion 11.6-12.1% of words differ, Whisper alone 13.0-13.4%, Cohere alone 13.9-15.0%
-  (E01-E03). Part of it is the captions' own shortening and uncaptioned background talk: the
-  final transcript scores a little worse than the fusion only because it has more of that talk
-  right ("damn holding these sons of bitches sure makes me hungry", not in the captions).
+- English recognition of whole episodes against the CBS captions (`output/s20_subs/srt/`), all
+  15 episodes: fusion 6.5-12.9% of words differ (better than either model in every episode),
+  Whisper alone 8.2-15.6%, Cohere alone 8.8-15.8%. Part of it is the captions' own shortening
+  and uncaptioned background talk: the final transcript scores a little worse than the fusion
+  only because it has more of that talk right ("damn holding these sons of bitches sure makes me
+  hungry", not in the captions).
+- Speech check of the voice-overs, S20E01-E15 (9933 lines each): ESpeech 1.45% character errors
+  (195 lines flagged), Vosk 0.66% (77), TeraTTS 0.55% (54). LLM steps through the ChatGPT
+  subscription; the Claude stress votes through OrcaRouter cost ~$0.05 per episode.
 - Pauses inside a sentence that split it into cues are real: Whisper decoded no words of the
   phrase in 92 of 99 such gaps where its own word times had put the words side by side.
 - ESpeech F5 loses the first word of a line in 5-7% of lines (Vosk / TeraTTS 2.5-3.5%, partly the
