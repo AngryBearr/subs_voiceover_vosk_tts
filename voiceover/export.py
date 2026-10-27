@@ -223,8 +223,11 @@ def export_final(out_dir: Path, *, cues: list[dict[str, Any]], units: list[dict[
                  durations0: dict[str, Any], durations1: dict[str, Any], schedule1: dict[str, Any],
                  verified: dict[str, Any], policy: TimelinePolicy, sample_rate: int = 22050,
                  manifest_extra: dict[str, Any] | None = None,
-                 stretch: StretchFn = stretch_clip, accepted: frozenset[str] = frozenset()) -> dict[str, Any]:
+                 stretch: StretchFn = stretch_clip, accepted: frozenset[str] = frozenset(),
+                 loudness_db: float | None = None, max_gain_db: float = 20.0) -> dict[str, Any]:
     """Write all export files into ``out_dir`` and return a summary for the report.
+
+    ``loudness_db`` brings every line to this speech level (dBFS) in the track (``level_clip``).
 
     ``accepted`` lists units the user marked as reviewed; it also covers forced units the
     compressor never produced a choice for, which ``resolve`` cannot mark itself.
@@ -260,7 +263,8 @@ def export_final(out_dir: Path, *, cues: list[dict[str, Any]], units: list[dict[
         else:
             render_rows.append(rows0[uid])
     summary = render(render_placements, render_rows, cues, None,
-                     RenderOptions(sample_rate=sample_rate, ticks=False, segment_marker=False),
+                     RenderOptions(sample_rate=sample_rate, ticks=False, segment_marker=False,
+                                   loudness_db=loudness_db, max_gain_db=max_gain_db),
                      out_dir / "track.wav", out_dir / "track_guide.md", stretch=stretch)
 
     # --- subtitles

@@ -468,11 +468,15 @@ def stage_export(cues_artifact: dict[str, Any], units_artifact: dict[str, Any], 
                          "schedule1": json_sha256(schedule1["placements"]),
                          "cues": json_sha256(cues_artifact["cues"]), "units": json_sha256(units_artifact["units"]),
                          "overrides": overrides_sha256(overrides)}}
-    sample_rate = int(config.get("export", {}).get("sample_rate", 22050))
+    export_cfg = config.get("export", {})
+    sample_rate = int(export_cfg.get("sample_rate", 22050))
+    loudness = export_cfg.get("loudness_db")
+    manifest_extra["loudness"] = {"loudness_db": loudness, "max_gain_db": float(export_cfg.get("max_gain_db", 20.0))}
     summary = export_final(out / "export", cues=cues_artifact["cues"], units=units_artifact["units"],
                            durations0=durations, durations1=durations1, schedule1=schedule1, verified=verified,
                            policy=policy, sample_rate=sample_rate, manifest_extra=manifest_extra, stretch=stretch,
-                           accepted=overrides.accepted)
+                           accepted=overrides.accepted, loudness_db=None if loudness is None else float(loudness),
+                           max_gain_db=float(export_cfg.get("max_gain_db", 20.0)))
     log.info("export: %s", summary["counts"])
     return summary
 

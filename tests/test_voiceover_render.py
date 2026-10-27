@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from voiceover.render import RenderOptions, Segment, parse_segments, render, stretch_clip
+from voiceover.render import RenderOptions, Segment, level_clip, parse_segments, render, speech_level_db, stretch_clip
 
 SR = 8000
 
@@ -153,3 +153,36 @@ def test_stretch_clip_real(tmp_path):
     assert abs(len(stretch_clip(p, 1.0, 22050)) / 22050 - 1.0) < 0.01
     with pytest.raises(RuntimeError):
         stretch_clip(tmp_path / "missing.wav", 1.0, 22050)
+
+
+def test_level_clip_brings_quiet_and_loud_lines_to_one_level() -> None:
+    # cloned voices speak as loud as their reference: S20E08 lines ranged from -42 to -17 dBFS
+    import numpy as np
+
+    rate = 16000
+    t = np.arange(rate) / rate
+    speech = np.sin(2 * np.pi * 200 * t).astype(np.float32)
+    speech[rate // 2: rate // 2 + rate // 10] = 0.0  # a pause does not count
+    for amplitude in (0.02, 0.05, 0.5):  # -37, -29 and -9 dBFS of speech
+        out = level_clip(speech * amplitude, rate, -20.0)
+        assert abs(speech_level_db(out, rate) - -20.0) < 0.2
+    assert abs(speech_level_db(level_clip(speech * 0.0005, rate, -20.0, max_gain_db=20.0), rate)
+               - speech_level_db(speech * 0.005, rate)) < 0.2  # at most +20 dB
+    loud = level_clip(speech * 0.001, rate, 0.0, max_gain_db=60.0)
+    assert np.abs(loud).max() <= 0.95 + 1e-6  # never over the peak limit
+    assert not level_clip(np.zeros(rate, np.float32), rate, -20.0).any()
+
+
+def test_level_track_levels_each_placed_line() -> None:
+    import numpy as np
+
+    from voiceover.render import level_track
+
+    rate = 16000
+    t = np.arange(rate) / rate
+    tone = np.sin(2 * np.pi * 200 * t).astype(np.float32)
+    track = np.concatenate([tone * 0.02, np.zeros(rate, np.float32), tone * 0.4]).astype(np.float32)
+    out = level_track(track, rate, [(0, 1000), (2000, 3000)], -20.0)
+    for a, b in ((0, rate), (2 * rate, 3 * rate)):
+        assert abs(speech_level_db(out[a + 400:b - 400], rate) - -20.0) < 0.3
+    assert not out[rate + 400:2 * rate - 400].any()

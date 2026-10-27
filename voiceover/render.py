@@ -43,6 +43,8 @@ class RenderOptions:
     ticks: bool = False
     segment_gap_ms: int = 1500
     segment_marker: bool = True
+    loudness_db: float | None = None  # speech level every clip is brought to (dBFS); None: as synthesised
+    max_gain_db: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,54 @@ def stretch_clip(path: Path, tempo_factor: float, sample_rate: int) -> np.ndarra
             raise RuntimeError(f"ffmpeg failed for {path}: {proc.stderr.strip()}")
         data, _ = sf.read(str(out), dtype="float32", always_2d=True)
     return np.ascontiguousarray(data.mean(axis=1), dtype=np.float32)
+
+
+def speech_level_db(clip: np.ndarray, sample_rate: int) -> float | None:
+    """Level of the speech in a clip (dBFS): RMS of its 20 ms frames within 25 dB of the loudest one,
+    so pauses and the clip's edges do not count."""
+    hop = max(1, int(sample_rate * 0.02))
+    frames = len(clip) // hop
+    if frames == 0:
+        return None
+    rms = np.sqrt(np.mean(clip[: frames * hop].reshape(frames, hop).astype(np.float64) ** 2, axis=1) + 1e-12)
+    db = 20 * np.log10(rms)
+    loud = rms[db > db.max() - 25]
+    return float(20 * np.log10(np.sqrt(np.mean(loud ** 2))))
+
+
+def level_clip(clip: np.ndarray, sample_rate: int, target_db: float, max_gain_db: float = 20.0,
+               peak: float = 0.95) -> np.ndarray:
+    """The clip at ``target_db`` of speech level: a cloned voice speaks as loud as its reference clip,
+    so lines of different people (and some whispered short lines) came out 8-20 dB apart. The gain
+    is at most ``max_gain_db`` and never lifts a peak over ``peak``."""
+    level = speech_level_db(clip, sample_rate)
+    if level is None or level < -70:  # silence: nothing to level
+        return clip
+    gain = 10 ** (min(target_db - level, max_gain_db) / 20)
+    top = float(np.abs(clip).max()) * gain
+    if top > peak:
+        gain *= peak / top
+    return (clip * gain).astype(np.float32)
+
+
+def level_track(track: np.ndarray, sample_rate: int, spans: Sequence[tuple[int, int]], target_db: float,
+                max_gain_db: float = 20.0, ramp_ms: int = 10) -> np.ndarray:
+    """``level_clip`` applied afterwards to the lines of a rendered track (``spans``: start/end ms of
+    each placed line), for tracks rendered before the levelling; short ramps between gains."""
+    gain = np.ones(len(track), dtype=np.float32)
+    ramp = max(1, int(sample_rate * ramp_ms / 1000))
+    for start_ms, end_ms in spans:
+        a, b = int(sample_rate * start_ms / 1000), min(len(track), int(sample_rate * end_ms / 1000))
+        if b - a <= 2 * ramp:
+            continue
+        piece = track[a:b]
+        leveled = level_clip(piece, sample_rate, target_db, max_gain_db)
+        top = float(np.abs(piece).max())
+        g = float(np.abs(leveled).max()) / top if top > 0 else 1.0
+        gain[a:b] = g
+        gain[a:a + ramp] = np.linspace(1.0, g, ramp, dtype=np.float32)
+        gain[b - ramp:b] = np.linspace(g, 1.0, ramp, dtype=np.float32)
+    return (track * gain).astype(np.float32)
 
 
 def _tone(freq: float, ms: int, dbfs: float, sample_rate: int) -> np.ndarray:
@@ -151,6 +201,8 @@ def render(
                 clamped += 1
                 rel = 0
             clip = stretch(Path(drow["path"]), float(p["tempo_factor"]), sr)
+            if options.loudness_db is not None:
+                clip = level_clip(clip, sr, options.loudness_db, options.max_gain_db)
             rows.append(_Row(p, int(sr * rel / 1000), clip))
         length = max([seg_samples] + [r.offset + len(r.clip) for r in rows])
         buf = np.zeros(length, dtype=np.float32)

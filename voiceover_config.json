@@ -83,6 +83,8 @@
     }
   },
   "export": {
+    "loudness_db": -20.0,
+    "max_gain_db": 20.0,
     "sample_rate": 22050
   }
 }

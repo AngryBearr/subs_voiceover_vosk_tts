@@ -8,12 +8,18 @@ combined ``<name>.ru.mkv`` that ``stt.run`` now writes itself (``mix.tracks: com
 mixing, no re-encoding), or taken from ``<name>.ru.<engine>.m4a`` / the mixed WAV. The video is
 checked (every engine's track, the original, the subtitles); then ``--delete-separate`` removes
 the per-engine videos and mixed WAVs.
+
+``--relevel`` brings every line of tracks rendered before the per-line levelling
+(``voiceover_config.json`` export ``loudness_db``) to that speech level and mixes them again,
+without new synthesis.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import glob
+import json
 import logging
 import subprocess
 import sys
@@ -47,7 +53,36 @@ def engine_track(episode: Episode, engine: str) -> Path | None:
     return None
 
 
-def combine(folder: Path, config: dict, delete_separate: bool = False) -> Path | None:
+def relevel(episode: Episode, engine: str) -> bool:
+    """Level the lines of the engine's track if it was rendered without levelling, and mix it again."""
+    import soundfile as sf
+
+    from voiceover.render import level_track
+
+    vo = episode.out / f"voiceover.{engine}"
+    manifest_path, track = vo / "export" / "manifest.json", vo / "export" / "track.wav"
+    export = json.loads((REPO_ROOT / episode.config["voiceover"].get("config", "voiceover_config.json"))
+                        .read_text(encoding="utf-8")).get("export", {})
+    target = export.get("loudness_db")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    if target is None or not track.exists() or (manifest.get("loudness") or {}).get("loudness_db") is not None:
+        return False
+    spans = [(int(p["start_ms"]), int(p["end_ms"])) for p in load_json(vo / "schedule1.json")["placements"]]
+    audio, rate = sf.read(str(track), dtype="float32")
+    sf.write(str(track), level_track(audio, rate, spans, float(target), float(export.get("max_gain_db", 20.0))),
+             rate, subtype="PCM_16")
+    manifest["loudness"] = {"loudness_db": target, "max_gain_db": export.get("max_gain_db", 20.0),
+                            "leveled_after_render": True}
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    config = copy.deepcopy(episode.config)
+    config["mix"]["mux"] = False  # one video at the end, with every engine
+    args = argparse.Namespace(**{**vars(episode.args), "engine": engine})
+    Episode(episode.media, episode.out.parent, args, config).mix()
+    log.info("%s: %s leveled to %s dBFS and mixed again", episode.out.name, engine, target)
+    return True
+
+
+def combine(folder: Path, config: dict, delete_separate: bool = False, relevel_tracks: bool = False) -> Path | None:
     """The combined video of one episode folder; None when it has no finished voice-over."""
     from stt import mix
 
@@ -62,6 +97,9 @@ def combine(folder: Path, config: dict, delete_separate: bool = False) -> Path |
     args = argparse.Namespace(season_glossary=None, force=None, until="mix", engine=voiced[0], start=None,
                               duration=None)
     episode = Episode(media, folder.parent, args, config)
+    if relevel_tracks:
+        for engine in voiced:
+            relevel(episode, engine)
     engines = [e for e in voiced if engine_track(episode, e)]
     if not engines:
         log.warning("%s: no mix found for %s", folder.name, ", ".join(voiced))
@@ -91,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=str(REPO_ROOT / "stt_config.json"))
     parser.add_argument("--delete-separate", action="store_true",
                         help="Delete the per-engine videos and mixed WAVs once the combined video is checked")
+    parser.add_argument("--relevel", action="store_true",
+                        help="Level every line of tracks rendered before the per-line levelling, mix them again")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     config = load_config(Path(args.config))
@@ -98,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = 0
     for folder in folders:
         if folder.is_dir() and (folder / "source.json").exists():
-            failed += combine(folder, config, args.delete_separate) is None
+            failed += combine(folder, config, args.delete_separate, args.relevel) is None
     return 1 if failed else 0
 
 
