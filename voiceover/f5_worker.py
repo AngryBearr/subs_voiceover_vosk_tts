@@ -33,7 +33,7 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     from f5_tts.model import DiT
     from huggingface_hub import hf_hub_download
 
-    from voiceover.speech_check import Recognizer, check_audio, clip_score, leading_extra
+    from voiceover.speech_check import Recognizer, check_audio, check_clip, clip_score, leading_extra
 
     repo = job.get("model", "ESpeech/ESpeech-TTS-1_RL-V2")
     model = load_model(DiT, MODEL_CFG, hf_hub_download(repo, job.get("checkpoint", "espeech_tts_rlv2.pt")),
@@ -56,11 +56,17 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
                                              nfe_step=int(job.get("nfe", 32)), show_info=quiet,
                                              fix_duration=ref_seconds[ref] + float(item["duration"]))
                 wav = np.asarray(wav, dtype=np.float32)
-                if recognizer:  # the end of the reference spoken before the line: cut it off
-                    cut = leading_extra(item["text"], recognizer(wav, rate)[1])
-                    if cut and cut > 0.15:
-                        wav = wav[int((cut - 0.05) * rate):]
-                check = check_audio(recognizer, item["text"], wav, rate) if recognizer else None
+                check = None
+                if recognizer:
+                    heard, words = recognizer(wav, rate)
+                    check = check_clip({"tts_text": item["text"]}, heard, words, len(wav) / rate)
+                    cut = leading_extra(item["text"], words)
+                    if cut and cut > 0.15:  # the end of the reference spoken before the line: cut it off,
+                        # unless that checks worse (the ASR split the first word: "Кортни" -> "корт ни")
+                        cut_wav = wav[int((cut - 0.05) * rate):]
+                        cut_check = check_audio(recognizer, item["text"], cut_wav, rate)
+                        if clip_score(cut_check) <= clip_score(check):
+                            wav, check = cut_wav, cut_check
                 score = clip_score(check) if check else 0.0
                 if best is None or score < best[0]:
                     best = (score, wav, attempt, check)

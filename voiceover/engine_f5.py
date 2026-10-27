@@ -96,7 +96,8 @@ class F5Engine(VoskEngine):
     def synth_identity(self) -> dict[str, Any]:
         return {"engine": "f5", "model": self.repo, "nfe": self.nfe, "target_syl_per_sec": self.target_syl_per_sec,
                 "base_rate": self.base_rate, "attempts": self.attempts, "trim": dict(self.trim),
-                "worker": 2,  # bump when voiceover.f5_worker changes the audio (2: leaked reference cut off)
+                "worker": 3,  # bump when voiceover.f5_worker changes the audio (2: leaked reference cut off,
+                # 3: the cut only when it checks better)
                 "voice": self._voice_key(self.voice)}
 
     @staticmethod
