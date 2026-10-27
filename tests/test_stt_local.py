@@ -649,3 +649,86 @@ class CombineTest(unittest.TestCase):
         with mock.patch("subprocess.run", return_value=mock.Mock(stderr=info)):
             self.assertEqual(streams(Path("ep.ru.mkv")), [("video", ""), ("audio", "Многоголосый закадровый"),
                                                           ("audio", "Original"), ("subtitle", "")])
+
+
+class WorkerRetryTest(unittest.TestCase):
+    def test_out_of_memory_stage_is_retried_with_a_smaller_batch(self) -> None:
+        from unittest import mock
+
+        from stt import worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out, log_path = Path(tmp) / "asr.json", Path(tmp) / "asr.log"
+            seen: list[list[str]] = []
+
+            def fake_run(env: str, module: str, args: list[str], path: Path) -> tuple[int, str]:
+                seen.append(list(args))
+                if len(seen) == 1:
+                    path.write_text("RuntimeError: CUDA failed with error out of memory\n", encoding="utf-8")
+                    return 1, "out of memory"
+                out.write_text('{"segments": []}', encoding="utf-8")
+                return 0, ""
+
+            with mock.patch.object(worker, "run_module", fake_run), mock.patch.object(worker.time, "sleep"):
+                data = worker.call("subs_env", ["asr", "--model", "whisper-large-v3", "--out", str(out)], out,
+                                   log_path)
+            self.assertEqual(data, {"segments": []})
+            self.assertEqual(seen[1][-2:], ["--batch-size", "8"])  # half of Whisper's 16
+            self.assertTrue(log_path.with_suffix(".oom1.log").exists())
+
+    def test_other_failures_are_not_retried(self) -> None:
+        from unittest import mock
+
+        from stt import worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out, log_path = Path(tmp) / "ocr.json", Path(tmp) / "ocr.log"
+            calls = mock.Mock(side_effect=lambda *a: (log_path.write_text("ValueError: bad frame"), (1, "bad"))[1])
+            with mock.patch.object(worker, "run_module", calls), self.assertRaises(RuntimeError):
+                worker.call("subs_env", ["ocr", "--out", str(out)], out, log_path)
+            self.assertEqual(calls.call_count, 1)
+
+    def test_voiceover_module_is_started_again_after_out_of_memory(self) -> None:
+        from unittest import mock
+
+        from stt import run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            episode = mock.Mock(out=Path(tmp), media=Path("ep.mkv"))
+            codes = iter([1, 0])
+
+            def fake_run(cmd: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout"].write("torch.OutOfMemoryError: CUDA out of memory.\n")  # type: ignore[attr-defined]
+                return mock.Mock(returncode=next(codes))
+
+            with mock.patch.object(run.subprocess, "run", fake_run), mock.patch.object(run.time, "sleep"), \
+                    mock.patch.object(run, "dotenv", return_value={}):
+                run.Episode._module(episode, "voiceover.f5", "voiceover.pipeline", [])
+            self.assertTrue((Path(tmp) / "logs" / "voiceover.f5.oom1.log").exists())
+
+
+class SubscriptionCheckTest(unittest.TestCase):
+    CONFIG = {"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"],
+                      "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5",
+                                            "openrouter:google/gemini-4-argon"], "fuse": "opencode:openai/gpt-6-luna"}}}
+
+    def test_models_through_the_subscription(self) -> None:
+        from stt.run import subscription_models
+
+        self.assertEqual(subscription_models(self.CONFIG), ["openai/gpt-6.1-sol", "openai/gpt-6-luna"])
+        self.assertEqual(subscription_models({"llm": {"model": "openai/gpt-6-luna"}}), [])  # no opencode patterns
+
+    def test_failed_login_warns_or_stops(self) -> None:
+        from unittest import mock
+
+        from stt import run
+
+        with mock.patch("stt.llm.subscription_error", return_value=None):
+            self.assertTrue(run.check_subscription(self.CONFIG))
+        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), \
+                self.assertLogs("stt.run", "WARNING") as logs:
+            self.assertFalse(run.check_subscription(self.CONFIG))
+        self.assertIn("opencode auth login", logs.output[0])
+        strict = {"llm": {**self.CONFIG["llm"], "fallback": False}}
+        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), self.assertRaises(SystemExit):
+            run.check_subscription(strict)

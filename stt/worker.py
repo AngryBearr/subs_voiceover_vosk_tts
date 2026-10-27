@@ -186,12 +186,51 @@ def run_ocr(media: Path, out: Path, device: str, start: float, duration: float |
     save_json(out, {**result, "ocr_s": round(elapsed, 1), "peak_vram_mb": _vram(vram.peak_mb)})
 
 
-def call(env: str, args: list[str], out: Path, log_path: Path) -> dict[str, Any]:
-    """Run a worker command in `env`; return its JSON output or raise with the log tail."""
-    code, tail = run_module(env, "stt.worker", args, log_path)
-    if code != 0 or not out.exists():
-        raise RuntimeError(f"stt.worker {args[0]} failed (exit {code}), see {log_path}: {tail}")
-    return load_json(out)
+# Messages of PyTorch, CTranslate2 and ONNX Runtime when the GPU has no memory left.
+_GPU_OOM = ("CUDA out of memory", "OutOfMemoryError", "CUDA failed with error out of memory",
+            "CUBLAS_STATUS_ALLOC_FAILED", "cudaErrorMemoryAllocation", "Failed to allocate memory")
+
+
+def gpu_out_of_memory(log_text: str) -> bool:
+    return any(marker in log_text for marker in _GPU_OOM)
+
+
+def _smaller_batch(args: list[str]) -> list[str]:
+    """ASR args with half the batch size (the model's default if none was given)."""
+    from stt.asr import ASR_MODELS
+
+    args = list(args)
+    if "--batch-size" in args:
+        i = args.index("--batch-size") + 1
+        args[i] = str(max(1, int(args[i]) // 2))
+    else:
+        model = args[args.index("--model") + 1]
+        args += ["--batch-size", str(max(1, ASR_MODELS[model].batch_size // 2))]
+    return args
+
+
+def call(env: str, args: list[str], out: Path, log_path: Path, *, oom_retries: int = 2,
+         oom_wait_s: float = 60.0) -> dict[str, Any]:
+    """Run a worker command in `env`; return its JSON output or raise with the log tail.
+
+    A stage that ran out of GPU memory (another program on the card) is retried after a pause,
+    an ASR stage with half the batch size.
+    """
+    for attempt in range(oom_retries + 1):
+        code, tail = run_module(env, "stt.worker", args, log_path)
+        if code == 0 and out.exists():
+            return load_json(out)
+        log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+        if attempt == oom_retries or not gpu_out_of_memory(log_text):
+            break
+        if args[0] == "asr":
+            args = _smaller_batch(args)
+        log.warning("stt.worker %s ran out of GPU memory; retry %d/%d in %.0f s%s", args[0], attempt + 1,
+                    oom_retries, oom_wait_s, f" (batch {args[args.index('--batch-size') + 1]})"
+                    if "--batch-size" in args else "")
+        log_path.with_suffix(f".oom{attempt + 1}.log").write_text(log_text, encoding="utf-8")
+        time.sleep(oom_wait_s)
+    raise RuntimeError(f"stt.worker {args[0]} failed (exit {code}), see {log_path}: {tail}")
 
 
 def main(argv: list[str] | None = None) -> None:

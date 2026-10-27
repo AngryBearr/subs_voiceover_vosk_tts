@@ -214,3 +214,18 @@ class OpenRouterClient:
             log.warning("LLM call failed (attempt %d/%d): %s", attempt + 1, retries + 1, last_error)
             time.sleep(2.0 * (attempt + 1))
         raise RuntimeError(f"LLM request to {self.bare_model} via {transport} failed: {last_error}")
+
+
+def subscription_error(model: str, timeout_s: float = 90.0) -> str | None:
+    """None when the OpenCode login of the subscription answers for ``model``, else the reason.
+
+    One tiny request; an expired login ("authentication token is expired") would otherwise only
+    show up as LLM steps falling back to a paid router in the middle of a run.
+    """
+    client = OpenRouterClient("opencode:" + split_route(model)[1], timeout_s=timeout_s)
+    try:
+        client.chat_json("Answer in JSON.", 'Return {"ok": true}', max_tokens=50, retries=1)
+    except Exception as exc:  # any failure means the subscription route is not usable now
+        return str(exc)[:300]
+    return None
+

@@ -93,3 +93,14 @@ def test_review_rows_and_corrections(tmp_path: Path) -> None:
                                                                              "text": "Как твоя фамилия?"}}
     assert dub_app.review_rows(str(tmp_path), "ep")[0][6].startswith('{"speaker": "S02"')
     assert dub_app.speaker_choices(str(tmp_path), "ep") == ["S02: John Rocker (male)"]
+
+
+def test_status_warns_when_the_subscription_login_fails(tmp_path: Path, monkeypatch) -> None:
+    log = tmp_path / "job.log"
+    job = dub_app.Job(files=[], out_root=tmp_path, engines=["f5"], config_path=tmp_path / "c.json", log_path=log)
+    monkeypatch.setattr(dub_app, "JOB", job)
+    log.write_text("2026 INFO stt.run: [ep] asr ...\n", encoding="utf-8")
+    assert dub_app.SUBSCRIPTION_WARNING not in dub_app.refresh()[0]
+    log.write_text("WARNING stt.llm: LLM openai/gpt-6.1-sol via opencode failed (token expired); using orcarouter\n",
+                   encoding="utf-8")
+    assert dub_app.SUBSCRIPTION_WARNING in dub_app.refresh()[0]

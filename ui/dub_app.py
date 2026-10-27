@@ -31,7 +31,7 @@ from typing import Any
 
 import gradio as gr  # type: ignore
 
-from stt.run import STAGES, finished_folder, load_config
+from stt.run import STAGES, SUBSCRIPTION_DOWN, finished_folder, load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm"}
@@ -219,6 +219,18 @@ def log_tail(job: Job | None, lines: int = 40) -> str:
     return "\n".join((keep or text)[-lines:])
 
 
+SUBSCRIPTION_WARNING = ("⚠️ Вход в подписку ChatGPT (opencode) не работает: шаги с языковой моделью идут через "
+                        "платный роутер. Войдите заново командой `opencode auth login`.")
+
+
+def subscription_failed(job: Job) -> bool:
+    """The job's log shows the subscription login failing (at the start or mid-run)."""
+    if not job.log_path.exists():
+        return False
+    text = job.log_path.read_text(encoding="utf-8", errors="replace")[-500_000:]
+    return SUBSCRIPTION_DOWN in text or "via opencode failed" in text
+
+
 def refresh() -> tuple[str, Any, str, Any]:
     job = JOB
     if job is None:
@@ -226,6 +238,8 @@ def refresh() -> tuple[str, Any, str, Any]:
     else:
         minutes = ((job.finished or time.time()) - job.started) / 60
         status = f"**{job.state}** · {minutes:.0f} мин · движок: {job.engine or '-'}"
+        if subscription_failed(job):
+            status += "\n\n" + SUBSCRIPTION_WARNING
     engines = job.engines if job else []
     progress = gr.update(value=progress_rows(job), headers=["Серия", *engines] if engines else ["Серия"])
     return status, progress, log_tail(job), gr.update(value=results_rows(job))

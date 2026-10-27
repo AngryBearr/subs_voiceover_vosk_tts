@@ -40,11 +40,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from stt.runner import REPO_ROOT, load_json, save_json
-from utils.llm_route import with_route
+from utils.llm_route import split_route, with_route
 
 log = logging.getLogger("stt.run")
 
@@ -309,16 +310,32 @@ class Episode:
             argv += ["--speaker-voices", str(self._speaker_voices())]
         dub.main(argv)
 
-    def _module(self, name: str, module: str, args: list[str]) -> None:
-        """Run a module of this repo in the current interpreter, logging to logs/<name>.log."""
+    def _module(self, name: str, module: str, args: list[str], *, oom_retries: int = 2,
+                oom_wait_s: float = 60.0) -> None:
+        """Run a module of this repo in the current interpreter, logging to logs/<name>.log.
+
+        A run that ran out of GPU memory is started again after a pause; the voice-over keeps
+        every line already synthesised, so it goes on where it stopped.
+        """
+        from stt.worker import gpu_out_of_memory
+
         env = {**os.environ, **dotenv(), "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
         log_path = self.out / "logs" / f"{name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", encoding="utf-8") as log_file:
-            code = subprocess.run([sys.executable, "-m", module, *args], cwd=REPO_ROOT, env=env, stdout=log_file,
-                                  stderr=subprocess.STDOUT).returncode
-        if code != 0:
-            raise SystemExit(f"{name} failed (exit {code}), see {log_path}")
+        for attempt in range(oom_retries + 1):
+            with log_path.open("w", encoding="utf-8") as log_file:
+                code = subprocess.run([sys.executable, "-m", module, *args], cwd=REPO_ROOT, env=env, stdout=log_file,
+                                      stderr=subprocess.STDOUT).returncode
+            if code == 0:
+                return
+            log_text = log_path.read_text(encoding="utf-8", errors="replace")
+            if attempt == oom_retries or not gpu_out_of_memory(log_text):
+                break
+            log.warning("[%s] %s ran out of GPU memory; retry %d/%d in %.0f s", self.media.stem, name, attempt + 1,
+                        oom_retries, oom_wait_s)
+            log_path.with_suffix(f".oom{attempt + 1}.log").write_text(log_text, encoding="utf-8")
+            time.sleep(oom_wait_s)
+        raise SystemExit(f"{name} failed (exit {code}), see {log_path}")
 
     def _voiceover_config(self) -> Path:
         """voiceover_config.json with this run's engine, voices, text preparation and timing; saved per engine."""
@@ -454,6 +471,44 @@ class Episode:
             self.mux()
 
 
+SUBSCRIPTION_DOWN = "The ChatGPT subscription login of OpenCode does not work (run `opencode auth login`)"
+
+
+def subscription_models(config: dict[str, Any]) -> list[str]:
+    """Model ids of the LLM steps that go through the OpenCode subscription (see ``Episode.llm``)."""
+    llm = config.get("llm") or {}
+    patterns = llm.get("opencode") or []
+    names: list[str] = []
+    for value in [llm.get("model"), *(llm.get("stages") or {}).values()]:
+        names += value if isinstance(value, list) else [value] if value else []
+    models = []
+    for name in names:
+        transports, bare = split_route(name)
+        if "opencode" in transports or (not transports and any(fnmatch.fnmatchcase(bare, p) for p in patterns)):
+            models.append(bare)
+    return list(dict.fromkeys(models))
+
+
+def check_subscription(config: dict[str, Any]) -> bool:
+    """Ask the subscription once before the episodes; False (with a warning) when it does not answer.
+
+    With ``llm.fallback`` false the run stops here instead of failing at its first LLM step.
+    """
+    from stt.llm import subscription_error
+
+    for model in subscription_models(config):
+        error = subscription_error(model)
+        if error is None:
+            continue
+        if not (config.get("llm") or {}).get("fallback", True):
+            raise SystemExit(f"{SUBSCRIPTION_DOWN}: {error}")
+        router = (config.get("llm") or {}).get("router", "openrouter")
+        log.warning("%s: %s. LLM steps with %s go through %s instead and cost money.", SUBSCRIPTION_DOWN, error,
+                    model, " / ".join([router] if isinstance(router, str) else router))
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="English video -> Russian voice-over, end to end")
     parser.add_argument("media", nargs="+", help="Video files or glob patterns (a whole season works)")
@@ -480,6 +535,7 @@ def main(argv: list[str] | None = None) -> None:
     if missing or not files:
         raise SystemExit(f"Media not found: {missing or args.media}")
     out_root = Path(args.out_root or (config.get("paths") or {}).get("work") or "output/stt").expanduser()
+    check_subscription(config)
     for media in files:
         Episode(media, out_root, args, config).run()
 
