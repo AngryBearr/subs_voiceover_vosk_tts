@@ -732,3 +732,41 @@ class SubscriptionCheckTest(unittest.TestCase):
         strict = {"llm": {**self.CONFIG["llm"], "fallback": False}}
         with mock.patch("stt.llm.subscription_error", return_value="token is expired"), self.assertRaises(SystemExit):
             run.check_subscription(strict)
+
+
+class TurnEvalTest(unittest.TestCase):
+    SRT = """1
+00:00:01,000 --> 00:00:02,000
+>> jeff: Welcome back to the
+game everybody.
+
+2
+00:00:02,000 --> 00:00:03,000
+Game everybody.
+>> thank you jeff.
+
+3
+00:00:03,000 --> 00:00:04,000
+>> thank you jeff.
+>> good luck.
+"""
+
+    def test_roll_up_lines_are_dropped_and_turns_scored(self) -> None:
+        from stt.turn_eval import caption_lines, evaluate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            srt = Path(tmp) / "ep.en.srt"
+            srt.write_text(self.SRT, encoding="utf-8")
+            self.assertEqual(caption_lines(srt), [">> jeff: Welcome back to the", "game everybody.",
+                                                  ">> thank you jeff.", ">> good luck."])
+
+            def words(speakers: str) -> list[dict[str, str]]:
+                text = "Welcome back to the game everybody. Thank you, Jeff. Good luck.".split()
+                return [{"text": t, "speaker": s} for t, s in zip(text, speakers.split())]
+
+            right = evaluate(srt, words("A A A A A A B B B A A"))
+            self.assertEqual((right["caption_turns"], right["recall"], right["precision"]), (2, 1.0, 1.0))
+            merged = evaluate(srt, words("A A A A A A A A A A A"))
+            self.assertEqual((merged["recall"], merged["our_changes"]), (0.0, 0))
+            wrong = evaluate(srt, words("A A B B B B B B B B B"))
+            self.assertEqual((wrong["recall"], wrong["precision"]), (0.0, 0.0))
