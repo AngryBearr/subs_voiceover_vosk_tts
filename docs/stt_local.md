@@ -231,6 +231,11 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   ESpeech swallows short words (и, в, да) more than the other engines; since 28.10 its takes start
   with "— ", get 0.3 s more length and are synthesised again while a word of the text, short ones
   included, is not heard (lines losing a word 40% -> 19% on 300 S29 lines; `docs/roadmap.md` §7).
+  People without a voice-bank clip (unnamed voices, crowds) are spoken by TeraTTS in the ESpeech
+  track (`"fallback": "teratts"` in the f5 engine: the TeraTTS voices of the config, ru_f1+ru_f2 /
+  ru_m5) instead of a Vosk sentence cloned by F5; the F5 calibration still probes the Vosk clip.
+  S29E06 voiced so (with DiariZen and the short-word fix): character errors 1.65% -> 1.03%, lines
+  over the flag 12 -> 5, lost first words 62 -> 37 of ~600 lines.
 
 ## Season voice bank
 

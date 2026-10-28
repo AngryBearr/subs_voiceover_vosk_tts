@@ -269,16 +269,21 @@ class Episode:
         engine = dict(cfg.get("engines", {}).get(self.engine, {}))
         if "voices" not in engine:
             raise SystemExit(f"voiceover.engines.{self.engine}.voices missing in the config")
-        if self.engine == "f5":  # fallback voices: a Vosk voice per gender, cloned by F5
-            from voiceover.engine_f5 import fallback_references
+        if self.engine == "f5":  # speakers without a clip: TeraTTS voices, or a Vosk voice cloned by F5
+            from voiceover.engine_f5 import TERATTS, fallback_references, voice_id
 
             vo = load_json(REPO_ROOT / cfg.get("config", "voiceover_config.json"))
             vosk = cfg.get("engines", {}).get("vosk", {}).get("voices", {"female": 49, "male": 56})
             refs = fallback_references(self.references.parent / "fallback_voices",
                                        REPO_ROOT / vo["engine"]["model_path"], {g: int(v) for g, v in vosk.items()})
-            from voiceover.engine_f5 import voice_id
-
-            engine["voices"] = {g: voice_id(refs[g] if v == "auto" else v) for g, v in engine["voices"].items()}
+            auto = {g: voice_id(refs[g]) for g in refs}
+            if engine.pop("fallback", "vosk") == "teratts":
+                tera = {k: v for k, v in cfg.get("engines", {}).get("teratts", {}).items() if k != "sample_rate"}
+                voices = tera.pop("voices", {"female": "ru_f1+ru_f2", "male": "ru_m5"})
+                engine["teratts"] = {**tera, "voice": voices["male"]}
+                engine["voice"] = auto["male"]  # the default voice F5 clones (calibration probes it)
+                auto = {g: TERATTS + str(voices.get(g, voices["male"])) for g in engine["voices"]}
+            engine["voices"] = {g: auto[g] if v == "auto" else voice_id(v) for g, v in engine["voices"].items()}
         return engine
 
     @property
@@ -356,7 +361,7 @@ class Episode:
         if (self.out / "stress.json").exists():
             normalization["stress_dict"] = str((self.out / "stress.json").resolve())
         vo_config["engine"] = {**vo_config["engine"], **engine, "name": self.engine, "normalization": normalization,
-                               "voice": self._engine()["voices"]["male"]}
+                               "voice": engine.get("voice") or self._engine()["voices"]["male"]}
         for section in ("policy", "units"):  # dub-specific timing (preferred lag, base tempo, no unit merging)
             vo_config[section] = {**vo_config.get(section, {}), **cfg.get(section, {})}
         openrouter = {"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1",

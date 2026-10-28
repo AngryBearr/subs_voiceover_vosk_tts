@@ -113,3 +113,54 @@ def test_short_word_options_change_the_cache_and_reach_the_worker(tmp_path: Path
     assert "prefix" not in plain.synth_identity()  # the old cache stays valid without the options
     assert missing_words(["да", "так", "и", "есть"], ["так", "есть"]) == 2
     assert missing_words(["и", "и"], ["и"]) == 1
+
+
+def test_lines_without_a_clip_are_spoken_by_teratts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from voiceover.engine import SynthResult
+
+    python = tmp_path / "python"
+    python.write_text("")
+    julie = _ref(tmp_path, "julie")
+    engine = F5Engine({"voice": "teratts:ru_m5", "python": str(python), "teratts": {"device": "cpu"}})
+    asked: list[list[PreparedText]] = []
+
+    class FakeTera:
+        def synthesize_many(self, rows: list[PreparedText], cache_dir: Path) -> list[SynthResult]:
+            asked.append(rows)
+            return [SynthResult(row.cue_id, f"/tera/{row.cue_id}.wav", "", 1.0, 1.0, 0, 0) for row in rows]
+
+    monkeypatch.setattr(engine, "_teratts_engine", lambda: FakeTera())
+
+    def fake_worker(items: list[dict[str, Any]], cache_dir: Path) -> None:
+        for item in items:
+            audio = np.zeros(int(24000 * item["duration"]), dtype=np.float32)
+            audio[2400:-2400] = 0.3
+            sf.write(item["out_wav"], audio, 24000)
+            item["result"] = {"key": item["key"], "seed": 1234, "takes": 1, "error": None}
+
+    monkeypatch.setattr(engine, "_run_worker", fake_worker)
+    rows = [PreparedText("c1", "a", "Прив+ет.", "ok"),  # the default voice: TeraTTS
+            PreparedText("c2", "b", "Прив+ет.", "ok", voice=julie),
+            PreparedText("c3", "c", "Пок+а.", "ok", voice="teratts:ru_f1+ru_f2")]
+    results = engine.synthesize_many(rows, tmp_path / "cache")
+    assert [r.cue_id for r in results] == ["c1", "c2", "c3"]
+    assert [(row.cue_id, row.voice) for row in asked[0]] == [("c1", "ru_m5"), ("c3", "ru_f1+ru_f2")]
+    assert results[0].path == "/tera/c1.wav" and results[1].path.endswith(".wav") and "/tera/" not in results[1].path
+
+
+def test_fallback_voices_come_from_the_teratts_settings(tmp_path: Path) -> None:
+    from unittest import mock
+
+    from stt import run
+
+    refs = {"female": _ref(tmp_path, "fallback_female"), "male": _ref(tmp_path, "fallback_male")}
+    episode = mock.Mock(engine="f5", references=tmp_path / "season.references")
+    episode.config = {"voiceover": {"engines": {
+        "f5": {"voices": {"female": "auto", "male": "auto"}, "fallback": "teratts", "nfe": 32},
+        "teratts": {"voices": {"female": "ru_f1+ru_f2", "male": "ru_m5"}, "device": "cuda", "sample_rate": 44100}}}}
+    with mock.patch("voiceover.engine_f5.fallback_references", return_value=refs), \
+            mock.patch.object(run, "load_json", return_value={"engine": {"model_path": "vosk"}}):
+        engine = run.Episode._engine(episode)
+    assert engine["voices"] == {"female": "teratts:ru_f1+ru_f2", "male": "teratts:ru_m5"}
+    assert engine["teratts"] == {"device": "cuda", "voice": "ru_m5"} and "fallback" not in engine
+    assert engine["voice"].startswith(refs["male"] + "#")  # F5 still clones a default voice (calibration)
