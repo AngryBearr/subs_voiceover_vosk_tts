@@ -3,35 +3,39 @@
 What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S29E01/E02
 (Survivor: San Juan del Sur, 64 and 43 min) unless noted.
 
-## Next steps (28.10.2026, in the user's order of priority)
+## Next steps (28.10.2026, evening)
 
-1. **Stress of names (done 28.10)**: the stress check now covers the show's names in every case
-   form (`voiceover.stress_check --names`). Re-stress the finished S29 episodes and S20
-   (`stt.run ... --force stress --engine <e>` per engine: only lines with a corrected name are
-   synthesised again) and finish S29 (E11, E13-E15, the missing tracks of E01-E08).
-2. **Cloned voices without the English accent** (tested 28.10, `output/tts_eval/vc/`): TeraTTS (native
-   Russian) converted to the person's timbre by Seed-VC V1 (zero-shot, `models/seedvc/`, GPL-3.0)
-   scored well on character errors (0.61% vs ESpeech 1.59%) and similarity (0.44 vs 0.40 to the
-   season voice), but by ear it has a heavy accent (the user, 28.10): the speech check's ASR
-   understands accented Russian. A measure that agrees with the ear: Whisper large-v3's language
-   probability for Russian (`accent.py`): TeraTTS 0.999, ESpeech 0.984 (worst line 0.93), Seed-VC
-   0.88-0.98 at any CFG / reference length (worst lines 0.05-0.70). ESpeech or FireRedTTS3 with a
-   Seed-VC Russian reference: less like the person (0.35-0.36). Not used. Next candidates, to be
-   judged by P(ru) + similarity, then by ear with one clearly named file per variant: OpenVoice v2
-   (timbre-only tone colour converter, MIT), RVC trained per main character on the bank's solo
-   speech, a Seed-VC fine-tune per person.
-3. **Stress** (28.10): TeraAnaly on whole episodes shows the engines say the marked stress in
-   98.4-99.3% of words (S29E03), so the errors are in the marks. Done: the show's names in every
-   case form (~20% of name uses were wrong) and a second stress placer, silero-stress, whose
-   disagreements with RUAccent go to the strong models past the screener (S29E03: 15 -> 24
-   corrections, all-models-on-everything 27; cost ~$0.05 -> ~$0.11 per episode). Left: Vosk slips
-   (22 words in E03, Vosk 0.11), a TeraAnaly retry of takes whose heard stress differs.
-4. **DiariZen**: default since 28.10. Diarizing the Demucs vocal stem instead of the mix (tested
-   28.10, `output/stt_dz_vocals/`): turn F1 the same (0.823 vs 0.823 with the refinement on
-   S29E05-E07; +0.02 on S20, -0.03 on S29E08) and who is who worse on S10 (63.7% vs 71.3% of SDH
-   lines on their person's speaker): not used. Left: lines of an unnamed crowd cluster -> the
-   nearest named voice when one is clear (in S29E06 only 2 of 36 were clear).
-5. Setup scripts and the settings page (section 5), then the community tests of section 6.
+Done on 28.10 (details in the sections below and in `docs/stt_local.md`): DiariZen v2 as the
+diarizer; the stress of the show's names, a second stress placer (silero-stress) and gpt-6.1-sol
+as the free screener; ESpeech and TeraTTS retrying takes that lose a short word (ESpeech also a
+dash and 0.3 s more length); the TeraTTS female voice ru_f1+ru_f2; TeraTTS voices for people
+without a clip in the ESpeech track. Tried and dropped: FireRedTTS3, Seed-VC (accent), DiariZen
+on the vocal stem, the TeraTTS teacher sampler, stress marks on one-syllable names.
+
+Who speaks, where it stands (S29/S20/S10): speaker changes vs the captions' `>>` marks F1
+0.81-0.85; SDH-labelled S10 lines on their person's speaker ~71%; ~3.7% of clear lines voiced
+with the other gender (the line's own voice vs its speaker's gender, `output/stt_dz_sweep/
+gender_check.py`); twins (Natalie / Nadiya) one voice. Not exhausted:
+
+1. **Spoken stress check after synthesis**: TeraAnaly on the checked words only (names,
+   homographs, disputed words); another take when the voice said another stress (section 6).
+2. **Gender per line**: a line whose own voice is clearly the other gender than its speaker
+   (~20-25 per episode) moves to the nearest speaker of that gender by voice, or at least gets
+   a voice of the heard gender. Measure with the gender check, S10 SDH labels, turn F1.
+3. **Each line against the season voice bank**: a line whose voice clearly matches another
+   named person's season prints (margin) moves to that person: merges like Wes/Alec in S29E05,
+   Julie's lines in the "camp voices" cluster. Same measures.
+4. **The picture: active speaker detection + faces.** Who moves their lips in sync with the
+   speech (Light-ASD / TalkNet-type models) and whose face it is (face prints per person, named by
+   the confessional name cards the OCR already reads). The most work and the biggest gain where
+   people talk on screen (camp, tribal council); no help for voice-over narration and
+   off-screen speech. Measure on the S10 SDH labels and the turn marks first.
+5. **Setup scripts and the "Настройки" page** (section 5).
+6. **Re-voice S20 and S29 with all of it**, then finish S29 (E11, E13-E15, the missing tracks of
+   E01-E08): once the improvements above are in (the user, 28.10: not after every small one).
+7. Smaller: Vosk 0.11 when it is out (section 4), a TTS cache cleanup command, emotion models to
+   pick calm / excited clips, newer diarization and speaker-embedding models, Shmyrev's TTS
+   metrics, the translation check only if it measurably helps (section 3b).
 
 ## 1. Now: stable whole episodes on Vosk and TeraTTS
 
