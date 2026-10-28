@@ -37,3 +37,12 @@ def test_blend_voices_are_checked_part_by_part(tmp_path: Path) -> None:
     engine._check_voice("ru_f1+ru_f2")
     with pytest.raises(ValueError, match="ru_x"):
         engine._check_voice("ru_f1+ru_x")
+
+
+def test_lost_short_words_count_against_a_take() -> None:
+    engine = TeraTTSEngine.__new__(TeraTTSEngine)
+    engine.verify = {"retry_lost_words": True}
+    check = {"cer": 0.0, "diffs": [], "stretch": 1.0, "heard": "так и есть"}
+    assert engine._score("Да, так и есть.", check)[1] == 1
+    engine.verify = {"retry_lost_words": False}
+    assert engine._score("Да, так и есть.", check) == (0.0, 0)

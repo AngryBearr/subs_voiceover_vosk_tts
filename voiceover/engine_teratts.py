@@ -14,7 +14,8 @@ to ``duration_scale = 1 / base_rate``, so calibration works as for Vosk.
 The diffusion sampler sometimes mumbles or drops a word or draws one out. With ``verify``
 every clip is transcribed by GigaAM right away (``voiceover.speech_check``); a clip with a word
 not heard, a garbled word or a drawn-out word is synthesised again with other seeds and the
-best take is kept.
+best take is kept; ``verify.retry_lost_words`` (default) also retries while a short word ("и",
+"в") is not heard.
 
 A voice can also be an equal blend of built-in voices, ``ru_f1+ru_f2`` (the user's choice for the
 female voice, 28.10: between ru_f1's cartoonish 272 Hz and ru_f2's 204 Hz). Its two style vectors
@@ -42,6 +43,7 @@ SAMPLE_RATE = 44_100
 _MODELS: dict[tuple[str, str, str], Any] = {}
 STYLES_DIR = Path(__file__).resolve().parent.parent / "models" / "teratts_styles"
 _STYLE_FILES = ("style_ttl.npy", "style_dp.npy")
+LOST_WORD_SCORE = 0.15  # per word of the text not heard, with verify.retry_lost_words
 
 
 def style_dir(release: Path, voice: str, styles_dir: Path = STYLES_DIR) -> Path:
@@ -148,7 +150,9 @@ class TeraTTSEngine(VoskEngine):
         self.rate_tolerance = float(config.get("rate_tolerance", 0.15))
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
-        self.verify = {"enabled": True, "attempts": 3, **dict(config.get("verify", {}))}
+        # another take also while a word of the text is not heard, short ones included (the speech check
+        # skips words under 3 letters): S29E03, 640 lines: words not heard 93 -> 64, CER 0.52% -> 0.37%
+        self.verify = {"enabled": True, "attempts": 3, "retry_lost_words": True, **dict(config.get("verify", {}))}
         self.temperature = float(config.get("temperature", 0.667))
         self._recognizer: Any = None
         self._identity: dict[str, Any] | None = None
@@ -198,8 +202,14 @@ class TeraTTSEngine(VoskEngine):
         audio, sr = sf.read(str(wav), dtype="float32")
         return check_audio(self._recognizer, text, audio, sr)
 
+    def _score(self, text: str, check: dict[str, Any]) -> tuple[float, int]:
+        """(take score, words of the text not heard); lost short words count with ``retry_lost_words``."""
+        from voiceover.speech_check import clip_score, missing_words, plain_words
+
+        lost = missing_words(plain_words(text), plain_words(check["heard"])) if self.verify.get("retry_lost_words") else 0
+        return clip_score(check) + LOST_WORD_SCORE * lost, lost
+
     def _synth_one(self, model: Any, text: str, voice: str, wav: Path) -> dict[str, Any]:
-        from voiceover.speech_check import clip_score
 
         seed = 1234
         scale = 1.0 / self.base_rate
@@ -212,16 +222,18 @@ class TeraTTSEngine(VoskEngine):
         entry: dict[str, Any] = {"duration_scale": round(scale, 4), "seed": seed}
         if self.verify.get("enabled"):
             check = self._check(text, wav)
-            best = (clip_score(check), seed, check, (raw_sec, speech_sec, edge_ms, reduced))
+            score, lost = self._score(text, check)
+            best = (score, seed, check, (raw_sec, speech_sec, edge_ms, reduced), lost)
             retry = wav.with_suffix(".retry.wav")
             for attempt in range(1, int(self.verify["attempts"])):
-                if not best[2]["flags"] or not {"pronunciation", "drawn_out"} & set(best[2]["flags"]):
+                if not ({"pronunciation", "drawn_out"} & set(best[2]["flags"]) or best[4]):
                     break
                 stats = self._take(model, text, voice, retry, scale, seed + attempt)
                 check = self._check(text, retry)
-                if clip_score(check) < best[0]:
+                score, lost = self._score(text, check)
+                if score < best[0]:
                     retry.replace(wav)
-                    best = (clip_score(check), seed + attempt, check, stats)
+                    best = (score, seed + attempt, check, stats, lost)
             retry.unlink(missing_ok=True)
             raw_sec, speech_sec, edge_ms, reduced = best[3]
             entry.update(seed=best[1], check={k: best[2][k] for k in ("cer", "stretch", "flags", "heard")})

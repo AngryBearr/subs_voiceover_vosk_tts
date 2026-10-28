@@ -242,6 +242,9 @@ So that a new user only clones the branch, runs one script and then works in the
   losing a word 40% -> 19% (normal lines 4% -> 2%), character errors 2.3% -> 0.85%, 1.57 takes per
   line instead of 1.09 (normal lines +10% time). The dash or the length alone made normal lines
   worse (9-10% lost). Now the F5 engine's default (`prefix`, `slack_s`, `retry_lost_words`).
+  TeraTTS gets the retry too (`verify.retry_lost_words`): S29E03, 640 lines, words not heard
+  93 -> 64, character errors 0.52% -> 0.37%, no slower. Its teacher sampler changed nothing (0.49%,
+  94 words, same speed).
 - **Short phrases split by a pause** are now kept in one cue (`--fragment-words`); S20 was
   voiced before that fix and is left as it is (the user, 27.10). New seasons get it.
 - **Speaker changes against the S20 captions**: the CBS captions mark every speaker change with
