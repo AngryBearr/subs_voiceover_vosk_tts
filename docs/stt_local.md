@@ -215,7 +215,15 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   28 corrections (пора́, по́сле, О́строва, учи́тесь, начался́...), ~$0.14 per episode; the strong
   models on every sentence (`--no-screen`, ~$0.3) found 31. Cheap models alone are worse than
   RUAccent (luna: 36 extra changes, mostly wrong; deepseek-v4.1-flash: 75). Off with
-  `"stress_check": false` in `stt_config.json`.
+  `"stress_check": false` in `stt_config.json`. Since 28.10 also checked, past the screener:
+  the show's names in every case form (`--names`, the episode glossary: RUAccent read Jaclyn as
+  Жакл+ин, Keith's "Кита" as кит+а; ~20% of name uses were wrong) and the sentences where a second
+  stress placer, silero-stress, disagrees with RUAccent; homograph answers may leave RUAccent's
+  variants (понял+а). With a ChatGPT subscription, gpt-6.1-sol as the screener
+  (`llm.stages.stress_screen` in `stt_config.local.json`) costs nothing and matched the strong
+  models on every sentence: S29E03 28 corrections (luna as the screener 24, everything 27; before
+  28.10: 15) with 110 paid answers (luna 125, everything 325). The engines say the marked stress
+  in 98.4-99.3% of words (TeraAnaly on S29E03), so the marks are what matters.
 - **Speech check (after synthesis).** `voiceover.speech_check` transcribes every clip with
   GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
   abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.
