@@ -802,3 +802,21 @@ class DiarizenTest(unittest.TestCase):
         result = diarizer.diarize(np.zeros(16_000, dtype=np.float32), max_speakers=25)
         self.assertEqual([(t.start, t.end, t.speaker) for t in result.turns], [(1.0, 2.5, "0")])
         self.assertEqual((result.exclusive, result.embeddings, diarizer._pipeline.max_speakers), ([], {}, 25))
+
+
+class DiarizerFallbackTest(unittest.TestCase):
+    def test_missing_diarizen_env_falls_back_to_pyannote(self) -> None:
+        from unittest import mock
+
+        from stt import run, transcribe
+
+        with tempfile.TemporaryDirectory() as tmp:
+            episode = mock.Mock(media=Path("ep.mkv"), out=Path(tmp), season=Path(tmp) / "s.glossary.json",
+                                args=mock.Mock(mode="fast", start=None, duration=None),
+                                config={"diarizer": "diarizen-v2", "modes": {"fast": {"asr": "whisper-large-v3"}},
+                                        "ocr": {"enabled": False}})
+            with mock.patch.object(run, "REPO_ROOT", Path(tmp)), mock.patch.object(transcribe, "main") as main, \
+                    self.assertLogs("stt.run", "WARNING"):
+                run.Episode.transcribe(episode)
+            argv = main.call_args[0][0]
+            self.assertEqual(argv[argv.index("--diarizer") + 1], "pyannote-community-1")

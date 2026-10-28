@@ -189,9 +189,16 @@ class Episode:
     def transcribe(self) -> None:
         from stt import transcribe
 
+        from stt.diarize import DIARIZERS
+
         mode = self.config["modes"][self.args.mode]
-        argv = [str(self.media), "--out", str(self.out), "--asr", mode["asr"],
-                "--diarizer", self.config["diarizer"]]
+        diarizer = self.config["diarizer"]
+        env = DIARIZERS[diarizer].env if diarizer in DIARIZERS else "subs_env"
+        if not (REPO_ROOT / env).exists():  # e.g. DiariZen without its venv: the built-in diarizer instead
+            log.warning("[%s] %s needs %s (bash scripts/setup_envs.sh diarizen); using pyannote-community-1",
+                        self.media.stem, diarizer, env)
+            diarizer = "pyannote-community-1"
+        argv = [str(self.media), "--out", str(self.out), "--asr", mode["asr"], "--diarizer", diarizer]
         if mode.get("fuse"):
             argv += ["--fuse", ",".join(mode["fuse"]), "--fuse-model", self.llm("fuse")]
             if (self.season.with_suffix(".txt")).exists():
