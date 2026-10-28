@@ -174,8 +174,13 @@ So that a new user only clones the branch, runs one script and then works in the
   with the other gender (each line's own voice vs its speaker's gender, S29E01/E05-E08, ~2300 clear
   lines) 3.7% both. Neither splits the twins Natalie / Nadiya. Cost: ~2.5 min per 43-min episode
   (pyannote ~0.5 min), ~4.5 GB VRAM, CC BY-NC weights. AHC threshold 0.5 (0.6 merged Wes into Alec
-  in S29E05; a lower VBx Fb splits people into 25-150 clusters). Next: listen to the S29E06 A/B
-  file (`output/stt_dz_test/`), then make it the default for new episodes.
+  in S29E05; a lower VBx Fb splits people into 25-150 clusters). S29E06 voiced both ways
+  (`output/stt_dz_test/<E06>.AB.mkv`, notes next to it): 623 lines instead of 589, speech check
+  1.54% vs 1.65%; 64 caption-confirmed speaker changes now get their own voice; challenge shouts
+  that went to Jeff's voice now form an unnamed "camp voices" cluster (36 lines, a fallback
+  voice), which also took a few of Julie's lines in the rain. Next: the user listens; possibly
+  name such a crowd cluster's lines by their nearest bank voice when one is clear; then the
+  default for new episodes.
 
 - **FireRedTTS3** (tested 28.10, `models/fireredtts3/`, `output/tts_eval/firered/`): not usable
   for the cloned voices. With an English reference clip (all we have) it reads Russian with
