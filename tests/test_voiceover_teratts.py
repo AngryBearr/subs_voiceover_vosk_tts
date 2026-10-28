@@ -46,3 +46,41 @@ def test_lost_short_words_count_against_a_take() -> None:
     assert engine._score("Да, так и есть.", check)[1] == 1
     engine.verify = {"retry_lost_words": False}
     assert engine._score("Да, так и есть.", check) == (0.0, 0)
+
+
+def test_a_take_heard_with_another_stress_is_taken_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import soundfile as sf
+
+    from voiceover import stress_listen
+
+    engine = TeraTTSEngine.__new__(TeraTTSEngine)
+    engine.verify = {"enabled": True, "attempts": 3, "retry_lost_words": True}
+    engine.base_rate, engine.target_syl_per_sec, engine.rate_tolerance = 1.0, 5.0, 10.0
+    engine.device, engine._recognizer, engine._listener = "cpu", None, None
+    engine._listen = {"натали"}
+    seeds: list[int] = []
+
+    def take(model, text, voice, wav, scale, seed):  # noqa: ANN001
+        seeds.append(seed)
+        sf.write(str(wav), np.full(4410, (seed - 1230) / 10, np.float32), 44100)
+        return 0.1, 0.1, 0, 0
+
+    class Listener:
+        def __init__(self, device: str) -> None: ...
+
+        def __call__(self, audio, rate, text, words):  # noqa: ANN001
+            right = float(audio[0]) > 0.55  # the third take (seed 1236) says it right
+            return [{"word": "натали", "want": 0, "heard": 0 if right else 2, "p_want": 0.9 if right else 0.1,
+                     "wrong": not right}]
+
+    monkeypatch.setattr(engine, "_take", take)
+    monkeypatch.setattr(engine, "_check", lambda text, wav: {"cer": 0.0, "diffs": [], "stretch": 1.0,
+                                                             "flags": [], "heard": "натали привет"})
+    monkeypatch.setattr(stress_listen, "StressListener", Listener)
+    entry = engine._synth_one(None, "Н+атали, прив+ет.", "ru_m5", tmp_path / "a.wav")
+    assert seeds == [1234, 1235, 1236] and entry["seed"] == 1236
+    assert entry["stress"] == {"words": ["натали"], "wrong": [], "heard": entry["stress"]["heard"]}
+    seeds.clear()
+    cached = {**entry, "stress": None}
+    again = engine._synth_one(None, "Н+атали, прив+ет.", "ru_m5", tmp_path / "a.wav", cached)
+    assert seeds == [] and again["seed"] == 1236  # the cached take was right: only heard

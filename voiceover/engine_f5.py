@@ -6,7 +6,8 @@ A voice is a reference clip (WAV + transcript in ``<name>.txt`` next to it, as w
 the voice-over is redone. Text
 preparation is the Vosk one (rule-based expansion, RUAccent stress with ``+``, which ESpeech
 reads). Each line is synthesised at a natural length (``target_syl_per_sec``), heard by GigaAM
-and retried with other seeds when a word is missing or garbled (``verify.attempts``).
+and retried with other seeds when a word is missing or garbled (``verify.attempts``) or, with
+``listen_stress``, when a word whose stress was checked is said with another one.
 
 F5 needs its own packages (``f5_env``, ``bash scripts/setup_envs.sh f5``); the synthesis runs
 there as ``voiceover.f5_worker``, once per voice-over run, with one model load.
@@ -31,6 +32,7 @@ import numpy as np
 from dataclasses import replace
 
 from voiceover.engine import PreparedText, SynthResult, VoskEngine, _sha256_file, cache_key, postprocess_wav
+from voiceover.stress_listen import listened
 from voiceover.text import syllables
 
 log = logging.getLogger(__name__)
@@ -96,6 +98,7 @@ class F5Engine(VoskEngine):
         self.prefix = str(config.get("prefix", "— "))
         self.slack_s = float(config.get("slack_s", 0.3))
         self.retry_lost_words = bool(config.get("retry_lost_words", True))
+        self.listen_stress = bool(config.get("listen_stress", True))  # takes heard for the checked words' stress
         self.python = Path(str(config.get("python", REPO_ROOT / "f5_env" / "bin" / "python")))
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
@@ -127,6 +130,8 @@ class F5Engine(VoskEngine):
             from voiceover.engine_teratts import TeraTTSEngine
 
             self._teratts = TeraTTSEngine({"voice": "ru_m5", "device": self.device, "trim": dict(self.trim),
+                                           "listen_stress": self.listen_stress,
+                                           "normalization": self.normalization,  # the stress words to hear
                                            **self.teratts_config})
         return self._teratts
 
@@ -157,6 +162,7 @@ class F5Engine(VoskEngine):
         keys: dict[str, str] = {}
         entries: dict[str, dict[str, Any]] = {}
         todo: dict[str, dict[str, Any]] = {}
+        relisten: dict[str, dict[str, Any]] = {}  # cached takes to hear for their stress
         voice_keys = {v: self._voice_key(v) for v in {self._voice(row) for row in prepared}}
         for row in prepared:
             voice = self._voice(row)
@@ -165,29 +171,42 @@ class F5Engine(VoskEngine):
             if key in entries or key in todo:
                 continue
             meta = cache_dir / f"{key}.json"
+            listen = self._listen_here(row.tts_text) if self.attempts > 1 else []
+            cached = None
             if meta.exists() and (cache_dir / f"{key}.wav").exists():
                 entry = json.loads(meta.read_text(encoding="utf-8"))
                 if entry.get("tts_text") == row.tts_text and not entry.get("error"):
-                    entries[key] = entry
-                    continue
+                    if not listen or listened(entry, listen):
+                        entries[key] = entry
+                        continue
+                    cached = entry  # taken before its stress was heard: heard once, redone only if wrong
             ref = clip_path(voice)
             todo[key] = {"key": key, "text": row.tts_text, "ref_wav": ref,
                          "ref_text": Path(ref).with_suffix(".txt").read_text(encoding="utf-8").strip(),
-                         "duration": round(self.duration(row.tts_text), 3), "out_wav": str(cache_dir / f"{key}.wav")}
+                         "duration": round(self.duration(row.tts_text), 3), "out_wav": str(cache_dir / f"{key}.wav"),
+                         **({"listen": listen} if listen else {})}
+            if cached is not None:
+                todo[key].update(take_wav=str(cache_dir / f"{key}.wav"), take_seed=int(cached.get("seed", 1234)))
+                relisten[key] = cached
         resumed = 0  # lines an interrupted worker finished (WAV + take, no cache entry yet)
         for key, item in todo.items():
             take = cache_dir / f"{key}.take.json"
             if take.exists() and Path(item["out_wav"]).exists():
                 item["result"] = json.loads(take.read_text(encoding="utf-8"))
                 resumed += 1
-        log.info("synthesis: %d distinct texts, %d cached, %d to synthesize (F5, %d voices)%s",
-                 len(entries) + len(todo), len(entries), len(todo) - resumed, len(voice_keys),
-                 f", {resumed} finished by an interrupted run" if resumed else "")
+        log.info("synthesis: %d distinct texts, %d cached, %d to synthesize (F5, %d voices)%s%s",
+                 len(entries) + len(todo), len(entries) + len(relisten), len(todo) - resumed - len(relisten), len(voice_keys),
+                 f", {resumed} finished by an interrupted run" if resumed else "",
+                 f", {len(relisten)} cached to hear for their stress" if relisten else "")
         if len(todo) > resumed:
             self._run_worker([item for item in todo.values() if "result" not in item], cache_dir)
         for key, item in todo.items():
             wav = Path(item["out_wav"])
             result = item.get("result") or {"error": "no result from the F5 worker"}
+            if (result.get("error") or not wav.exists()) and key in relisten and wav.exists():
+                log.warning("stress hearing failed, cached take kept: %s", result.get("error"))
+                entries[key] = relisten[key]
+                continue
             if result.get("error") or not wav.exists():
                 entry = {"path": str(wav), "sha256": "", "raw_sec": 0.0, "speech_sec": 0.0, "edge_trimmed_ms": 0,
                          "reduced_pauses": 0, "error": result.get("error"), "tts_text": item["text"]}
@@ -195,7 +214,8 @@ class F5Engine(VoskEngine):
                 raw_sec, speech_sec, edge_ms, reduced = postprocess_wav(wav, self.trim)
                 entry = {"path": str(wav), "sha256": _sha256_file(wav), "raw_sec": raw_sec, "speech_sec": speech_sec,
                          "edge_trimmed_ms": edge_ms, "reduced_pauses": reduced, "error": None, "tts_text": item["text"],
-                         "voice": item["ref_wav"], **{k: result[k] for k in ("seed", "takes", "check") if k in result}}
+                         "voice": item["ref_wav"],
+                         **{k: result[k] for k in ("seed", "takes", "check", "stress") if k in result}}
                 (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
                 (cache_dir / f"{key}.take.json").unlink(missing_ok=True)
             entries[key] = entry

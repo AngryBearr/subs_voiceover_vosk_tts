@@ -162,5 +162,41 @@ def test_fallback_voices_come_from_the_teratts_settings(tmp_path: Path) -> None:
             mock.patch.object(run, "load_json", return_value={"engine": {"model_path": "vosk"}}):
         engine = run.Episode._engine(episode)
     assert engine["voices"] == {"female": "teratts:ru_f1+ru_f2", "male": "teratts:ru_m5"}
-    assert engine["teratts"] == {"device": "cuda", "voice": "ru_m5"} and "fallback" not in engine
+    assert engine["teratts"] == {"device": "cuda", "voice": "ru_m5", "listen_stress": True} and "fallback" not in engine
     assert engine["voice"].startswith(refs["male"] + "#")  # F5 still clones a default voice (calibration)
+
+
+def test_f5_engine_sends_listened_words_and_hears_cached_takes_once(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    python = tmp_path / "python"
+    python.write_text("")
+    stress = tmp_path / "stress.json"
+    stress.write_text(json.dumps({"verdicts": [{"word": "Натали"}], "dictionary": {}, "sentences": {}}),
+                      encoding="utf-8")
+    engine = F5Engine({"voice": _ref(tmp_path, "default"), "python": str(python), "trim": {"pauses_enabled": False}})
+    runs: list[list[dict[str, Any]]] = []
+
+    def worker(items: list[dict[str, Any]], cache_dir: Path) -> None:
+        runs.append([dict(item) for item in items])
+        for item in items:
+            audio = np.zeros(int(24000 * item["duration"]), dtype=np.float32)
+            audio[2400:-2400] = 0.3
+            sf.write(item["out_wav"], audio, 24000)
+            item["result"] = {"key": item["key"], "seed": 1234, "takes": 1, "error": None,
+                              **({"stress": {"words": sorted(set(item["listen"])), "wrong": [], "heard": []}}
+                                 if item.get("listen") else {})}
+
+    monkeypatch.setattr(engine, "_run_worker", worker)
+    rows = [PreparedText("c1", "a", "Н+атали, прив+ет.", "ok"), PreparedText("c2", "b", "Прив+ет.", "ok")]
+    engine.synthesize_many(rows, tmp_path / "cache")  # no stress check yet: nothing to hear
+    assert all("listen" not in item for item in runs[0])
+    engine.normalization["stress_dict"] = str(stress)
+    engine._listen = None
+    engine.synthesize_many(rows, tmp_path / "cache")  # the cached take with a checked name is heard once
+    assert [(item["text"], item["listen"], item["take_seed"]) for item in runs[1]] == [("Н+атали, прив+ет.",
+                                                                                         ["натали"], 1234)]
+    assert runs[1][0]["take_wav"] == runs[1][0]["out_wav"]
+    engine.synthesize_many(rows, tmp_path / "cache")
+    assert len(runs) == 2  # heard: nothing left to do

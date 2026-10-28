@@ -8,8 +8,11 @@ length estimate counts UTF-8 bytes, so Cyrillic text would come out twice too lo
 GigaAM, and synthesised again with other seeds when a word is missing, garbled or drawn out
 (with ``retry_lost_words`` also when a short word like "и" is not heard); the best take is kept.
 ``prefix`` ("— ") goes before the text and ``slack_s`` is added to the length: F5 swallows a
-short first word less often then. One model load for the whole job. Each finished line also gets
-``<key>.take.json`` next to its WAV, so an interrupted job is resumed by the engine, not redone.
+short first word less often then. A line with ``listen`` words (names, homographs: their stress
+was checked) is also heard by TeraAnaly (``voiceover.stress_listen``) and taken again when the voice
+said another stress; ``take_wav`` (a cached take not yet heard) is judged as the first take and
+the new seeds follow its ``take_seed``. One model load for the whole job. Each finished line also
+gets ``<key>.take.json`` next to its WAV, so an interrupted job is resumed by the engine, not redone.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
 
     from voiceover.speech_check import (Recognizer, check_audio, check_clip, clip_score, leading_extra,
                                         missing_words, plain_words)
+    from voiceover.stress_listen import STRESS_SCORE, StressListener, hear, record, wrong_words
 
     repo = job.get("model", "ESpeech/ESpeech-TTS-1_RL-V2")
     model = load_model(DiT, MODEL_CFG, hf_hub_download(repo, job.get("checkpoint", "espeech_tts_rlv2.pt")),
@@ -47,6 +51,8 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     quiet = lambda *args, **kwargs: None  # noqa: E731
     prefix, slack = str(job.get("prefix", "")), float(job.get("slack_s", 0.0))
     retry_lost = bool(job.get("retry_lost_words", False))
+    listener = StressListener(job.get("device", "cuda")) if recognizer and any(i.get("listen") for i in job["items"]) \
+        else None
     ref_seconds: dict[str, float] = {}
     results = []
     t0 = time.time()
@@ -54,13 +60,18 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
         ref = item["ref_wav"]
         if ref not in ref_seconds:
             ref_seconds[ref] = sf.info(ref).duration
-        best: tuple[float, np.ndarray, int, dict[str, Any] | None] | None = None
+        best: tuple[float, np.ndarray, int, dict[str, Any] | None, list[dict[str, Any]]] | None = None
+        listen = set(item.get("listen") or []) if listener else set()
+        first_seed = int(item.get("take_seed", 1234))
         try:
             for attempt in range(int(job.get("attempts", 3))):
-                torch.manual_seed(1234 + attempt)
-                wav, rate, _ = infer_process(ref, item["ref_text"], prefix + item["text"], model, vocoder,
-                                             nfe_step=int(job.get("nfe", 32)), show_info=quiet,
-                                             fix_duration=ref_seconds[ref] + float(item["duration"]) + slack)
+                if attempt == 0 and item.get("take_wav"):  # the cached take, heard before any new one
+                    wav, rate = sf.read(item["take_wav"], dtype="float32")
+                else:
+                    torch.manual_seed(first_seed + attempt)
+                    wav, rate, _ = infer_process(ref, item["ref_text"], prefix + item["text"], model, vocoder,
+                                                 nfe_step=int(job.get("nfe", 32)), show_info=quiet,
+                                                 fix_duration=ref_seconds[ref] + float(item["duration"]) + slack)
                 wav = np.asarray(wav, dtype=np.float32)
                 check = None
                 if recognizer:
@@ -75,15 +86,23 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
                             wav, check = cut_wav, cut_check
                 lost = missing_words(plain_words(item["text"]), plain_words(check["heard"])) if check else 0
                 score = (clip_score(check) + (LOST_WORD_SCORE * lost if retry_lost else 0.0)) if check else 0.0
+                stress: list[dict[str, Any]] = []
+                if listen:
+                    stress = hear(listener, wav, rate, item["text"], listen)  # type: ignore[arg-type]
+                    score += STRESS_SCORE * wrong_words(stress)
                 if best is None or score < best[0]:
-                    best = (score, wav, attempt, check)
-                if not check or not ({"pronunciation", "drawn_out"} & set(check["flags"]) or (retry_lost and lost)):
+                    best = (score, wav, attempt, check, stress)
+                if not check or not ({"pronunciation", "drawn_out"} & set(check["flags"]) or (retry_lost and lost)
+                                     or wrong_words(stress)):
                     break
             assert best is not None
             sf.write(item["out_wav"], best[1], rate, subtype="PCM_16")
-            entry: dict[str, Any] = {"key": item["key"], "seed": 1234 + best[2], "takes": best[2] + 1, "error": None}
+            entry: dict[str, Any] = {"key": item["key"], "seed": first_seed + best[2], "takes": best[2] + 1,
+                                     "error": None}
             if best[3]:
                 entry["check"] = {k: best[3][k] for k in ("cer", "stretch", "flags", "heard")}
+            if listen:
+                entry["stress"] = record(item["listen"], best[4])
             # written after the WAV: an interrupted job leaves its finished lines for the next run
             Path(item["out_wav"]).with_suffix(".take.json").write_text(json.dumps(entry, ensure_ascii=False),
                                                                        encoding="utf-8")

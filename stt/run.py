@@ -271,6 +271,7 @@ class Episode:
         engine = dict(cfg.get("engines", {}).get(self.engine, {}))
         if "voices" not in engine:
             raise SystemExit(f"voiceover.engines.{self.engine}.voices missing in the config")
+        engine.setdefault("listen_stress", bool(cfg.get("listen_stress", True)))  # takes heard for checked stress
         if self.engine == "f5":  # speakers without a clip: TeraTTS voices, or a Vosk voice cloned by F5
             from voiceover.engine_f5 import TERATTS, fallback_references, voice_id
 
@@ -282,7 +283,7 @@ class Episode:
             if engine.pop("fallback", "vosk") == "teratts":
                 tera = {k: v for k, v in cfg.get("engines", {}).get("teratts", {}).items() if k != "sample_rate"}
                 voices = tera.pop("voices", {"female": "ru_f1+ru_f2", "male": "ru_m5"})
-                engine["teratts"] = {**tera, "voice": voices["male"]}
+                engine["teratts"] = {"listen_stress": engine["listen_stress"], **tera, "voice": voices["male"]}
                 engine["voice"] = auto["male"]  # the default voice F5 clones (calibration probes it)
                 auto = {g: TERATTS + str(voices.get(g, voices["male"])) for g in engine["voices"]}
             engine["voices"] = {g: auto[g] if v == "auto" else voice_id(v) for g, v in engine["voices"].items()}

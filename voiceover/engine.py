@@ -166,6 +166,7 @@ class VoskEngine:
         self.device = str(config.get("device", "cpu"))
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
+        self.listen_stress = bool(config.get("listen_stress", True))
         self._identity: dict[str, Any] | None = None
         self._accentizer: Any = None
 
@@ -220,6 +221,20 @@ class VoskEngine:
                 fixes = {key: dict(data.get(key, {})) for key in ("dictionary", "sentences")}
             self._stress = fixes if any(fixes.values()) else {}
         return self._stress
+
+    def _listen_here(self, text: str) -> list[str]:
+        """Words of an engine text whose stress the stress check looked at (``normalization.stress_dict``):
+        each take of the line is heard for them (``voiceover.stress_listen``); none with ``listen_stress`` off."""
+        if getattr(self, "_listen", None) is None:
+            from voiceover.stress_listen import load_listen_words
+
+            self._listen = load_listen_words(self.normalization.get("stress_dict")) \
+                if getattr(self, "listen_stress", True) else set()
+        if not self._listen:
+            return []
+        from voiceover.stress_listen import words_in
+
+        return words_in(text, self._listen)
 
     def _load_accentizer(self) -> None:
         from utils.text_normalizer import _load_ruaccent
@@ -346,6 +361,7 @@ class VoskEngine:
                               initargs=(str(self.model_path), self.device, threads)) as pool:
                 for job, result in zip(job_list, pool.imap(_worker_synth, job_list, chunksize=4)):
                     store(job, result)
+        self._hear_stress(prepared, cached, cache_dir)
         results: list[SynthResult] = []
         for row in prepared:
             voice = self._voice(row)
@@ -356,6 +372,52 @@ class VoskEngine:
 
     def _voice(self, row: PreparedText) -> int:
         return self.voice if row.voice is None else int(row.voice)
+
+    def _hear_stress(self, prepared: list[PreparedText], entries: dict[str, dict[str, Any]], cache_dir: Path) -> None:
+        """Lines with words whose stress was checked: each take heard once by TeraAnaly; one said with
+        another stress is synthesised again (Vosk's sampling noise differs on every run) and the take
+        with the fewest such words is kept (``stress_attempts`` takes at most)."""
+        from voiceover.stress_listen import StressListener, hear, listened, record, wrong_words
+
+        todo: dict[str, tuple[PreparedText, list[str]]] = {}
+        for row in prepared:
+            key = cache_key(row.tts_text, None if self._voice(row) == self.voice else self._voice(row))
+            entry = entries.get(key)
+            listen = self._listen_here(row.tts_text) if entry and not entry.get("error") else []
+            if listen and key not in todo and not listened(entry, listen):  # type: ignore[arg-type]
+                todo[key] = (row, listen)
+        if not todo:
+            return
+        listener = StressListener(str(self.config.get("listen_device", "cuda")))
+        if _WORKER_SYNTH is None:
+            _worker_init(str(self.model_path), self.device)
+        retaken = still = 0
+        for key, (row, listen) in todo.items():
+            entry = entries[key]
+            wav = Path(entry["path"])
+            audio, rate = sf.read(str(wav), dtype="float32")
+            heard = hear(listener, audio, rate, row.tts_text, set(listen))
+            retry = wav.with_suffix(".retry.wav")
+            for _ in range(1, int(self.config.get("stress_attempts", 3))):
+                if not wrong_words(heard):
+                    break
+                result = _worker_synth({"cue_id": key, "tts_text": row.tts_text, "path": str(retry),
+                                        "voice": self._voice(row), "base_rate": self.base_rate, "trim": self.trim})
+                if result["error"]:
+                    break
+                audio, rate = sf.read(str(retry), dtype="float32")
+                again = hear(listener, audio, rate, row.tts_text, set(listen))
+                if wrong_words(again) < wrong_words(heard):
+                    retry.replace(wav)
+                    entry.update({k: result[k] for k in ("sha256", "raw_sec", "speech_sec", "edge_trimmed_ms",
+                                                          "reduced_pauses")})
+                    heard = again
+                    retaken += 1
+            retry.unlink(missing_ok=True)
+            still += bool(wrong_words(heard))
+            entry["stress"] = record(listen, heard)
+            (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
+        log.info("stress heard in %d lines: %d taken again, %d still with another stress", len(todo), retaken, still)
 
 
 def build_engine(config: dict[str, Any]) -> Engine:
