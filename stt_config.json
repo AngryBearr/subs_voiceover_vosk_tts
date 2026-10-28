@@ -33,7 +33,7 @@
     "engine": "vosk",
     "engines": {
       "vosk": {"voices": {"female": 49, "male": 56}},
-      "teratts": {"voices": {"female": "ru_f1", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.0,
+      "teratts": {"voices": {"female": "ru_f2", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.0,
                   "sample_rate": 44100},
       "f5": {"voices": {"female": "auto", "male": "auto"}, "nfe": 32, "target_syl_per_sec": 5.0,
              "sample_rate": 24000}

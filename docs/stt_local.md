@@ -182,7 +182,7 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
 ## Voices, stress and the speech check
 
 - **Engines.** Vosk (CPU, 4 workers; voices 49 female / 56 male) or TeraTTSv2 (GPU, ~0.35 s per
-  line; ru_f1 / ru_m5, also ru_f2, ru_m1). Every line gets the voice of its speaker's gender;
+  line; ru_f2 / ru_m5, also ru_f1, ru_m1; ru_f2 since 28.10: ru_f1 sounded cartoonish). Every line gets the voice of its speaker's gender;
   continuation cues are never merged across voices. TeraTTS predicts only the total length of a
   phrase and stretches the speech to fill it (S10E01 scene: median 4.3 syllables/s, slowest
   2.1); the engine re-synthesises lines off the target tempo by more than 15% (median 5.4,

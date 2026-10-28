@@ -107,7 +107,7 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   what something costs. Shared default model: OpenRouter gpt-6-luna.
 - Voice-over: all three engines, the cloned voices (ESpeech) matter most; batches of ~3 episodes;
   one video per episode for the audience.
-- Low priority: another TeraTTS female voice (`ru_f1` sounds like an anime girl).
+- TeraTTS female voice: ru_f2 since 28.10 (the user found ru_f1 cartoonish).
 
 ## Pitfalls learned the hard way
 

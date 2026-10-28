@@ -183,13 +183,11 @@ So that a new user only clones the branch, runs one script and then works in the
 - **TeraTTS teacher sampler** (`diffusion_model: "teacher"`): recommended by the author for
   quality on a GPU; compare dropped words, character errors and speed with the distilled one.
   It changes the sampling network, not the voice.
-- **Another female voice for TeraTTS** (the user, 26.10, low priority): `ru_f1` sounds like an
-  anime girl, which does not suit reality TV. TeraTTS ships 10 voices, each two fixed style
-  vectors (`styles/<name>/style_ttl.npy`, `style_dp.npy`): ru_f1, ru_f2, ru_m1, ru_m5, eng_f3,
-  eng_f4_whisper, eng_f5, eng_m2_whisper, eng_m3, eng_m4. Try ru_f2, the English female voices
-  reading Russian, and fixed blends of two voices' vectors (a fixed blend is as stable as a
-  built-in voice); pick by ear from short samples, then check the speech-check errors on one
-  episode.
+- **Another female voice for TeraTTS** (done 28.10, `output/tts_eval/tera_female/`): ru_f1 sounded like
+  an anime girl (median pitch 272 Hz). On 40 female S29 lines: ru_f2 0.46% character errors,
+  204 Hz (the new default); eng_f3 0.70%, 186 Hz; eng_f5 5.2%; blends ru_f1+ru_f2 0.60%, 238 Hz;
+  ru_f2+eng_f3 0.60%, 197 Hz; ru_f2+eng_f5 3.2%. All sound Russian to Whisper (P(ru) 0.999).
+  Listening files `1_ru_f1.wav` ... `7_*.wav` there (the same 8 lines per voice).
 - **RuVoice stress placer** (azimutspb's PC port of the Android RuVoice TTS, used by others as
   a stress placer): compare with RUAccent on the homographs and guessed words of an episode.
 - **Shmyrev's TTS metrics** (intelligibility, stress, speaker similarity) to compare engines
