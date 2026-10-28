@@ -20,7 +20,7 @@ f5|vosk|teratts`; browser UI: `subs_env/bin/python -m ui.dub_app`.
 
 - Code: `stt/` (recognition, translation, run, combine, voice bank, cast), `voiceover/` (TTS
   engines, timeline solver, render, speech check), `ui/dub_app.py`, `utils/`.
-- Branch `merge/stt-voiceover` in the worktree `~/.t3/worktrees/subs_voiceover_vosk_tts/t3-e7bde976`,
+- Branch `feat/stt-voiceover-pipeline` (was `merge/stt-voiceover`) in the worktree `~/.t3/worktrees/subs_voiceover_vosk_tts/t3-e7bde976`,
   pushed (fast-forward) to `origin/develop`. The user's own checkout
   `~/Projects/subs_voiceover_vosk_tts` is on `feat/shortening-subtitles-v3`: do not touch it.
 - Environments: `subs_env` (everything), `f5_env` (f5-tts for the ESpeech worker),
@@ -100,7 +100,7 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
 
 - Reply in Russian, plain language, explain terms; docs and code comments in English.
 - Accuracy first, then UI; iterate and test each stage; commit periodically with small commits.
-  Pushing `merge/stt-voiceover` fast-forward to `origin/develop` was authorised; ask before
+  Pushing `feat/stt-voiceover-pipeline` fast-forward to `origin/develop` was authorised; ask before
   anything else outward-facing. No force-pushes.
 - LLM costs: the ChatGPT subscription through opencode first (free), cheap models for bulk
   steps, strong paid models only for small checks (Claude/Gemini stress votes are kept); say
