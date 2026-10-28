@@ -427,6 +427,26 @@ def reset_settings() -> list[Any]:
             *settings.form_values(base_config()), *form_defaults()]
 
 
+def tts_cache(delete: bool) -> str:
+    """The TTS cache cleanup (``voiceover.cache_clean``) as a message: what goes, or what went."""
+    from voiceover.cache_clean import apply, cache_dir, default_roots, plan
+
+    cache = cache_dir()
+    if not cache.is_dir():
+        return "Кэша озвучки нет."
+    with LOCK:
+        if delete and JOB and JOB.state == "идёт":
+            return "Идёт обработка: очистите кэш после неё."
+    result = plan(cache, default_roots(), keep_days=3)
+    gb = 2 ** 30
+    text = (f"Кэш озвучки: {result.keep_bytes / gb:.1f} ГБ нужны сериям (или сделаны за последние 3 дня), "
+            f"{result.drop_bytes / gb:.1f} ГБ ({len(result.drop)} файлов) не нужны.")
+    if delete:
+        apply(result)
+        text = f"Удалено {result.drop_bytes / gb:.1f} ГБ из кэша озвучки; осталось {result.keep_bytes / gb:.1f} ГБ."
+    return text
+
+
 def _setting_field(setting: settings.Setting, value: Any) -> Any:
     if setting.kind == "bool":
         return gr.Checkbox(label=setting.label, value=value, info=setting.info or None)
@@ -629,6 +649,14 @@ def build() -> gr.Blocks:
                 save_button = gr.Button("Сохранить", variant="primary")
                 reset_button = gr.Button("Сбросить к стандартным")
             settings_message = gr.Markdown()
+            gr.Markdown("### Кэш озвучки\nКаждая озвученная реплика хранится в `output/tts_cache`: повторный "
+                        "запуск берёт её оттуда. Реплики, которые не нужны ни одной серии, можно удалить.")
+            with gr.Row():
+                cache_check = gr.Button("Сколько освободится")
+                cache_clean = gr.Button("Очистить кэш озвучки", variant="stop")
+            cache_message = gr.Markdown()
+            cache_check.click(lambda: tts_cache(False), None, cache_message)
+            cache_clean.click(lambda: tts_cache(True), None, cache_message)
             form = [engines, mode, model, out_root, subtitles, duck_voices, stress, refine, f5_fast]
             save_button.click(save_settings, fields, [settings_message, *form])
             reset_button.click(reset_settings, None, [settings_message, *fields, *form])
