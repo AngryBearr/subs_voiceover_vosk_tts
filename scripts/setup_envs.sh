@@ -8,6 +8,8 @@
 #                                       # (engine "f5"); reuses torch of subs_env, so create subs_env first
 #   bash scripts/setup_envs.sh diarizen # optional diarizen_env: DiariZen v2 diarization ("diarizer": "diarizen-v2");
 #                                       # its own torch 2.1 and pyannote 3.1 fork; weights CC BY-NC 4.0
+# An environment that already exists is kept and only brought up to date (run again after `git pull`).
+# Everything in one go (checks, models, keys, self-test): bash scripts/install.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export UV_HTTP_TIMEOUT=300
@@ -15,9 +17,10 @@ targets=("${@:-main}")
 targets=(${targets[*]})
 
 has() { [[ " ${targets[*]} " == *" $1 "* ]]; }
+venv() { [ -x "$1/bin/python" ] || uv venv "$1" --python "$2"; }  # keep an existing environment
 
 if has main; then
-  uv venv subs_env --python 3.12
+  venv subs_env 3.12
   VIRTUAL_ENV=$PWD/subs_env uv pip install --index-strategy unsafe-best-match \
     -r requirements.txt --override overrides-onnxruntime.txt
   # ffmpeg for tempo stretching, muxing and audio conversion: the imageio-ffmpeg binary, on PATH in subs_env
@@ -26,12 +29,12 @@ if has main; then
 fi
 
 if has qwen; then
-  uv venv stt_qwen_env --python 3.12
+  venv stt_qwen_env 3.12
   VIRTUAL_ENV=$PWD/stt_qwen_env uv pip install --index-strategy unsafe-best-match -r requirements-stt-qwen.txt
 fi
 
 if has f5; then
-  uv venv f5_env --python 3.12
+  venv f5_env 3.12
   # torch, torchaudio and the rest of subs_env are visible to f5_env; its own packages win
   echo "$PWD/subs_env/lib/python3.12/site-packages" > f5_env/lib/python3.12/site-packages/subs_env.pth
   VIRTUAL_ENV=$PWD/f5_env uv pip install f5-tts==1.1.22 --override overrides-f5.txt
@@ -45,7 +48,7 @@ if has diarizen; then
     git -C "$repo" checkout 844f5555b0a98acd0931511fc641a8c5b8ba92c7  # the version tested on Survivor (27.10.2026)
     git -C "$repo" submodule update --init
   fi
-  uv venv diarizen_env --python 3.10
+  venv diarizen_env 3.10
   export VIRTUAL_ENV=$PWD/diarizen_env
   uv pip install torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 --index-url https://download.pytorch.org/whl/cu121
   uv pip install -r "$repo/requirements.txt" -c "$repo/constraints.txt"

@@ -20,3 +20,4 @@ stt_env/
 .venv/
 # personal settings on top of the shared configs (stt_config.local.json)
 *.local.json
+*.local.json.bak

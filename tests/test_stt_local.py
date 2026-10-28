@@ -838,3 +838,28 @@ class LineGenderTest(unittest.TestCase):
         self.assertEqual(apply(cues, speakers, voted, lines), 6)  # line 4 (unclear) takes S02's vote
         self.assertEqual([c["gender"] for c in cues], ["male", "female", "female", "female", "female", "male", "female"])
         self.assertEqual(speakers[1]["gender_source"], "line vote")  # S01 stays male although its line sounds female
+
+
+class SelftestTest(unittest.TestCase):
+    def test_required_failures_fail_the_run_and_quick_skips_downloads(self) -> None:
+        from unittest import mock
+
+        from stt import selftest
+
+        ran: list[str] = []
+
+        def ok(state: dict) -> str:
+            ran.append("ok")
+            return "fine"
+
+        def broken(state: dict) -> str:
+            raise RuntimeError("no model")
+
+        checks = [selftest.Check("a", ok), selftest.Check("b", broken, required=False),
+                  selftest.Check("c", ok, full_only=True)]
+        with mock.patch.object(selftest, "CHECKS", checks), mock.patch("builtins.print"):
+            self.assertEqual(selftest.main(["--quick"]), 0)
+            self.assertEqual(ran, ["ok"])
+            checks.append(selftest.Check("d", broken))
+            self.assertEqual(selftest.main([]), 1)
+        self.assertEqual(ran, ["ok", "ok", "ok"])

@@ -12,6 +12,9 @@ the voice-cloning references, listen, ask for another clip, re-check names acros
 
 Tab "Проверка реплик": the lines ``stt.review`` found suspicious (gender / speaker), the original
 and the voice-over of each, one-click fixes into ``corrections.json`` and re-voicing the episode.
+
+Tab "Настройки": the defaults people change (folders, recognition, models, voices, checks, mix),
+saved into ``stt_config.local.json`` (``ui.settings``); the "Обработка" form starts from them.
 """
 
 from __future__ import annotations
@@ -32,12 +35,11 @@ from typing import Any
 import gradio as gr  # type: ignore
 
 from stt.run import STAGES, SUBSCRIPTION_DOWN, finished_folder, load_config
+from ui import settings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm"}
-ENGINES = {"Vosk": "vosk", "TeraTTS": "teratts", "ESpeech (голоса героев)": "f5"}
-MODES = {"Точный: Cohere + Whisper + LLM": "accurate", "Быстрый: только Whisper": "fast"}
-MODELS = {"luna: дешевле, качество хорошее": "openai/gpt-6-luna", "Sol: лучше перевод, дороже": "openai/gpt-6.1-sol"}
+ENGINES, MODES, MODELS = settings.ENGINES, settings.MODES, settings.MODELS
 TRANSPORTS = {"Подписка (opencode)": "opencode", "API OpenRouter": "openrouter"}
 ENGINE_STAGES = {"dub", "voiceover", "check", "mix"}
 STAGE_RU = {"transcribe": "распознавание", "glossary": "словарь", "speakers": "спикеры", "translate": "перевод",
@@ -88,7 +90,8 @@ def job_config(mode: str, model: str, subtitles: bool, duck_voices: bool, stress
     config.setdefault("voiceover", {})["stress_check"] = stress
     config["speaker_refine"] = {**(config.get("speaker_refine") or {}), "model": "resnet293" if refine else "none"}
     f5 = config["voiceover"].setdefault("engines", {}).setdefault("f5", {"voices": {"female": "auto", "male": "auto"}})
-    f5["nfe"] = 7 if f5_fast else f5.get("nfe", 32)  # 7 steps: ~2x faster, by ear almost the same
+    nfe = int(f5.get("nfe", 32))
+    f5["nfe"] = 7 if f5_fast else (32 if nfe == 7 else nfe)  # 7 steps: ~2x faster, by ear almost the same
     return config
 
 
@@ -395,8 +398,55 @@ def default_model() -> str:
     return next((label for label, value in MODELS.items() if value == model), list(MODELS)[0])
 
 
+def form_defaults() -> list[Any]:
+    """Starting values of the "Обработка" form from the settings: engines, mode, model, out root and the
+    subtitles / duck voices / stress / refine / fast ESpeech boxes."""
+    config = base_config()
+    chosen = (config.get("ui") or {}).get("engines") or ["vosk"]
+    f5 = ((config.get("voiceover") or {}).get("engines") or {}).get("f5") or {}
+    return [[label for label, value in ENGINES.items() if value in chosen],
+            next((label for label, value in MODES.items() if value == config.get("mode")), list(MODES)[0]),
+            default_model(), (config.get("paths") or {}).get("work") or "output/stt",
+            bool((config.get("mix") or {}).get("subtitles", True)), (config.get("mix") or {}).get("duck") == "voices",
+            bool((config.get("voiceover") or {}).get("stress_check", True)),
+            (config.get("speaker_refine") or {}).get("model", "resnet293") != "none", int(f5.get("nfe", 32)) == 7]
+
+
+def save_settings(*values: Any) -> list[Any]:
+    try:
+        own, warnings = settings.save(list(values))
+    except settings.SettingsError as exc:
+        return ["Не сохранено:\n\n" + "\n".join(f"- {p}" for p in exc.problems), *form_defaults()]
+    text = f"Сохранено (своих значений: {own}). Действует со следующего запуска."
+    return [text + "".join(f"\n- {w}" for w in warnings), *form_defaults()]
+
+
+def reset_settings() -> list[Any]:
+    settings.reset()
+    return ["Настройки сброшены к стандартным (личные ключи вроде подписки остались).",
+            *settings.form_values(base_config()), *form_defaults()]
+
+
+def _setting_field(setting: settings.Setting, value: Any) -> Any:
+    if setting.kind == "bool":
+        return gr.Checkbox(label=setting.label, value=value, info=setting.info or None)
+    if setting.kind == "choice":
+        return gr.Dropdown(label=setting.label, choices=list(setting.choices), value=value, info=setting.info or None)
+    if setting.kind == "engines":
+        return gr.CheckboxGroup(label=setting.label, choices=list(setting.choices), value=value)
+    if setting.kind in ("number", "integer"):
+        return gr.Number(label=setting.label, value=value, precision=0 if setting.kind == "integer" else None,
+                         info=setting.info or None)
+    if setting.kind == "voice":
+        voices = settings.TERATTS_VOICES + sorted(settings.teratts_styles() - set(settings.TERATTS_VOICES))
+        return gr.Dropdown(label=setting.label, choices=voices, value=value, allow_custom_value=True,
+                           info=setting.info or None)
+    return gr.Textbox(label=setting.label, value=value, info=setting.info or None)
+
+
 def build() -> gr.Blocks:
     personal = base_config().get("ui", {})
+    start_values = form_defaults()
     with gr.Blocks(title="Озвучка сериалов") as app:
         gr.Markdown("# Озвучка сериалов\nАнглийское видео → русская закадровая озвучка.")
         with gr.Tab("Обработка"):
@@ -408,21 +458,20 @@ def build() -> gr.Blocks:
             with gr.Row():
                 select_all = gr.Button("Выбрать все", size="sm")
                 select_none = gr.Button("Снять выбор", size="sm")
-            out_root = gr.Textbox(label="Рабочая папка (готовые видео: paths.finished в настройках)",
-                                  value=(base_config().get("paths") or {}).get("work") or "output/stt")
+            out_root = gr.Textbox(label="Рабочая папка (готовые видео: вкладка «Настройки»)", value=start_values[3])
             with gr.Row():
-                engines = gr.CheckboxGroup(label="Озвучка", choices=list(ENGINES), value=["Vosk"])
-                mode = gr.Radio(label="Распознавание", choices=list(MODES), value=list(MODES)[0])
+                engines = gr.CheckboxGroup(label="Озвучка", choices=list(ENGINES), value=start_values[0])
+                mode = gr.Radio(label="Распознавание", choices=list(MODES), value=start_values[1])
                 with gr.Column():
-                    model = gr.Dropdown(label="Языковая модель", choices=list(MODELS), value=default_model())
+                    model = gr.Dropdown(label="Языковая модель", choices=list(MODELS), value=start_values[2])
                     transport = gr.Radio(label="Запросы к модели", choices=list(TRANSPORTS),
                                          value=list(TRANSPORTS)[0], visible=bool(personal.get("llm_transport_choice")))
             with gr.Row():
-                subtitles = gr.Checkbox(label="Вшить субтитры", value=True)
-                duck_voices = gr.Checkbox(label="Приглушать только голоса (музыку оставить)", value=True)
-                stress = gr.Checkbox(label="Проверять ударения", value=True)
-                refine = gr.Checkbox(label="Уточнять спикеров по голосу", value=True)
-                f5_fast = gr.Checkbox(label="ESpeech: быстрый режим (7 шагов)", value=False)
+                subtitles = gr.Checkbox(label="Вшить субтитры", value=start_values[4])
+                duck_voices = gr.Checkbox(label="Приглушать только голоса (музыку оставить)", value=start_values[5])
+                stress = gr.Checkbox(label="Проверять ударения", value=start_values[6])
+                refine = gr.Checkbox(label="Уточнять спикеров по голосу", value=start_values[7])
+                f5_fast = gr.Checkbox(label="ESpeech: быстрый режим (7 шагов)", value=start_values[8])
             with gr.Accordion("Пробный отрывок (быстро проверить настройки)", open=False):
                 preview = gr.Checkbox(label="Только отрывок (в папку _проба)", value=False)
                 with gr.Row():
@@ -564,6 +613,26 @@ def build() -> gr.Blocks:
                              else ("Введите текст.", gr.update()),
                              [review_root, review_episode, line_no, fix_text], [review_message, review_table])
             revoice_button.click(revoice, [review_root, review_episode, review_engines], review_message)
+
+        with gr.Tab("Настройки"):
+            gr.Markdown("Значения по умолчанию для новых запусков. Сохраняются в `stt_config.local.json` "
+                        "(только отличия от `stt_config.json`; прежняя версия файла: `.bak`).")
+            fields = []
+            values = settings.form_values(base_config())
+            for group in dict.fromkeys(s.group for s in settings.SETTINGS):
+                gr.Markdown(f"### {group}")
+                with gr.Row(equal_height=False):
+                    for setting, value in zip(settings.SETTINGS, values):
+                        if setting.group == group:
+                            fields.append(_setting_field(setting, value))
+            with gr.Row():
+                save_button = gr.Button("Сохранить", variant="primary")
+                reset_button = gr.Button("Сбросить к стандартным")
+            settings_message = gr.Markdown()
+            form = [engines, mode, model, out_root, subtitles, duck_voices, stress, refine, f5_fast]
+            save_button.click(save_settings, fields, [settings_message, *form])
+            reset_button.click(reset_settings, None, [settings_message, *fields, *form])
+        app.load(lambda: [*settings.form_values(base_config()), *form_defaults()], None, [*fields, *form])
     return app
 
 

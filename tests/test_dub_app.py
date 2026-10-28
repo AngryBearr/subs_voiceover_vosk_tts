@@ -104,3 +104,48 @@ def test_status_warns_when_the_subscription_login_fails(tmp_path: Path, monkeypa
     log.write_text("WARNING stt.llm: LLM openai/gpt-6.1-sol via opencode failed (token expired); using orcarouter\n",
                    encoding="utf-8")
     assert dub_app.SUBSCRIPTION_WARNING in dub_app.refresh()[0]
+
+
+def test_settings_keep_only_changes_and_other_personal_keys(tmp_path: Path) -> None:
+    from ui import settings
+
+    defaults = json.loads((dub_app.REPO_ROOT / "stt_config.json").read_text(encoding="utf-8"))
+    (tmp_path / "stt_config.json").write_text(json.dumps(defaults), encoding="utf-8")
+    local = tmp_path / "stt_config.local.json"
+    local.write_text(json.dumps({"llm": {"opencode": ["openai/*"]}, "mode": "fast"}), encoding="utf-8")
+    values = settings.form_values({**defaults, "mode": "fast"})
+    by_path = {s.path: n for n, s in enumerate(settings.SETTINGS)}
+    assert values[by_path[("mode",)]] == "Быстрый: только Whisper"
+    values[by_path[("mode",)]] = "Точный: Cohere + Whisper + LLM"  # back to the default: leaves the local file
+    values[by_path[("mix", "subtitles")]] = False
+    values[by_path[("voiceover", "engines", "vosk", "voices", "female")]] = 12
+    own, warnings = settings.save(values, tmp_path / "stt_config.json", local)
+    assert own == 2 and warnings == []
+    saved = json.loads(local.read_text(encoding="utf-8"))
+    assert saved["llm"]["opencode"] == ["openai/*"] and "mode" not in saved
+    assert saved["mix"] == {"subtitles": False} and saved["voiceover"]["engines"]["vosk"]["voices"] == {"female": 12}
+    assert (tmp_path / "stt_config.local.json.bak").exists()
+    settings.reset(local)
+    assert json.loads(local.read_text(encoding="utf-8")) == {"llm": {"opencode": ["openai/*"]}}
+
+
+def test_settings_reject_bad_values() -> None:
+    from ui import settings
+
+    vosk = next(s for s in settings.SETTINGS if s.path[-1] == "female" and "vosk" in s.path)
+    tera = next(s for s in settings.SETTINGS if s.path[-1] == "female" and "teratts" in s.path)
+    for setting, value in ((vosk, 80), (vosk, 1.5), (tera, "ru_f1+nobody"), (tera, "")):
+        try:
+            settings.from_form(setting, value)
+        except ValueError:
+            continue
+        raise AssertionError(f"{setting.label}: {value!r} accepted")
+    assert settings.from_form(tera, "ru_f1+ru_f2") == "ru_f1+ru_f2"
+    values = settings.form_values(json.loads((dub_app.REPO_ROOT / "stt_config.json").read_text(encoding="utf-8")))
+    values[[s.path for s in settings.SETTINGS].index(("mix", "duck_db"))] = None
+    try:
+        settings.save(values, dub_app.REPO_ROOT / "stt_config.json", Path("/nonexistent/never_written.json"))
+    except settings.SettingsError as exc:
+        assert exc.problems == ["«Насколько приглушать, дБ»: введите число"]
+    else:
+        raise AssertionError("an empty number was saved")
