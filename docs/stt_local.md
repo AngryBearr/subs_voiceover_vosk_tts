@@ -459,6 +459,12 @@ episode: equal speaker purity, pyannote 2.5x faster. Full tables: `docs/stt_benc
 Manual fixes: `speakers.override.json` (`{"S04": {"gender": "female", "label_ru": "Анна"}}`),
 then `stt.run ... --force speakers`; edit `glossary.txt` and use `--force translate`.
 
+TTS cache (`output/tts_cache/<engine set>/<key>.wav`, shared by all episodes): a re-run takes
+every unchanged line from it. `subs_env/bin/python -m voiceover.cache_clean` reports and with
+`--delete` removes the takes no episode folder names (in `voiceover.<engine>/*.json`) and that
+are older than 3 days (`--keep-days`); the UI settings tab has the same as two buttons. After a
+whole season is re-voiced, the old takes become unused and go with the next cleanup.
+
 ## Tests
 
 ```bash

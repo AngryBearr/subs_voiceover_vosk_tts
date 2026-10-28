@@ -2,6 +2,8 @@
 
 What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S29E01/E02
 (Survivor: San Juan del Sur, 64 and 43 min) unless noted.
+The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
+...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
 ## Next steps (28.10.2026, evening)
 

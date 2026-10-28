@@ -23,8 +23,9 @@ f5|vosk|teratts`; browser UI: `subs_env/bin/python -m ui.dub_app`.
 - Branch `feat/stt-voiceover-pipeline` (was `merge/stt-voiceover`) in the worktree `~/.t3/worktrees/subs_voiceover_vosk_tts/t3-e7bde976`,
   pushed (fast-forward) to `origin/develop`. The user's own checkout
   `~/Projects/subs_voiceover_vosk_tts` is on `feat/shortening-subtitles-v3`: do not touch it.
-- Environments: `subs_env` (everything), `f5_env` (f5-tts for the ESpeech worker),
-  `stt_qwen_env` (optional comparisons). Setup: `bash scripts/setup_envs.sh [f5]`.
+- Environments: `subs_env` (everything), `f5_env` (f5-tts for the ESpeech worker), `diarizen_env`
+  (DiariZen, uses `models/diarizen/repo`); `stt_qwen_env` (optional comparisons) was deleted on
+  29.10 (`bash scripts/setup_envs.sh qwen` makes it again). Everything: `bash scripts/install.sh`.
 - Config: `stt_config.json` (shared, in git) with `stt_config.local.json` on top (personal, not in
   git: LLM through the opencode ChatGPT subscription with `router: ["orcarouter", "openrouter"]`
   as fallback, `paths.finished`). `voiceover_config.json`: voice-over details (export level
@@ -39,8 +40,8 @@ f5|vosk|teratts`; browser UI: `subs_env/bin/python -m ui.dub_app`.
 - Work folders: `output/stt_s20/` (S20, finished), `output/stt_s29_v2/` (S29, partly voiced),
   each with the season's glossary, cast, voice bank (`<folder>.voices.json`) and clips
   (`<folder>.references/`). `output/s20_subs/srt/` = English reference subtitles of S20 (CBS
-  captions with `>>` speaker changes; AMZN as `.alt.srt`; `report.md`). Check scripts of 27.10:
-  `output/stt_s20/eval/`. Old experiments were deleted: `docs/experiments.md`.
+  captions with `>>` speaker changes; AMZN as `.alt.srt`; `report.md`). The check scripts of 27.10
+  were deleted with the other experiments on 29.10: `docs/experiments.md` (what helped, what not).
 - Community knowledge: Telegram chat «Распознавание и синтез речи» exports in
   `~/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata/temp_data/ChatExport_2026-10-23`
   and `ChatExport_2026-10-27` (one `messages.html`); 4pda TTS thread (see the user's memory).
@@ -64,8 +65,12 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
 
 - `stt.combine "<episode folders>" [--relevel] [--delete-separate]`: one video per episode from
   episodes voiced before the combined videos, levels tracks rendered before the levelling.
-- English recognition against reference subtitles: `output/stt_s20/eval/asr_wer.py <episode>
-  <srt>`; speech check results: `voiceover.<engine>/speech_check.json` (`summary`).
+- Speech check results: `voiceover.<engine>/speech_check.json` (`summary`); speaker changes
+  against the captions: `stt.turn_eval`.
+- Since 29.10 the episode folders have no `voiceover.<engine>/export/track.wav` (deleted for disk
+  space): an episode's next run re-renders its voice-over from the TTS cache (the `.m4a` files and
+  the videos are kept). `voiceover.cache_clean --delete` (or the UI settings) drops cache takes no
+  episode uses.
 
 ## State on 27.10.2026
 
@@ -78,21 +83,10 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   (detached, as below): E09-E11 in all three engines, then the missing tracks of E01-E08, then
   E13-E15; a file `output/stt_s29_v2/PAUSE` holds it between passes. The videos' own English
   subtitles (CBS roll-up captions) are extracted in `output/s29_subs/` for checks.
-- **27.10 evening, open experiments** (scripts in `output/`, not in git):
-  - DiariZen v2 (`"diarizer": "diarizen-v2"`, `diarizen_env`): speaker changes vs the captions'
-    `>>` marks F1 0.73 -> 0.82-0.83 on S29E05-E08 and S20E01/E05/E10 (with the ResNet293
-    refinement both), but it merged Wes into Alec in S29E05. Before making it the default:
-    the S10 SDH identity check (`models/diarizen/run_s10.sh`: pyannote vs DiariZen, lines on
-    their person's main speaker, people merged) and the VBx clustering sweep (Fb / AHC threshold,
-    `models/diarizen/sweep.py`, scored by `output/stt_dz_sweep/score.py`). E05 end to end with
-    DiariZen: `output/stt_dz_test/`.
-  - FireRedTTS3 (`models/fireredtts3/`, own env, weights 12 GB): works with the backbone in bf16
-    (~9 GB VRAM: does not fit next to the ESpeech pass); no duration control (stops by itself);
-    '+' stress marks seem to lengthen the line. Test set and scripts: `output/tts_eval/firered/`
-    (`run2.sh`: 64 lines of S29E05 x plain / '+' / acute accent, a homograph probe, speech check,
-    the stress heard by TeraAnaly; ESpeech hears 255/255 stresses as marked).
-  - GPU experiments next to a season run: `output/tts_eval/gpu_window.sh <run log> <cmd>` waits
-    while an episode is transcribing and stops the command when the next transcription starts.
+- **27-28.10 experiments** (DiariZen, FireRedTTS3, Seed-VC, stress, F5 / TeraTTS retakes, gender
+  per line, the voice bank check): concluded, folders deleted on 29.10; results in
+  `docs/experiments.md`. GPU experiments next to a season run: `scripts/gpu_window.sh <run log>
+  <cmd>` waits while an episode is transcribing and stops the command when the next one starts.
 - **28.10 (night)**: the spoken stress check (`voiceover.stress_listen`, on by default) and the
   one-command setup (`scripts/install.sh`, `stt.selftest`, `scripts/run_ui.sh`) with the UI tab
   "Настройки" (`ui/settings.py`, writes only differences into `stt_config.local.json`, keeps
@@ -100,7 +94,7 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   update the existing environments); `stt.selftest --quick` passes here. The "picture" idea
   (active speaker detection + faces) is dropped by the user.
 - 311 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
-- Disk: `/home` 22 GB free on 28.10 night (`output/tts_cache` 7.2 GB, many stale sets).
+- Disk: `/home` 80 GB free after the cleanup of 29.10 (it was 22 GB).
 
 ## Working with this user
 
