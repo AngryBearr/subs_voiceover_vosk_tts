@@ -373,6 +373,8 @@ class Episode:
         args = [str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str((self.out / "stress.json").resolve()),
                 "--config", str(self._voiceover_config().resolve()),  # the texts exactly as this engine prepares them
                 "--models", ",".join(models if isinstance(models, list) else [models])]
+        if (self.out / "glossary.json").exists():  # the show's names, checked in every case form
+            args += ["--names", str((self.out / "glossary.json").resolve())]
         self._module("stress", "voiceover.stress_check", args + (["--screen", screen] if screen else ["--no-screen"]))
 
     def voiceover(self) -> None:

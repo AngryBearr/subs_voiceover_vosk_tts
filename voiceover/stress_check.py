@@ -8,6 +8,11 @@ detectors tried on 160 phrases with deliberately wrong stress: ~40% accuracy, ch
 the check runs on the text: guessed words and homographs are re-checked in their sentence by
 several LLMs; a correction needs a majority of them to agree on the same other stress.
 
+Names of the show's people (``--names``: the episode glossary) are checked too, in every case
+form, even when RUAccent knows the word: it stresses English names the French way or as Russian
+words (Жакл+ин, Натал+и, Мисс+и, Ал+ек, кит+а for Keith's "Кита"), ~20% of the 2462 name uses of
+S29E01-E09. The models get the English original and skip the screener.
+
 Corrections go to ``stress.json``, which the engines load through
 ``engine.normalization.stress_dict``: ``dictionary`` holds guessed words (the same stress
 everywhere), ``sentences`` holds homograph fixes per sentence (два го́лоса / нужны голоса́),
@@ -42,7 +47,7 @@ from voiceover.text import join_lines
 
 log = logging.getLogger("voiceover.stress_check")
 
-PROMPT_VERSION = "stress-v2"
+PROMPT_VERSION = "stress-v3"
 VOWELS = set("аеёиоуыэюя")
 _WORD = re.compile(r"[А-Яа-яЁё+]+")
 DEFAULT_MODELS = ("openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon")
@@ -58,7 +63,14 @@ for exactly that form. For names and borrowed words use their usual Russian pron
 "variants" are given, answer with one of them.
 Answer JSON: {"items": [{"id": <id>, "form": "<meaning and form, a few words>",
 "stressed": "<the word with + before the stressed vowel>"}]}, one entry per item in the same
-order. Keep the letters exactly as given; only the "+" may move."""
+order. Keep the letters exactly as given; only the "+" may move.
+Items with "name_en" are the Russian spelling of an English name of a person in the show (a case
+form of it): stress the syllable that is stressed in the English original as the person's
+name is said in English (Jaclyn -> ж+аклин, Natalie -> н+атали, Alec -> +алек, Keith -> к+ита,
+к+итом), the same syllable in every case form, not a French or Russian-word reading."""
+
+# Case endings a Russian name form can add to the name (Кит -> Кита, Китом; Надия -> Надию).
+NAME_ENDINGS = ("", "а", "я", "у", "ю", "ом", "ем", "ём", "ой", "ей", "е", "и", "ы", "ам", "ям", "ах", "ях")
 
 
 @dataclass
@@ -71,6 +83,32 @@ class Suspect:
     variants: list[str] = field(default_factory=list)  # homograph stresses known to RUAccent
     contexts: list[str] = field(default_factory=list)
     count: int = 0
+    name_en: str | None = None  # for a name of the show's people: the English original
+
+
+def glossary_names(glossary: list[dict[str, Any]]) -> dict[str, str]:
+    """Lower-case Russian name parts of the glossary's people -> their English original."""
+    names: dict[str, str] = {}
+    for entry in glossary:
+        if entry.get("type") != "person" or not entry.get("ru") or not entry.get("en"):
+            continue
+        ru, en = entry["ru"].split(), entry["en"].split()
+        for k, part in enumerate(ru):
+            if sum(ch in VOWELS for ch in part.lower()) >= 1 and len(part) >= 3:
+                names.setdefault(part.lower(), en[k] if len(ru) == len(en) else entry["en"])
+    return names
+
+
+def name_of(token: str, names: dict[str, str]) -> str | None:
+    """The English original when `token` (as written, no marks) is a case form of a name."""
+    if not token[:1].isupper():
+        return None
+    word = token.lower()
+    for name, english in names.items():
+        stem = name[:-1] if name[-1] in "аяйь" else name
+        if word.startswith(stem) and word[len(stem):] in NAME_ENDINGS + ((name[-1],) if stem != name else ()):
+            return english
+    return None
 
 
 def classify(word: str, accentizer: Any) -> str:
@@ -86,8 +124,9 @@ def classify(word: str, accentizer: Any) -> str:
     return "guess"
 
 
-def collect(texts: list[str], accentizer: Any, max_contexts: int = 8) -> dict[str, Suspect]:
-    """Guessed words and homographs of the accented texts, with a few example sentences."""
+def collect(texts: list[str], accentizer: Any, max_contexts: int = 8,
+            names: dict[str, str] | None = None) -> dict[str, Suspect]:
+    """Guessed words, homographs and names of the accented texts, with a few example sentences."""
     found: dict[str, Suspect] = {}
     for text in texts:
         for match in _WORD.finditer(text):
@@ -96,10 +135,13 @@ def collect(texts: list[str], accentizer: Any, max_contexts: int = 8) -> dict[st
             accented = match.group(0).lower()
             word = accented.replace("+", "")
             source = classify(word, accentizer)
-            if source not in ("guess", "homograph"):
+            english = name_of(match.group(0).replace("+", ""), names) if names and source != "trivial" else None
+            if english:
+                source = "name"
+            elif source not in ("guess", "homograph"):
                 continue
             variants = list(accentizer.omographs.get(word, [])) if source == "homograph" else []
-            item = found.setdefault(word, Suspect(word, accented, source, variants))
+            item = found.setdefault(word, Suspect(word, accented, source, variants, name_en=english))
             item.count += 1
             sentence = text.replace("+", "")
             if len(item.contexts) < max_contexts and sentence not in item.contexts:
@@ -131,8 +173,8 @@ def ask(pairs: list[tuple[Suspect, str]], client: LLMClient, batch: int = 40, wo
 
 
 def _ask_batch(chunk: list[tuple[Suspect, str]], client: LLMClient, tag: str) -> list[str | None]:
-    items = [{"id": i, "word": s.accented, "sentence": context, **({"variants": s.variants} if s.variants else {})}
-             for i, (s, context) in enumerate(chunk)]
+    items = [{"id": i, "word": s.accented, "sentence": context, **({"variants": s.variants} if s.variants else {}),
+              **({"name_en": s.name_en} if s.name_en else {})} for i, (s, context) in enumerate(chunk)]
     try:
         result = client.complete_json(SYSTEM, json.dumps({"items": items}, ensure_ascii=False),
                                       prompt_version=PROMPT_VERSION, tag=tag)
@@ -167,17 +209,19 @@ def _client(llm_config: dict[str, Any], model: str, env_file: Path | None, **ext
 
 
 def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config: dict[str, Any],
-          models: list[str], env_file: Path | None = None, screen: dict[str, Any] | None = None) -> dict[str, Any]:
+          models: list[str], env_file: Path | None = None, screen: dict[str, Any] | None = None,
+          names: dict[str, str] | None = None) -> dict[str, Any]:
     """Accent the lines exactly as the engine will, then re-check guessed words and homographs."""
     engine = build_engine({**engine_config, "normalization": {
         **engine_config.get("normalization", {}), "stress_dict": None}})
     items = [{"cue_id": str(i), "index": i, "text": join_lines(line.get("text"))} for i, line in enumerate(lines)]
     prepared = engine.prepare(items)
     accentizer = engine._accentizer  # type: ignore[attr-defined]
-    suspects = sorted(collect([p.tts_text for p in prepared], accentizer).values(), key=lambda s: (s.source, s.word))
+    suspects = sorted(collect([p.tts_text for p in prepared], accentizer, names=names).values(),
+                      key=lambda s: (s.source, s.word))
     counts = Counter(s.source for s in suspects)
-    log.info("stress: %d lines, %d guessed words, %d homographs to check with %d models", len(lines),
-             counts["guess"], counts["homograph"], len(models))
+    log.info("stress: %d lines, %d guessed words, %d homographs, %d name forms to check with %d models", len(lines),
+             counts["guess"], counts["homograph"], counts["name"], len(models))
     clients = [_client(llm_config, model, env_file) for model in models]
     pairs = queries(suspects)
     screened: list[str | None] = [None] * len(pairs)
@@ -187,7 +231,8 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
                            **{k: v for k, v in screen.items() if k != "model"})
         screened = ask(pairs, screener)
         stats[f"screen:{screen['model']}"] = screener.stats()
-        todo = [n for n, (s, _) in enumerate(pairs) if screened[n] and screened[n] != s.accented]
+        todo = [n for n, (s, _) in enumerate(pairs)
+                if s.source == "name" or (screened[n] and screened[n] != s.accented)]  # names: always
         log.info("stress: the screener proposes %d changes in %d sentences", len(todo), len(pairs))
     else:
         todo = list(range(len(pairs)))
@@ -205,10 +250,11 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         votes = [a[n] for a in answers]
         corrected = vote(s, votes) if n in checked else None
         entry = verdicts.setdefault(s.word, {"word": s.word, "accented": s.accented, "source": s.source,
-                                             "count": s.count, "variants": s.variants, "contexts": []})
+                                             "count": s.count, "variants": s.variants, "contexts": [],
+                                             **({"name_en": s.name_en} if s.name_en else {})})
         entry["contexts"].append({"sentence": context, "answers": dict(zip(models, votes)), "screen": screened[n],
                                   "corrected": corrected})
-        if corrected and s.source == "guess":
+        if corrected and s.source in ("guess", "name"):
             guessed[s.word] = corrected
         elif corrected:
             sentences.setdefault(context, {})[s.word] = corrected
@@ -219,7 +265,9 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         "dictionary": dict(sorted(guessed.items())),
         "sentences": sentences,
         "checked": dict(counts),
-        "corrected": {"guess": len(guessed), "homograph_sentences": sum(len(v) for v in sentences.values())},
+        "corrected": {"guess": sum(v["source"] == "guess" for k, v in verdicts.items() if k in guessed),
+                      "name": sum(v["source"] == "name" for k, v in verdicts.items() if k in guessed),
+                      "homograph_sentences": sum(len(v) for v in sentences.values())},
         "verdicts": list(verdicts.values()),
         "llm": {**stats, **{model: client.stats() for model, client in zip(models, clients)}},
     }
@@ -250,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models", default=None, help="Comma-separated OpenRouter models (default: config/built-in)")
     parser.add_argument("--no-screen", action="store_true", help="Let the strong models check every sentence")
     parser.add_argument("--screen", default=None, help="Cheap model that proposes changes (default: config/built-in)")
+    parser.add_argument("--names", type=Path, default=None,
+                        help="Glossary JSON (stt.glossary): its people's names are checked in every case form")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -260,10 +310,12 @@ def main(argv: list[str] | None = None) -> int:
     screen = None if args.no_screen else ({**DEFAULT_SCREEN, "model": args.screen} if args.screen
                                           else stress.get("screen", DEFAULT_SCREEN))
     lines = json.loads(args.source.read_text(encoding="utf-8"))
-    result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen)
+    names = glossary_names(json.loads(args.names.read_text(encoding="utf-8"))) if args.names else None
+    result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen, names=names)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    log.info("stress: corrected %d guessed words, %d homographs in their sentences -> %s",
-             result["corrected"]["guess"], result["corrected"]["homograph_sentences"], args.out)
+    log.info("stress: corrected %d guessed words, %d name forms, %d homographs in their sentences -> %s",
+             result["corrected"]["guess"], result["corrected"]["name"], result["corrected"]["homograph_sentences"],
+             args.out)
     return 0
 
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from voiceover.engine import cache_key
-from voiceover.stress_check import Suspect, apply_sentence_fixes, collect, valid_stress, vote
+from voiceover.stress_check import (Suspect, apply_sentence_fixes, collect, glossary_names, name_of,
+                                    valid_stress, vote)
 
 
 def _accentizer() -> SimpleNamespace:
@@ -35,3 +36,21 @@ def test_sentence_fixes_touch_only_their_sentence() -> None:
 
 def test_cache_key_keeps_default_voice_keys() -> None:
     assert cache_key("Прив+ет.") == cache_key("Прив+ет.", None) != cache_key("Прив+ет.", 49)
+
+
+def test_names_of_the_show_are_checked_in_every_case_form() -> None:
+    names = glossary_names([{"en": "Keith Nale", "ru": "Кит Нейл", "type": "person"},
+                            {"en": "Jaclyn Schultz", "ru": "Жаклин Шульц", "type": "person"},
+                            {"en": "Nadiya Anderson", "ru": "Надия Андерсон", "type": "person"},
+                            {"en": "Hunahpu", "ru": "Хунапу", "type": "tribe"}])
+    assert names == {"кит": "Keith", "нейл": "Nale", "жаклин": "Jaclyn", "шульц": "Schultz", "надия": "Nadiya",
+                     "андерсон": "Anderson"}
+    assert name_of("Кита", names) == name_of("Китом", names) == "Keith"
+    assert name_of("Надию", names) == name_of("Надия", names) == "Nadiya"
+    assert name_of("кита", names) is None and name_of("Китай", names) is None  # a whale, a country
+    accentizer = SimpleNamespace(custom_dict={}, omographs={}, accents={"кита": "кит+а", "жаклин": "жакл+ин",
+                                                                        "видела": "в+идела", "план": "пл+ан"})
+    found = collect(["Ж+аклин видела кит+а.", "У Кит+а и Жакл+ин план."], accentizer, names=names)
+    assert {w: (s.source, s.name_en) for w, s in found.items()} == {
+        "жаклин": ("name", "Jaclyn"), "кита": ("name", "Keith")}
+    assert found["кита"].contexts == ["У Кита и Жаклин план."]  # the whale's sentence is not a name context
