@@ -74,6 +74,18 @@ def bad_word(diff: dict[str, str]) -> bool:
     return not heard or difflib.SequenceMatcher(a=said, b=heard).ratio() < WORD_SIMILARITY_FLAG
 
 
+def missing_words(reference: list[str], hypothesis: list[str]) -> int:
+    """Words of the text (``plain_words``) that the ASR did not hear, short ones included."""
+    left = list(hypothesis)
+    count = 0
+    for word in reference:
+        if word in left:
+            left.remove(word)
+        else:
+            count += 1
+    return count
+
+
 def word_diffs(reference: list[str], hypothesis: list[str]) -> list[dict[str, str]]:
     """Words of the text the ASR heard differently: [{said, heard}] ("" = missing/extra)."""
     out = []

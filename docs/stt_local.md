@@ -228,6 +228,9 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
 - **Speech check (after synthesis).** `voiceover.speech_check` transcribes every clip with
   GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
   abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.
+  ESpeech swallows short words (и, в, да) more than the other engines; since 28.10 its takes start
+  with "— ", get 0.3 s more length and are synthesised again while a word of the text, short ones
+  included, is not heard (lines losing a word 40% -> 19% on 300 S29 lines; `docs/roadmap.md` §7).
 
 ## Season voice bank
 

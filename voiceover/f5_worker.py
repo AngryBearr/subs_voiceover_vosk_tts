@@ -5,8 +5,10 @@
 The job lists lines: engine text (``+`` stress marks), a reference clip with its transcript, the
 target length and the output WAV. Each line is synthesised at exactly that length (F5's own
 length estimate counts UTF-8 bytes, so Cyrillic text would come out twice too long), heard by
-GigaAM, and synthesised again with other seeds when a word is missing, garbled or drawn out;
-the best take is kept. One model load for the whole job. Each finished line also gets
+GigaAM, and synthesised again with other seeds when a word is missing, garbled or drawn out
+(with ``retry_lost_words`` also when a short word like "и" is not heard); the best take is kept.
+``prefix`` ("— ") goes before the text and ``slack_s`` is added to the length: F5 swallows a
+short first word less often then. One model load for the whole job. Each finished line also gets
 ``<key>.take.json`` next to its WAV, so an interrupted job is resumed by the engine, not redone.
 """
 
@@ -25,6 +27,7 @@ import soundfile as sf
 log = logging.getLogger("voiceover.f5_worker")
 
 MODEL_CFG = {"dim": 1024, "depth": 22, "heads": 16, "ff_mult": 2, "text_dim": 512, "conv_layers": 4}
+LOST_WORD_SCORE = 0.15  # per word of the text not heard (the speech check skips words under 3 letters)
 
 
 def run(job: dict[str, Any]) -> list[dict[str, Any]]:
@@ -33,7 +36,8 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     from f5_tts.model import DiT
     from huggingface_hub import hf_hub_download
 
-    from voiceover.speech_check import Recognizer, check_audio, check_clip, clip_score, leading_extra
+    from voiceover.speech_check import (Recognizer, check_audio, check_clip, clip_score, leading_extra,
+                                        missing_words, plain_words)
 
     repo = job.get("model", "ESpeech/ESpeech-TTS-1_RL-V2")
     model = load_model(DiT, MODEL_CFG, hf_hub_download(repo, job.get("checkpoint", "espeech_tts_rlv2.pt")),
@@ -41,6 +45,8 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     vocoder = load_vocoder()
     recognizer = Recognizer(job.get("device", "cuda")) if job.get("attempts", 3) > 1 else None
     quiet = lambda *args, **kwargs: None  # noqa: E731
+    prefix, slack = str(job.get("prefix", "")), float(job.get("slack_s", 0.0))
+    retry_lost = bool(job.get("retry_lost_words", False))
     ref_seconds: dict[str, float] = {}
     results = []
     t0 = time.time()
@@ -52,9 +58,9 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
         try:
             for attempt in range(int(job.get("attempts", 3))):
                 torch.manual_seed(1234 + attempt)
-                wav, rate, _ = infer_process(ref, item["ref_text"], item["text"], model, vocoder,
+                wav, rate, _ = infer_process(ref, item["ref_text"], prefix + item["text"], model, vocoder,
                                              nfe_step=int(job.get("nfe", 32)), show_info=quiet,
-                                             fix_duration=ref_seconds[ref] + float(item["duration"]))
+                                             fix_duration=ref_seconds[ref] + float(item["duration"]) + slack)
                 wav = np.asarray(wav, dtype=np.float32)
                 check = None
                 if recognizer:
@@ -67,10 +73,11 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
                         cut_check = check_audio(recognizer, item["text"], cut_wav, rate)
                         if clip_score(cut_check) <= clip_score(check):
                             wav, check = cut_wav, cut_check
-                score = clip_score(check) if check else 0.0
+                lost = missing_words(plain_words(item["text"]), plain_words(check["heard"])) if check else 0
+                score = (clip_score(check) + (LOST_WORD_SCORE * lost if retry_lost else 0.0)) if check else 0.0
                 if best is None or score < best[0]:
                     best = (score, wav, attempt, check)
-                if not check or not {"pronunciation", "drawn_out"} & set(check["flags"]):
+                if not check or not ({"pronunciation", "drawn_out"} & set(check["flags"]) or (retry_lost and lost)):
                     break
             assert best is not None
             sf.write(item["out_wav"], best[1], rate, subtype="PCM_16")

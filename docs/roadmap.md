@@ -235,8 +235,13 @@ So that a new user only clones the branch, runs one script and then works in the
 
 ## 7. Smaller follow-ups from the S20 run (27.10)
 
-- **F5 first-word losses**: measure the "— " prefix and +0.3 s of length on a few hundred lines
-  with the three takes (section 3); only then change the worker.
+- **F5 swallowed words** (done 28.10, `output/tts_eval/f5_words/`): the speech check never retried a
+  take that lost a word under 3 letters (и, в, да: ~240 of the voiced S20/S29 lines, 2-3x Vosk /
+  TeraTTS). On 300 S29 lines (150 that had lost a word, 150 normal) through the production take
+  loop: "— " before the text + 0.3 s of length + another take while a word is not heard: lines
+  losing a word 40% -> 19% (normal lines 4% -> 2%), character errors 2.3% -> 0.85%, 1.57 takes per
+  line instead of 1.09 (normal lines +10% time). The dash or the length alone made normal lines
+  worse (9-10% lost). Now the F5 engine's default (`prefix`, `slack_s`, `retry_lost_words`).
 - **Short phrases split by a pause** are now kept in one cue (`--fragment-words`); S20 was
   voiced before that fix and is left as it is (the user, 27.10). New seasons get it.
 - **Speaker changes against the S20 captions**: the CBS captions mark every speaker change with

@@ -98,3 +98,18 @@ def test_voice_id_names_the_clip_content(tmp_path: Path) -> None:
     first = voice_id(clip)
     sf.write(clip, np.ones(24000, dtype=np.float32) * 0.1, 24000)
     assert first != voice_id(clip) and clip_path(first) == clip
+
+
+def test_short_word_options_change_the_cache_and_reach_the_worker(tmp_path: Path) -> None:
+    from voiceover.speech_check import missing_words
+
+    python = tmp_path / "python"
+    python.write_text("")
+    default = _ref(tmp_path, "default")
+    engine = F5Engine({"voice": default, "python": str(python)})
+    plain = F5Engine({"voice": default, "python": str(python), "prefix": "", "slack_s": 0, "retry_lost_words": False})
+    assert (engine.prefix, engine.slack_s, engine.retry_lost_words) == ("— ", 0.3, True)
+    assert engine.synth_identity() != plain.synth_identity()
+    assert "prefix" not in plain.synth_identity()  # the old cache stays valid without the options
+    assert missing_words(["да", "так", "и", "есть"], ["так", "есть"]) == 2
+    assert missing_words(["и", "и"], ["и"]) == 1

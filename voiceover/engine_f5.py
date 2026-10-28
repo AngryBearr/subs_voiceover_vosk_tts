@@ -83,6 +83,14 @@ class F5Engine(VoskEngine):
         self.target_syl_per_sec = float(config.get("target_syl_per_sec", 5.0))
         verify = {"enabled": True, "attempts": 3, **dict(config.get("verify", {}))}
         self.attempts = int(verify["attempts"]) if verify["enabled"] else 1
+        # F5 swallows short words ("и", "в", "да"), mostly the first one; the speech check does not
+        # flag words under 3 letters. Measured on 300 S29 lines (150 that had lost a word): a dash
+        # before the text, 0.3 s more length and another take when a word is not heard took the
+        # lines that lose a word from 40% to 19% and character errors from 2.3% to 0.85%, at ~1.5x
+        # the takes (normal lines +10%); dash or length alone made normal lines worse.
+        self.prefix = str(config.get("prefix", "— "))
+        self.slack_s = float(config.get("slack_s", 0.3))
+        self.retry_lost_words = bool(config.get("retry_lost_words", True))
         self.python = Path(str(config.get("python", REPO_ROOT / "f5_env" / "bin" / "python")))
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
@@ -98,6 +106,8 @@ class F5Engine(VoskEngine):
                 "base_rate": self.base_rate, "attempts": self.attempts, "trim": dict(self.trim),
                 "worker": 3,  # bump when voiceover.f5_worker changes the audio (2: leaked reference cut off,
                 # 3: the cut only when it checks better)
+                **({"prefix": self.prefix, "slack_s": self.slack_s, "retry_lost_words": self.retry_lost_words}
+                   if (self.prefix, self.slack_s, self.retry_lost_words) != ("", 0.0, False) else {}),
                 "voice": self._voice_key(self.voice)}
 
     @staticmethod
@@ -171,7 +181,9 @@ class F5Engine(VoskEngine):
         with tempfile.TemporaryDirectory(dir=cache_dir) as tmp:
             job, out = Path(tmp) / "job.json", Path(tmp) / "results.json"
             job.write_text(json.dumps({"model": self.repo, "nfe": self.nfe, "attempts": self.attempts,
-                                       "device": self.device, "items": items}, ensure_ascii=False), encoding="utf-8")
+                                       "device": self.device, "prefix": self.prefix, "slack_s": self.slack_s,
+                                       "retry_lost_words": self.retry_lost_words, "items": items},
+                                      ensure_ascii=False), encoding="utf-8")
             done = subprocess.run([str(self.python), "-m", "voiceover.f5_worker", str(job), str(out)], cwd=REPO_ROOT,
                                   stderr=subprocess.PIPE, text=True)
             if done.returncode != 0:
