@@ -15,6 +15,11 @@ The diffusion sampler sometimes mumbles or drops a word or draws one out. With `
 every clip is transcribed by GigaAM right away (``voiceover.speech_check``); a clip with a word
 not heard, a garbled word or a drawn-out word is synthesised again with other seeds and the
 best take is kept.
+
+A voice can also be an equal blend of built-in voices, ``ru_f1+ru_f2`` (the user's choice for the
+female voice, 28.10: between ru_f1's cartoonish 272 Hz and ru_f2's 204 Hz). Its two style vectors
+are the means of the parts', saved once under ``models/teratts_styles/<name>/`` and handed to
+TeraTTS as a path; a fixed blend is as stable as a built-in voice.
 """
 
 from __future__ import annotations
@@ -35,6 +40,22 @@ log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 44_100
 _MODELS: dict[tuple[str, str, str], Any] = {}
+STYLES_DIR = Path(__file__).resolve().parent.parent / "models" / "teratts_styles"
+_STYLE_FILES = ("style_ttl.npy", "style_dp.npy")
+
+
+def style_dir(release: Path, voice: str, styles_dir: Path = STYLES_DIR) -> Path:
+    """The folder with a voice's style vectors: built-in, or an equal blend ("ru_f1+ru_f2") made once."""
+    parts = voice.split("+")
+    if len(parts) == 1:
+        return release / "styles" / voice
+    target = styles_dir / voice
+    if not all((target / name).exists() for name in _STYLE_FILES):
+        target.mkdir(parents=True, exist_ok=True)
+        for name in _STYLE_FILES:
+            vectors = [np.load(release / "styles" / part / name).astype(np.float32) for part in parts]
+            np.save(target / name, np.mean(vectors, axis=0).astype(np.float32))
+    return target
 
 
 def snapshot(repo: str) -> Path:
@@ -135,9 +156,11 @@ class TeraTTSEngine(VoskEngine):
         self._check_voice(self.voice)
 
     def _check_voice(self, voice: str) -> None:
-        if not (self.path / "styles" / voice).is_dir():
+        missing = [part for part in voice.split("+") if not (self.path / "styles" / part).is_dir()]
+        if missing:
             choices = ", ".join(sorted(p.name for p in (self.path / "styles").iterdir() if p.is_dir()))
-            raise ValueError(f"TeraTTS voice not found: {voice} (available: {choices})")
+            raise ValueError(f"TeraTTS voice not found: {', '.join(missing)} (available: {choices}, "
+                             f"or a blend like ru_f1+ru_f2)")
 
     def synth_identity(self) -> dict[str, Any]:
         sampler = "sampler_distilled_cfg3_8step.onnx" if self.diffusion_model == "distilled" \
@@ -162,7 +185,8 @@ class TeraTTSEngine(VoskEngine):
 
     def _take(self, model: Any, text: str, voice: str, wav: Path, scale: float, seed: int
               ) -> tuple[float, float, int, int]:
-        audio = model.generate_speech(f"<ru>{text}</ru>", voice=voice, duration_scale=scale, seed=seed)
+        style = voice if "+" not in voice else str(style_dir(self.path, voice))  # TeraTTS joins it to styles/
+        audio = model.generate_speech(f"<ru>{text}</ru>", voice=style, duration_scale=scale, seed=seed)
         sf.write(str(wav), np.asarray(audio, dtype=np.float32), SAMPLE_RATE, subtype="PCM_16")
         return postprocess_wav(wav, self.trim)
 

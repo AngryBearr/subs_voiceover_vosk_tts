@@ -185,9 +185,11 @@ So that a new user only clones the branch, runs one script and then works in the
   It changes the sampling network, not the voice.
 - **Another female voice for TeraTTS** (done 28.10, `output/tts_eval/tera_female/`): ru_f1 sounded like
   an anime girl (median pitch 272 Hz). On 40 female S29 lines: ru_f2 0.46% character errors,
-  204 Hz (the new default); eng_f3 0.70%, 186 Hz; eng_f5 5.2%; blends ru_f1+ru_f2 0.60%, 238 Hz;
+  204 Hz; eng_f3 0.70%, 186 Hz; eng_f5 5.2%; blends ru_f1+ru_f2 0.60%, 238 Hz;
   ru_f2+eng_f3 0.60%, 197 Hz; ru_f2+eng_f5 3.2%. All sound Russian to Whisper (P(ru) 0.999).
   Listening files `1_ru_f1.wav` ... `7_*.wav` there (the same 8 lines per voice).
+  The user picked the blend ru_f1+ru_f2 by ear: the default since 28.10 (`style_dir` in
+  `voiceover/engine_teratts.py` makes such blends).
 - **RuVoice stress placer** (azimutspb's PC port of the Android RuVoice TTS, used by others as
   a stress placer): compare with RUAccent on the homographs and guessed words of an episode.
 - **Shmyrev's TTS metrics** (intelligibility, stress, speaker similarity) to compare engines
