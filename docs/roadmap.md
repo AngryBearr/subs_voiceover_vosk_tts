@@ -3,6 +3,26 @@
 What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S29E01/E02
 (Survivor: San Juan del Sur, 64 and 43 min) unless noted.
 
+## Next steps (28.10.2026, in the user's order of priority)
+
+1. **Stress of names (done 28.10)**: the stress check now covers the show's names in every case
+   form (`voiceover.stress_check --names`). Re-stress the finished S29 episodes and S20
+   (`stt.run ... --force stress --engine <e>` per engine: only lines with a corrected name are
+   synthesised again) and finish S29 (E11, E13-E15, the missing tracks of E01-E08).
+2. **Cloned voices without the English accent** (section 3): a Russian source with the right
+   stress and timing (Vosk / TeraTTS / ESpeech with a Russian clip) converted to the person's
+   timbre by a zero-shot voice conversion (Seed-VC V1, GPL-3.0, archived 11.2025; OpenVoice v2;
+   RVC trained per main character on the voice bank's solo stretches); or a converted Russian
+   clip as the ESpeech / FireRedTTS3 reference. Measure like FireRedTTS3: speech check,
+   similarity to the clip (ResNet293), heard stress (TeraAnaly), by ear.
+3. **Remaining stress errors**: TeraAnaly on whole episodes (`output/tts_eval/stress_heard.py`)
+   shows the engines say the marked stress in 98.4-99.3% of words (S29E03); the rest are Vosk
+   slips (22 words, Vosk 0.11 should help) and homographs. RUAccent and "ё" (unreliable per the
+   Telegram chat) are the next thing to check.
+4. **DiariZen**: default since 28.10. Possible gains: diarize the separated vocals (Demucs is
+   already in the mix) and give lines of an unnamed crowd cluster the nearest named voice.
+5. Setup scripts and the settings page (section 5), then the community tests of section 6.
+
 ## 1. Now: stable whole episodes on Vosk and TeraTTS
 
 The first goal: any episode of a season, from the video to the mkv, without manual steps.
