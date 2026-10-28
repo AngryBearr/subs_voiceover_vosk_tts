@@ -164,20 +164,29 @@ So that a new user only clones the branch, runs one script and then works in the
   a stress placer): compare with RUAccent on the homographs and guessed words of an episode.
 - **Shmyrev's TTS metrics** (intelligibility, stress, speaker similarity) to compare engines
   and cloned voices with one yardstick.
-- **DiariZen Large MD v2**: best open model in Shmyrev's Russian telephony benchmark (13.6% vs
-  21.6% for pyannote community-1). The older DiariZen was as accurate as pyannote on Survivor
-  and 2.5x slower; v2 is worth one run on S29E01 against the SDH speaker labels.
+- **DiariZen Large MD v2** (tested 27-28.10, `"diarizer": "diarizen-v2"`, `diarizen_env`): best
+  open model in Shmyrev's Russian telephony benchmark. On Survivor, with the ResNet293 refinement
+  for both, after the whole speakers stage (`stt.turn_eval` against the captions' `>>` marks):
+  speaker-change F1 S29E01 0.68 -> 0.83, E05 0.74 -> 0.81, E06 0.72 -> 0.85, E07 0.73 -> 0.81,
+  E08 0.73 -> 0.85 (found changes +13-20 points, precision the same or better); diarization only,
+  S20E01/E05/E10/E14 0.66-0.77 -> 0.80-0.88. Who is who is not worse: S10 SDH labels (251 lines,
+  E01/E12/E16) 69.4% -> 71.3% on their person's speaker, people merged 22 -> 20 of 47; lines voiced
+  with the other gender (each line's own voice vs its speaker's gender, S29E01/E05-E08, ~2300 clear
+  lines) 3.7% both. Neither splits the twins Natalie / Nadiya. Cost: ~2.5 min per 43-min episode
+  (pyannote ~0.5 min), ~4.5 GB VRAM, CC BY-NC weights. AHC threshold 0.5 (0.6 merged Wes into Alec
+  in S29E05; a lower VBx Fb splits people into 25-150 clusters). Next: listen to the S29E06 A/B
+  file (`output/stt_dz_test/`), then make it the default for new episodes.
 
-- **FireRedTTS3** (Den4ik in the Telegram chat, 27.10, as the best local Russian voice cloning
-  now): https://huggingface.co/FireRedTeam/FireRedTTS3, code github.com/FireRedTeam/FireRedTTS3,
-  Apache-2.0, released 08.2026. Base = zero-shot cloning in 24 languages (Russian included; its
-  card: Russian WER 3.28%, speaker similarity 84.7% on MiniMax-MLS), needs the reference's
-  transcript (the voice bank clips have one); Instruct = voice design and speech editing.
-  Built on Qwen3 / DiTAR (patch-level diffusion autoregression). Unknown from the card: size,
-  speed, VRAM, and whether a line's length can be set (F5's `fix_duration` is what makes it fit
-  the slots; without it the timeline solver has to stretch). Test like ESpeech was tested: the
-  same 60 lines of S29E01 / a S20 scene with the voice bank clips, speech check, stress marks
-  (does it read `+`?), speed, then by ear against ESpeech.
+- **FireRedTTS3** (tested 28.10, `models/fireredtts3/`, `output/tts_eval/firered/`): not usable
+  for the cloned voices. With an English reference clip (all we have) it reads Russian with
+  English sounds: 75% character errors on 64 S29E05 lines (ESpeech 0.9%); without the clip's
+  transcript or with a language switch it is no better (290%, 83%). With a Russian reference
+  (another ESpeech line of the person) it speaks perfectly (0% on 16 lines) but the voice moves
+  away from the person (similarity to the clip 0.37 vs ESpeech's 0.45; with the English clip
+  0.67, accent included). No length control (median 1.12x ESpeech's fitted length, a third of
+  the lines over 1.3x), `+` marks read as "плюс", the acute accent does not steer the stress
+  (homograph pairs 55%, chance 50%), ~1 s of synthesis per 1 s of speech, ~9 GB VRAM (backbone in
+  bf16; fp32 12.3 GB). Worth a look again only for Russian-speaking shows.
 - **Emotion for the cloned voices** (Telegram 27.10): GigaAM emo, LAION Empathic-Insight-Voice-Small,
   NVIDIA Audio Flamingo recognise emotion in speech; they could pick a calm and an excited clip per
   person (section 3, "several clips per person") and the clip matching the original line.
