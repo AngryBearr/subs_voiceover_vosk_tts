@@ -820,3 +820,21 @@ class DiarizerFallbackTest(unittest.TestCase):
                 run.Episode.transcribe(episode)
             argv = main.call_args[0][0]
             self.assertEqual(argv[argv.index("--diarizer") + 1], "pyannote-community-1")
+
+
+class LineGenderTest(unittest.TestCase):
+    def test_unknown_speakers_get_a_vote_then_lines_their_own_voice(self) -> None:
+        from stt.line_gender import apply, decide
+
+        speakers = [{"id": "S01", "gender": "male"}, {"id": "S02", "gender": "unknown"},
+                    {"id": "S03", "gender": "unknown"}]
+        cues = [{"index": i, "speaker": sid, "gender": g} for i, (sid, g) in enumerate(
+            [("S01", "male"), ("S02", "unknown"), ("S02", "unknown"), ("S02", "unknown"), ("S02", "unknown"),
+             ("S03", "unknown"), ("S03", "unknown")])]
+        p_female = {0: 0.99, 1: 0.97, 2: 0.95, 3: 0.92, 4: 0.5, 5: 0.03, 6: 0.98}
+        voted, lines = decide(cues, speakers, p_female)
+        self.assertEqual(voted, {"S02": "female"})  # 3 confident lines, all female
+        self.assertEqual(lines, {1: "female", 2: "female", 3: "female", 5: "male", 6: "female"})
+        self.assertEqual(apply(cues, speakers, voted, lines), 6)  # line 4 (unclear) takes S02's vote
+        self.assertEqual([c["gender"] for c in cues], ["male", "female", "female", "female", "female", "male", "female"])
+        self.assertEqual(speakers[1]["gender_source"], "line vote")  # S01 stays male although its line sounds female

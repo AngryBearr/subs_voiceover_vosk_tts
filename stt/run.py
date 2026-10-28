@@ -253,6 +253,8 @@ class Episode:
         if self._find_cast():
             argv += ["--cast", str(self.cast)]
         speakers.main(argv)
+        if self.config.get("line_gender", True):  # speakers left unknown: their lines' own voices (GPU, own process)
+            self._module("line_gender", "stt.line_gender", [str(self.out)])
 
     def translate(self) -> None:
         from stt import translate

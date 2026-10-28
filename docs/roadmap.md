@@ -19,12 +19,20 @@ gender_check.py`); twins (Natalie / Nadiya) one voice. Not exhausted:
 
 1. **Spoken stress check after synthesis**: TeraAnaly on the checked words only (names,
    homographs, disputed words); another take when the voice said another stress (section 6).
-2. **Gender per line**: a line whose own voice is clearly the other gender than its speaker
-   (~20-25 per episode) moves to the nearest speaker of that gender by voice, or at least gets
-   a voice of the heard gender. Measure with the gender check, S10 SDH labels, turn F1.
-3. **Each line against the season voice bank**: a line whose voice clearly matches another
-   named person's season prints (margin) moves to that person: merges like Wes/Alec in S29E05,
-   Julie's lines in the "camp voices" cluster. Same measures.
+2. **Gender per line** (done 28.10, `stt.line_gender`, `output/stt_linecheck/`): speakers whose gender
+   stayed unknown (mostly mixed clusters: "camp voices", "challenge voices") get it from their
+   lines' own voices: a confident line (p >= 0.9) keeps its own gender, the rest a vote of the
+   speaker's lines (3+, 70%). S10 SDH-labelled lines (E01/E12/E16, 243): right gender 78.2% -> 84.8%;
+   S29E01/E05-E08: 6 of 2756 lines changed. Trusting the line's voice on speakers of known gender
+   did not pay (the classifier is often the one that is wrong: shouting men at challenges heard as
+   women; on S29 47 of 81 such disagreements had the line clearly in its speaker's own voice).
+3. **Each line against the season voice bank** (tested 28.10): move a line to another named person
+   when its voice clearly sounds like them and not like its speaker (similarity >= 0.5 and 0.25
+   above its own speaker, or the other gender with >= 0.4 and 0.15 above; never between relatives).
+   S29: 20 of 2756 lines would move, some clearly right ("So, Missy, ..." said to Missy, now Jon's).
+   S10 SDH labels: 7 moves in 2302 lines, of the 4 labelled ones 1 right, 2 wrong: names right
+   63.6% before and after. Not used; would need a better voice model or a second signal (the
+   picture, below).
 4. **The picture: active speaker detection + faces.** Who moves their lips in sync with the
    speech (Light-ASD / TalkNet-type models) and whose face it is (face prints per person, named by
    the confessional name cards the OCR already reads). The most work and the biggest gain where
