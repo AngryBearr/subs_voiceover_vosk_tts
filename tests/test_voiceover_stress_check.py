@@ -5,8 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from voiceover.engine import cache_key
-from voiceover.stress_check import (Suspect, apply_sentence_fixes, collect, glossary_names, name_of,
-                                    valid_stress, vote)
+from voiceover.stress_check import (Suspect, apply_sentence_fixes, collect, disagreements, glossary_names,
+                                    name_of, valid_stress, vote)
 
 
 def _accentizer() -> SimpleNamespace:
@@ -23,7 +23,9 @@ def test_collect_takes_guessed_words_and_homographs_only() -> None:
 
 def test_valid_stress_and_vote() -> None:
     suspect = Suspect("голоса", "голос+а", "homograph", ["г+олоса", "голос+а"])
-    assert valid_stress(suspect, "г+олоса") and not valid_stress(suspect, "голо+са") and not valid_stress(suspect, "гол+оса")
+    assert valid_stress(suspect, "г+олоса") and not valid_stress(suspect, "голо+са")
+    assert valid_stress(suspect, "гол+оса")  # outside the dictionary's variants is allowed (понял+а)
+    assert not valid_stress(suspect, "г+олос+а") and not valid_stress(suspect, "г+олосу")
     assert vote(suspect, ["г+олоса", "г+олоса", None]) == "г+олоса"
     assert vote(suspect, ["г+олоса", "голос+а", None]) is None
 
@@ -54,3 +56,16 @@ def test_names_of_the_show_are_checked_in_every_case_form() -> None:
     assert {w: (s.source, s.name_en) for w, s in found.items()} == {
         "жаклин": ("name", "Jaclyn"), "кита": ("name", "Keith")}
     assert found["кита"].contexts == ["У Кита и Жаклин план."]  # the whale's sentence is not a name context
+
+
+def test_second_placer_disagreements_mark_their_sentences() -> None:
+    assert disagreements("Посл+е всег+о.", "П+осле всег+о.") == {0}
+    assert disagreements("Всё равн+о.", "Вс+ё р+авно.") == {1}  # ё words and one-vowel words are left out
+    assert disagreements("Посл+е всег+о.", "П+осле.") == set()  # not aligned: nothing
+    accentizer = SimpleNamespace(custom_dict={}, omographs={"после": ["п+осле", "посл+е"]},
+                                 accents={"после": "посл+е", "всего": "всег+о", "пора": "п+ора", "идти": "идт+и"})
+    found = collect(["Посл+е всег+о.", "Посл+е всег+о.", "П+ора идт+и."], accentizer,
+                    others=["П+осле всег+о.", "Посл+е всег+о.", "Пор+а идт+и."])
+    assert found["после"].source == "homograph" and found["после"].disputed == ["После всего."]
+    assert found["пора"].source == "disputed" and found["пора"].contexts == ["Пора идти."]
+    assert "всего" not in found and "идти" not in found

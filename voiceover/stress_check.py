@@ -13,6 +13,11 @@ form, even when RUAccent knows the word: it stresses English names the French wa
 words (Жакл+ин, Натал+и, Мисс+и, Ал+ек, кит+а for Keith's "Кита"), ~20% of the 2462 name uses of
 S29E01-E09. The models get the English original and skip the screener.
 
+A second stress placer (silero-stress, if installed) reads the same lines; where it disagrees
+with RUAccent on a word, that sentence also goes to the strong models without the screener:
+on S29E03, of 53 such words RUAccent was right in ~13 of 22 kinds, silero in ~9 (п+осле, пор+а,
+понял+а, вых+одит, п+олосу), all of which the screener had let through.
+
 Corrections go to ``stress.json``, which the engines load through
 ``engine.normalization.stress_dict``: ``dictionary`` holds guessed words (the same stress
 everywhere), ``sentences`` holds homograph fixes per sentence (два го́лоса / нужны голоса́),
@@ -47,7 +52,7 @@ from voiceover.text import join_lines
 
 log = logging.getLogger("voiceover.stress_check")
 
-PROMPT_VERSION = "stress-v3"
+PROMPT_VERSION = "stress-v4"
 VOWELS = set("аеёиоуыэюя")
 _WORD = re.compile(r"[А-Яа-яЁё+]+")
 DEFAULT_MODELS = ("openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon")
@@ -59,8 +64,9 @@ stressed vowel, and the sentence the word is used in; some items also list "vari
 possible stresses of a homograph).
 For each item first determine the word's meaning and grammatical form in this sentence (part
 of speech, case and number, or tense/person/aspect), then give the stress of standard Russian
-for exactly that form. For names and borrowed words use their usual Russian pronunciation. If
-"variants" are given, answer with one of them.
+for exactly that form. For names and borrowed words use their usual Russian pronunciation.
+"variants" (if given) are the readings the dictionary knows; answer with one of them unless the
+correct stress of this form is another one (поняла: п+оняла / пон+яла known, correct понял+а).
 Answer JSON: {"items": [{"id": <id>, "form": "<meaning and form, a few words>",
 "stressed": "<the word with + before the stressed vowel>"}]}, one entry per item in the same
 order. Keep the letters exactly as given; only the "+" may move.
@@ -84,6 +90,7 @@ class Suspect:
     contexts: list[str] = field(default_factory=list)
     count: int = 0
     name_en: str | None = None  # for a name of the show's people: the English original
+    disputed: list[str] = field(default_factory=list)  # sentences where the second stress placer disagrees
 
 
 def glossary_names(glossary: list[dict[str, Any]]) -> dict[str, str]:
@@ -124,12 +131,53 @@ def classify(word: str, accentizer: Any) -> str:
     return "guess"
 
 
+def _stress(marked: str) -> tuple[str, int | None]:
+    """(lower-case letters, index of the stressed vowel among the vowels or None) of a marked word."""
+    letters, index, vowel = "", None, 0
+    for i, ch in enumerate(marked.lower()):
+        if ch == "+":
+            continue
+        if ch in VOWELS:
+            if i and marked[i - 1] == "+":
+                index = vowel
+            vowel += 1
+        letters += ch
+    return letters, index
+
+
+def disagreements(ours: str, theirs: str) -> set[int]:
+    """Indexes of the words of `ours` (both "+"-marked texts of one line) whose stress `theirs` puts
+    elsewhere; words with "ё", one vowel or other letters are left out."""
+    a, b = _WORD.findall(ours), _WORD.findall(theirs)
+    if len(a) != len(b):
+        return set()
+    out = set()
+    for k, (x, y) in enumerate(zip(a, b)):
+        (lx, ix), (ly, iy) = _stress(x), _stress(y)
+        if lx == ly and "ё" not in lx and sum(ch in VOWELS for ch in lx) >= 2 and None not in (ix, iy) and ix != iy:
+            out.add(k)
+    return out
+
+
+def second_opinion(texts: list[str]) -> list[str] | None:
+    """The lines (plain text) as silero-stress marks them; None when it is not installed."""
+    try:
+        from silero_stress import load_accentor
+    except ImportError:
+        log.warning("stress: silero-stress is not installed; no second stress placer")
+        return None
+    accentor = load_accentor()
+    return [accentor(text) for text in texts]
+
+
 def collect(texts: list[str], accentizer: Any, max_contexts: int = 8,
-            names: dict[str, str] | None = None) -> dict[str, Suspect]:
-    """Guessed words, homographs and names of the accented texts, with a few example sentences."""
+            names: dict[str, str] | None = None, others: list[str] | None = None) -> dict[str, Suspect]:
+    """Guessed words, homographs, names and words a second stress placer (``others``: the same
+    lines marked by it) disagrees on, with a few example sentences."""
     found: dict[str, Suspect] = {}
-    for text in texts:
-        for match in _WORD.finditer(text):
+    for n, text in enumerate(texts):
+        disputed = disagreements(text, others[n]) if others else set()
+        for k, match in enumerate(_WORD.finditer(text)):
             if text[match.end():match.end() + 1] == "-" or text[max(0, match.start() - 1):match.start()] == "-":
                 continue  # parts of hyphenated words (кое-что, альфа-самец) are stressed separately
             accented = match.group(0).lower()
@@ -138,6 +186,8 @@ def collect(texts: list[str], accentizer: Any, max_contexts: int = 8,
             english = name_of(match.group(0).replace("+", ""), names) if names and source != "trivial" else None
             if english:
                 source = "name"
+            elif source == "dictionary" and k in disputed:
+                source = "disputed"  # RUAccent's dictionary and the second placer disagree in this sentence
             elif source not in ("guess", "homograph"):
                 continue
             variants = list(accentizer.omographs.get(word, [])) if source == "homograph" else []
@@ -146,20 +196,23 @@ def collect(texts: list[str], accentizer: Any, max_contexts: int = 8,
             sentence = text.replace("+", "")
             if len(item.contexts) < max_contexts and sentence not in item.contexts:
                 item.contexts.append(sentence)
+            if k in disputed and sentence in item.contexts and sentence not in item.disputed:
+                item.disputed.append(sentence)
     return found
 
 
 def valid_stress(suspect: Suspect, stressed: str) -> bool:
-    """One "+" right before a vowel, the same letters, and one of the variants for a homograph."""
+    """One "+" right before a vowel and the same letters (a homograph may get a stress outside the
+    dictionary's variants: поняла has п+оняла / пон+яла there, but is понял+а)."""
     position = stressed.find("+")
     return (stressed.replace("+", "") == suspect.word and stressed.count("+") == 1
-            and position + 1 < len(stressed) and stressed[position + 1] in VOWELS
-            and (not suspect.variants or stressed in suspect.variants))
+            and position + 1 < len(stressed) and stressed[position + 1] in VOWELS)
 
 
 def queries(suspects: list[Suspect]) -> list[tuple[Suspect, str]]:
-    """What to ask: a guessed word once, a homograph in each of its sentences."""
-    return [(s, context) for s in suspects for context in (s.contexts if s.source == "homograph" else s.contexts[:1])]
+    """What to ask: a guessed word or a name once, a homograph or a disputed word in each of its sentences."""
+    return [(s, context) for s in suspects
+            for context in (s.contexts if s.source in ("homograph", "disputed") else s.contexts[:1])]
 
 
 def ask(pairs: list[tuple[Suspect, str]], client: LLMClient, batch: int = 40, workers: int = 4) -> list[str | None]:
@@ -210,18 +263,22 @@ def _client(llm_config: dict[str, Any], model: str, env_file: Path | None, **ext
 
 def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config: dict[str, Any],
           models: list[str], env_file: Path | None = None, screen: dict[str, Any] | None = None,
-          names: dict[str, str] | None = None) -> dict[str, Any]:
+          names: dict[str, str] | None = None, second: bool = True) -> dict[str, Any]:
     """Accent the lines exactly as the engine will, then re-check guessed words and homographs."""
     engine = build_engine({**engine_config, "normalization": {
         **engine_config.get("normalization", {}), "stress_dict": None}})
     items = [{"cue_id": str(i), "index": i, "text": join_lines(line.get("text"))} for i, line in enumerate(lines)]
     prepared = engine.prepare(items)
     accentizer = engine._accentizer  # type: ignore[attr-defined]
-    suspects = sorted(collect([p.tts_text for p in prepared], accentizer, names=names).values(),
+    texts = [p.tts_text for p in prepared]
+    others = second_opinion([t.replace("+", "") for t in texts]) if second else None
+    suspects = sorted(collect(texts, accentizer, names=names, others=others).values(),
                       key=lambda s: (s.source, s.word))
     counts = Counter(s.source for s in suspects)
-    log.info("stress: %d lines, %d guessed words, %d homographs, %d name forms to check with %d models", len(lines),
-             counts["guess"], counts["homograph"], counts["name"], len(models))
+    log.info("stress: %d lines, %d guessed words, %d homographs, %d name forms, %d disputed words "
+             "(%d sentences where the second placer disagrees) to check with %d models", len(lines), counts["guess"],
+             counts["homograph"], counts["name"], counts["disputed"], sum(len(s.disputed) for s in suspects),
+             len(models))
     clients = [_client(llm_config, model, env_file) for model in models]
     pairs = queries(suspects)
     screened: list[str | None] = [None] * len(pairs)
@@ -231,8 +288,8 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
                            **{k: v for k, v in screen.items() if k != "model"})
         screened = ask(pairs, screener)
         stats[f"screen:{screen['model']}"] = screener.stats()
-        todo = [n for n, (s, _) in enumerate(pairs)
-                if s.source == "name" or (screened[n] and screened[n] != s.accented)]  # names: always
+        todo = [n for n, (s, context) in enumerate(pairs)  # names and disputed sentences: always
+                if s.source == "name" or context in s.disputed or (screened[n] and screened[n] != s.accented)]
         log.info("stress: the screener proposes %d changes in %d sentences", len(todo), len(pairs))
     else:
         todo = list(range(len(pairs)))
@@ -253,7 +310,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
                                              "count": s.count, "variants": s.variants, "contexts": [],
                                              **({"name_en": s.name_en} if s.name_en else {})})
         entry["contexts"].append({"sentence": context, "answers": dict(zip(models, votes)), "screen": screened[n],
-                                  "corrected": corrected})
+                                  "corrected": corrected, **({"disputed": True} if context in s.disputed else {})})
         if corrected and s.source in ("guess", "name"):
             guessed[s.word] = corrected
         elif corrected:
@@ -265,6 +322,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         "dictionary": dict(sorted(guessed.items())),
         "sentences": sentences,
         "checked": dict(counts),
+        "second_placer": "silero-stress" if others is not None else None,
         "corrected": {"guess": sum(v["source"] == "guess" for k, v in verdicts.items() if k in guessed),
                       "name": sum(v["source"] == "name" for k, v in verdicts.items() if k in guessed),
                       "homograph_sentences": sum(len(v) for v in sentences.values())},
@@ -298,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models", default=None, help="Comma-separated OpenRouter models (default: config/built-in)")
     parser.add_argument("--no-screen", action="store_true", help="Let the strong models check every sentence")
     parser.add_argument("--screen", default=None, help="Cheap model that proposes changes (default: config/built-in)")
+    parser.add_argument("--no-second", action="store_true", help="No second stress placer (silero-stress)")
     parser.add_argument("--names", type=Path, default=None,
                         help="Glossary JSON (stt.glossary): its people's names are checked in every case form")
     args = parser.parse_args(argv)
@@ -311,7 +370,8 @@ def main(argv: list[str] | None = None) -> int:
                                           else stress.get("screen", DEFAULT_SCREEN))
     lines = json.loads(args.source.read_text(encoding="utf-8"))
     names = glossary_names(json.loads(args.names.read_text(encoding="utf-8"))) if args.names else None
-    result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen, names=names)
+    result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen, names=names,
+                   second=not args.no_second)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log.info("stress: corrected %d guessed words, %d name forms, %d homographs in their sentences -> %s",
              result["corrected"]["guess"], result["corrected"]["name"], result["corrected"]["homograph_sentences"],
