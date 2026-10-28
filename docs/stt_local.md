@@ -27,9 +27,14 @@ video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.js
 ## Quick start
 
 ```bash
+bash scripts/install.sh                         # once (and after `git pull`): everything below in one go
+bash scripts/run_ui.sh                          # the browser UI, opened in the browser
+
+# or by hand:
 bash scripts/setup_envs.sh                      # subs_env (once)
 subs_env/bin/hf auth login                      # once; accept the terms of pyannote community-1 and Cohere Transcribe
 # models/vosk-model-tts-ru-0.10-multi for Vosk; OPENROUTER_API_KEY and DEEPSEEK_API_KEY in .env
+subs_env/bin/python -m stt.selftest             # GPU, models (downloads them), keys; --quick: no downloads
 
 # whole season, up to the Russian dubbing script (no TTS):
 subs_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --until dub
@@ -41,7 +46,18 @@ Browser UI: `subs_env/bin/python -m ui.dub_app` (http://127.0.0.1:7861). Tab "О
 episodes of a folder, engines, recognition mode, LLM, "embed subtitles", "duck only voices",
 stress check and speaker refinement; "test piece" voices N minutes from minute M into
 `<out>/_проба` (with a short video) to try settings quickly. One job at a time, engines one after
-the other; progress per episode and stage, the log, the finished files.
+the other; progress per episode and stage, the log, the finished files. Tab "Настройки": the
+defaults people change (folders, engines ticked at start, recognition, models, voices, checks,
+mix), saved into `stt_config.local.json` as differences from `stt_config.json` only (other
+personal keys there, such as the subscription, are kept; the previous file stays as `.bak`);
+"Сбросить" removes the page's keys. The "Обработка" form starts from these values.
+
+`scripts/install.sh` (Linux, NVIDIA driver with CUDA 12.8+): checks the GPU, disk and `uv`
+(offers to install it), creates subs_env, f5_env and diarizen_env (`--basic`: subs_env only;
+existing environments are kept and only updated), downloads the Vosk voice model, runs `hf auth
+login` if needed (and lists the two gated models whose terms to accept), asks for the OpenRouter
+key without showing it and appends it to `.env`, runs `stt.selftest` (downloads ~30 GB of models
+the first time) and can add a menu shortcut to `scripts/run_ui.sh`.
 
 Defaults live in `stt_config.json` (mode, models, OCR, LLM, TTS engine and voices, checks,
 ducking). Stages already done are skipped; `--force STAGE` recomputes it and the following
@@ -225,6 +241,14 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   models on every sentence: S29E03 28 corrections (luna as the screener 24, everything 27; before
   28.10: 15) with 110 paid answers (luna 125, everything 325). The engines say the marked stress
   in 98.4-99.3% of words (TeraAnaly on S29E03), so the marks are what matters.
+- **Stress heard in the takes (since 28.10, `"listen_stress": true` in `voiceover`).** The words
+  the stress check looked at (`stress.json`: names, homographs, guessed and disputed words) are
+  heard in every take by TeraAnaly (`voiceover.stress_listen`); a take whose voice said another
+  stress is retried like a garbled one (ESpeech and TeraTTS with other seeds, Vosk once more: its
+  sampling noise differs on every run) and the best take is kept. Cached takes are heard once and
+  redone only when wrong. S29E03: 1-7 of ~260 such lines per engine heard wrong (11 in the three
+  engines), 4 of them fixed by another take; TeraAnaly notices 37-67% of wrong stresses at 1-2% false alarms
+  (`docs/roadmap.md` §6). Off in the UI settings or with `"listen_stress": false`.
 - **Speech check (after synthesis).** `voiceover.speech_check` transcribes every clip with
   GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
   abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.

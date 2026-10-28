@@ -17,8 +17,9 @@ Who speaks, where it stands (S29/S20/S10): speaker changes vs the captions' `>>`
 with the other gender (the line's own voice vs its speaker's gender, `output/stt_dz_sweep/
 gender_check.py`); twins (Natalie / Nadiya) one voice. Not exhausted:
 
-1. **Spoken stress check after synthesis**: TeraAnaly on the checked words only (names,
-   homographs, disputed words); another take when the voice said another stress (section 6).
+1. **Spoken stress check after synthesis** (done 28.10, `voiceover.stress_listen`, `listen_stress`):
+   the words the stress check looked at are heard in every take by TeraAnaly and a take said with
+   another stress is taken again (section 6). Small gain: the voices already say the marks.
 2. **Gender per line** (done 28.10, `stt.line_gender`, `output/stt_linecheck/`): speakers whose gender
    stayed unknown (mostly mixed clusters: "camp voices", "challenge voices") get it from their
    lines' own voices: a confident line (p >= 0.9) keeps its own gender, the rest a vote of the
@@ -33,12 +34,8 @@ gender_check.py`); twins (Natalie / Nadiya) one voice. Not exhausted:
    S10 SDH labels: 7 moves in 2302 lines, of the 4 labelled ones 1 right, 2 wrong: names right
    63.6% before and after. Not used; would need a better voice model or a second signal (the
    picture, below).
-4. **The picture: active speaker detection + faces.** Who moves their lips in sync with the
-   speech (Light-ASD / TalkNet-type models) and whose face it is (face prints per person, named by
-   the confessional name cards the OCR already reads). The most work and the biggest gain where
-   people talk on screen (camp, tribal council); no help for voice-over narration and
-   off-screen speech. Measure on the S10 SDH labels and the turn marks first.
-5. **Setup scripts and the "Настройки" page** (section 5).
+4. ~~The picture: active speaker detection + faces~~: dropped (the user, 28.10: a dead end).
+5. **Setup scripts and the "Настройки" page** (done 28.10, section 5).
 6. **Re-voice S20 and S29 with all of it**, then finish S29 (E11, E13-E15, the missing tracks of
    E01-E08): once the improvements above are in (the user, 28.10: not after every small one).
 7. Smaller: Vosk 0.11 when it is out (section 4), a TTS cache cleanup command, emotion models to
@@ -168,30 +165,53 @@ Shmyrev's table of 20.10.2026 lists Vosk TTS 0.11: same speed as 0.10, fewer str
 When it is out: download it, set `voiceover.engines.vosk.model_path` in `stt_config.json` to it, re-voice S29E01 and
 compare the speech check and the stress errors with 0.10.
 
-## 5. One-command setup and a settings page (after the core is done)
+## 5. One-command setup and a settings page (done 28.10)
 
 So that a new user only clones the branch, runs one script and then works in the browser:
 
-- `setup` script: checks the NVIDIA driver and `uv`, creates the environments (`subs_env`, and
-  `f5_env` if wanted), downloads the models (Vosk TTS, TeraTTS, ESpeech F5, pyannote with the
-  Hugging Face login and its terms, GigaAM, WeSpeaker ResNet293, Hybrid Demucs), asks for the
-  OpenRouter key and writes it into `.env` (never printed), runs a short self-test, then opens the
-  UI;
-- `run` script (or the setup script run again): only starts the UI and opens the browser;
-- a "Настройки" page in the UI built from `stt_config.json`: the options people actually change
-  (engines and voices, LLM model, recognition mode, subtitles in the mkv, duck only voices,
-  stress check, speaker refinement, the review list on/off, ESpeech fast mode, default folders),
-  saved into `stt_config.local.json` so the shared config stays untouched and "reset" is just
-  deleting the local file. For example: no review step at all, just the finished voice-over file.
+- `scripts/install.sh`: checks Linux, the NVIDIA driver (CUDA 12.8+), GPU memory, free disk, git,
+  curl and `uv` (offers to install it); creates subs_env, f5_env and diarizen_env (`--basic`:
+  subs_env only; `scripts/setup_envs.sh` now keeps an existing environment and only updates it, so
+  the script is also the update after `git pull`); downloads the Vosk voice model; runs `hf auth
+  login` when there is no token and lists the two gated models (pyannote community-1, Cohere
+  Transcribe) whose terms to accept; asks for the OpenRouter key without echo and appends it to
+  `.env` (never printed); runs `stt.selftest`; offers a menu shortcut.
+- `stt.selftest`: one line per check (GPU, ffmpeg, a Vosk line synthesised and heard by GigaAM,
+  text preparation, the OpenRouter key against `/api/v1/key`, the subscription if configured;
+  without `--quick` every model loaded or downloaded once: TeraTTS, TeraAnaly, Whisper, Cohere,
+  pyannote, the voice models, wav2vec2, Demucs, ESpeech in f5_env, DiariZen in diarizen_env).
+- `scripts/run_ui.sh`: starts the UI and opens the browser (only the browser when it already runs).
+- UI tab "Настройки" (`ui/settings.py`): folders, engines ticked at start, recognition mode,
+  diarizer, speaker refinement, line gender, OCR, cast, voice bank, LLM model and stress screener,
+  stress check, heard stress, speech check, Vosk / TeraTTS voices (blends allowed, checked against
+  the model's voices), ESpeech fallback and quality, subtitles, ducking, tracks, WAV keeping, crowd
+  layer, review list. Saved into `stt_config.local.json` as differences from `stt_config.json`
+  only, so other personal keys stay and the rest follows new defaults; the previous file is kept
+  as `.bak`; "Сбросить" removes the page's keys. The "Обработка" form starts from these values.
+  Not tested by a person on a clean machine yet.
 
 ## 6. To test (tips from Telegram and 4pda)
 
-- **Spoken stress check.** TeraAnaly's stress head, given the text: on 159 phrases synthesised
-  with a deliberately wrong stress it heard the wrong stress in 73% (Vosk) / 62% (TeraTTS) of
-  clips and reported a wrong stress on 1-2% of words said correctly. Useful only on the
-  ~50 homographs and guessed words per episode the stress check already handles (on all words
-  it would raise ~100 false alarms per episode): a second TeraTTS take when the voice ignored
-  the stress mark.
+- **Spoken stress check** (done 28.10, on by default: `voiceover.listen_stress`). TeraAnaly's
+  stress head gives every vowel of a word a score; a listened word is "heard wrong" when another
+  vowel wins and the marked one gets under 0.25. Only the words the stress check looked at are
+  heard (names, homographs, guessed and disputed words: S29E03 108 words, in ~260 of 640 lines).
+  S29E03, current marks, 4 takes per line and engine (`output/tts_eval/stress_retake/`):
+
+  | engine | lines heard wrong, 1st take | after 3 takes | wrong stress noticed* | false alarms |
+  |---|---|---|---|---|
+  | ESpeech F5 | 2 / 259 | 1 | 67% | 0.8% |
+  | Vosk | 7 / 261 | 5 | 37% | 2.4% |
+  | TeraTTS | 2 / 261 | 1 | 48% | 0.8% |
+
+  \* the same lines with one listened word's mark moved to a neighbouring vowel, heard against the
+  right marks (a voice that ignored the moved mark counts as not noticed, so these are lower
+  bounds). ESpeech follows even a wrong mark (87%), so errors in the marks go straight to the audio
+  and the stress check before synthesis stays what matters. Takes are retried like garbled ones
+  (ESpeech, TeraTTS: up to 3 seeds; Vosk: its sampling noise differs on every run, up to 3 runs);
+  cached takes are heard once (`"stress"` in the cache entry) and redone only when wrong; ~0.2 s
+  per listened take. Stubborn: Vosk's "Н+атали" (wrong in every take), "Зд+орово" (all engines:
+  maybe TeraAnaly). A listening file of the fixed lines: `listen_retakes.wav` + `listen_guide.txt`.
 - **TeraTTS teacher sampler** (`diffusion_model: "teacher"`): recommended by the author for
   quality on a GPU; compare dropped words, character errors and speed with the distilled one.
   It changes the sampling network, not the voice.

@@ -1,4 +1,4 @@
-# Handoff (27.10.2026)
+# Handoff (27.10.2026, updated 28.10 night)
 
 For the next agent working on this repository. Read `AGENTS.md` first, then `docs/stt_local.md`
 (how the pipeline works) and `docs/roadmap.md` (what comes next).
@@ -93,8 +93,14 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
     the stress heard by TeraAnaly; ESpeech hears 255/255 stresses as marked).
   - GPU experiments next to a season run: `output/tts_eval/gpu_window.sh <run log> <cmd>` waits
     while an episode is transcribing and stops the command when the next transcription starts.
-- 293 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
-- Disk: `/home` ~100 GB free after the cleanup (it was at 99% on 27.10 morning).
+- **28.10 (night)**: the spoken stress check (`voiceover.stress_listen`, on by default) and the
+  one-command setup (`scripts/install.sh`, `stt.selftest`, `scripts/run_ui.sh`) with the UI tab
+  "Настройки" (`ui/settings.py`, writes only differences into `stt_config.local.json`, keeps
+  `.bak`). `install.sh` was tested only up to its checks on this machine (running it whole would
+  update the existing environments); `stt.selftest --quick` passes here. The "picture" idea
+  (active speaker detection + faces) is dropped by the user.
+- 311 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
+- Disk: `/home` 22 GB free on 28.10 night (`output/tts_cache` 7.2 GB, many stale sets).
 
 ## Working with this user
 
@@ -132,8 +138,8 @@ Everything planned is in `docs/roadmap.md`; in short, by the user's priorities:
 
 1. Finish S29 (E09-E15 in all three voice-overs; ESpeech for E01, E02, E04; Vosk/TeraTTS for
    E05-E08) - batches of three, as above.
-2. One-command setup/run scripts and a "Настройки" page in the UI (roadmap §5); the new options
-   (paths, tracks, loudness) belong there.
+2. ~~One-command setup/run scripts and a "Настройки" page~~ (done 28.10); a test on a clean
+   machine by a person is still to do.
 3. Tests from the community (roadmap §6): FireRedTTS3 (new, 27.10), TeraTTS teacher sampler,
    another TeraTTS female voice, spoken stress check, RuVoice stress placer, Shmyrev's TTS
    metrics, DiariZen Large MD v2, newer diarization / speaker-embedding models, emotion models
