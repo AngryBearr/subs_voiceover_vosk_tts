@@ -159,6 +159,9 @@ class DiarizenDiarizer(Diarizer):
     """DiariZen (pyannote 3.1 fork): WavLM-Conformer segmentation + WeSpeaker ResNet34 + VBx clustering."""
 
     batch_size = 8  # segmentation and embedding batches: ~4.5 GB VRAM (32 by default: ~13 GB)
+    # AHC threshold before VBx (0.6 in the model's config): 0.5 kept Wes and Alec apart in S29E05 and
+    # changed the speaker-change F1 by at most 0.01 on 8 other episodes; a lower VBx Fb splits voices.
+    ahc_threshold = 0.5
 
     def load(self) -> None:
         from diarizen.pipelines.inference import DiariZenPipeline
@@ -166,6 +169,8 @@ class DiarizenDiarizer(Diarizer):
         self._pipeline = DiariZenPipeline.from_pretrained(self.spec.model_id)
         self._pipeline.segmentation_batch_size = self.batch_size
         self._pipeline.embedding_batch_size = self.batch_size
+        clustering = {**self._pipeline.PIPELINE_PARAMS["clustering"], "ahc_threshold": self.ahc_threshold}
+        self._pipeline.instantiate({"clustering": clustering})
 
     def diarize(
         self,
