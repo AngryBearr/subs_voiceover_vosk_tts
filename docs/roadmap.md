@@ -9,17 +9,17 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
    form (`voiceover.stress_check --names`). Re-stress the finished S29 episodes and S20
    (`stt.run ... --force stress --engine <e>` per engine: only lines with a corrected name are
    synthesised again) and finish S29 (E11, E13-E15, the missing tracks of E01-E08).
-2. **Cloned voices without the English accent** (tested 28.10, `output/tts_eval/vc/`, listening files in
-   `listen/`): the TeraTTS line (native Russian, the right stress, already fitted to the slot)
-   converted to the person's timbre by Seed-VC V1 (zero-shot, `models/seedvc/`, own venv, GPL-3.0,
-   ~0.8 s per line) with a ~25 s reference from the voice bank's solo stretches of several
-   episodes (vocal stem) and CFG 1.0. S29E03, 64 lines of 8 people: character errors 0.61% (ESpeech
-   1.59%), similarity to the person's season voice (mean bank print) 0.438 vs ESpeech 0.398, to the
-   one bank clip 0.38 vs 0.42; stress as marked 98.6% (TeraAnaly). Worse: Vosk as the source
-   (1.43%), ESpeech -> Seed-VC (more similar, 0.48 to the clip, but 4.2% errors), ESpeech or
-   FireRedTTS3 with a converted Russian reference (similarity 0.35-0.36). Next, if it sounds right
-   by ear: an engine "TeraTTS + Seed-VC" (a fourth track at first), one episode A/B against ESpeech;
-   later a per-person Seed-VC fine-tune (the repo trains on a few minutes in minutes) or RVC.
+2. **Cloned voices without the English accent** (tested 28.10, `output/tts_eval/vc/`): TeraTTS (native
+   Russian) converted to the person's timbre by Seed-VC V1 (zero-shot, `models/seedvc/`, GPL-3.0)
+   scored well on character errors (0.61% vs ESpeech 1.59%) and similarity (0.44 vs 0.40 to the
+   season voice), but by ear it has a heavy accent (the user, 28.10): the speech check's ASR
+   understands accented Russian. A measure that agrees with the ear: Whisper large-v3's language
+   probability for Russian (`accent.py`): TeraTTS 0.999, ESpeech 0.984 (worst line 0.93), Seed-VC
+   0.88-0.98 at any CFG / reference length (worst lines 0.05-0.70). ESpeech or FireRedTTS3 with a
+   Seed-VC Russian reference: less like the person (0.35-0.36). Not used. Next candidates, to be
+   judged by P(ru) + similarity, then by ear with one clearly named file per variant: OpenVoice v2
+   (timbre-only tone colour converter, MIT), RVC trained per main character on the bank's solo
+   speech, a Seed-VC fine-tune per person.
 3. **Stress** (28.10): TeraAnaly on whole episodes shows the engines say the marked stress in
    98.4-99.3% of words (S29E03), so the errors are in the marks. Done: the show's names in every
    case form (~20% of name uses were wrong) and a second stress placer, silero-stress, whose
