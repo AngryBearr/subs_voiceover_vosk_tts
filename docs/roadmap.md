@@ -9,18 +9,28 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
    form (`voiceover.stress_check --names`). Re-stress the finished S29 episodes and S20
    (`stt.run ... --force stress --engine <e>` per engine: only lines with a corrected name are
    synthesised again) and finish S29 (E11, E13-E15, the missing tracks of E01-E08).
-2. **Cloned voices without the English accent** (section 3): a Russian source with the right
-   stress and timing (Vosk / TeraTTS / ESpeech with a Russian clip) converted to the person's
-   timbre by a zero-shot voice conversion (Seed-VC V1, GPL-3.0, archived 11.2025; OpenVoice v2;
-   RVC trained per main character on the voice bank's solo stretches); or a converted Russian
-   clip as the ESpeech / FireRedTTS3 reference. Measure like FireRedTTS3: speech check,
-   similarity to the clip (ResNet293), heard stress (TeraAnaly), by ear.
-3. **Remaining stress errors**: TeraAnaly on whole episodes (`output/tts_eval/stress_heard.py`)
-   shows the engines say the marked stress in 98.4-99.3% of words (S29E03); the rest are Vosk
-   slips (22 words, Vosk 0.11 should help) and homographs. RUAccent and "ё" (unreliable per the
-   Telegram chat) are the next thing to check.
-4. **DiariZen**: default since 28.10. Possible gains: diarize the separated vocals (Demucs is
-   already in the mix) and give lines of an unnamed crowd cluster the nearest named voice.
+2. **Cloned voices without the English accent** (tested 28.10, `output/tts_eval/vc/`, listening files in
+   `listen/`): the TeraTTS line (native Russian, the right stress, already fitted to the slot)
+   converted to the person's timbre by Seed-VC V1 (zero-shot, `models/seedvc/`, own venv, GPL-3.0,
+   ~0.8 s per line) with a ~25 s reference from the voice bank's solo stretches of several
+   episodes (vocal stem) and CFG 1.0. S29E03, 64 lines of 8 people: character errors 0.61% (ESpeech
+   1.59%), similarity to the person's season voice (mean bank print) 0.438 vs ESpeech 0.398, to the
+   one bank clip 0.38 vs 0.42; stress as marked 98.6% (TeraAnaly). Worse: Vosk as the source
+   (1.43%), ESpeech -> Seed-VC (more similar, 0.48 to the clip, but 4.2% errors), ESpeech or
+   FireRedTTS3 with a converted Russian reference (similarity 0.35-0.36). Next, if it sounds right
+   by ear: an engine "TeraTTS + Seed-VC" (a fourth track at first), one episode A/B against ESpeech;
+   later a per-person Seed-VC fine-tune (the repo trains on a few minutes in minutes) or RVC.
+3. **Stress** (28.10): TeraAnaly on whole episodes shows the engines say the marked stress in
+   98.4-99.3% of words (S29E03), so the errors are in the marks. Done: the show's names in every
+   case form (~20% of name uses were wrong) and a second stress placer, silero-stress, whose
+   disagreements with RUAccent go to the strong models past the screener (S29E03: 15 -> 24
+   corrections, all-models-on-everything 27; cost ~$0.05 -> ~$0.11 per episode). Left: Vosk slips
+   (22 words in E03, Vosk 0.11), a TeraAnaly retry of takes whose heard stress differs.
+4. **DiariZen**: default since 28.10. Diarizing the Demucs vocal stem instead of the mix (tested
+   28.10, `output/stt_dz_vocals/`): turn F1 the same (0.823 vs 0.823 with the refinement on
+   S29E05-E07; +0.02 on S20, -0.03 on S29E08) and who is who worse on S10 (63.7% vs 71.3% of SDH
+   lines on their person's speaker): not used. Left: lines of an unnamed crowd cluster -> the
+   nearest named voice when one is clear (in S29E06 only 2 of 36 were clear).
 5. Setup scripts and the settings page (section 5), then the community tests of section 6.
 
 ## 1. Now: stable whole episodes on Vosk and TeraTTS
