@@ -18,6 +18,13 @@ with RUAccent on a word, that sentence also goes to the strong models without th
 on S29E03, of 53 such words RUAccent was right in ~13 of 22 kinds, silero in ~9 (п+осле, пор+а,
 понял+а, вых+одит, п+олосу), all of which the screener had let through.
 
+One stress per season (``--season``: ``<season>.stress.json`` next to the season glossary): a
+name or guessed word the models decided by a majority (a correction or RUAccent's stress
+confirmed) is written there with the votes, and later episodes take it from there without asking,
+so a name sounds the same all season and a hand edit of the file applies to every episode.
+Homographs stay per sentence. Without the file a name could get its correction in one episode
+and not in the next, where the vote fell short.
+
 Corrections go to ``stress.json``, which the engines load through
 ``engine.normalization.stress_dict``: ``dictionary`` holds guessed words (the same stress
 everywhere), ``sentences`` holds homograph fixes per sentence (два го́лоса / нужны голоса́),
@@ -53,6 +60,7 @@ from voiceover.text import join_lines
 log = logging.getLogger("voiceover.stress_check")
 
 PROMPT_VERSION = "stress-v4"
+SEASON_SCHEMA = "season-stress-v1"
 VOWELS = set("аеёиоуыэюя")
 _WORD = re.compile(r"[А-Яа-яЁё+]+")
 DEFAULT_MODELS = ("openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon")
@@ -237,6 +245,9 @@ def _ask_batch(chunk: list[tuple[Suspect, str]], client: LLMClient, tag: str) ->
             return [None]
         half = len(chunk) // 2
         return _ask_batch(chunk[:half], client, tag + "a") + _ask_batch(chunk[half:], client, tag + "b")
+    except Exception as error:  # noqa: BLE001 - the model is not reachable (e.g. a subscription login): no votes
+        log.warning("stress: %s did not answer %s (%s): the others vote", client.config.model, tag, str(error)[:160])
+        return [None] * len(chunk)
     answers = {a.get("id"): a for a in result.content.get("items", []) if isinstance(a, dict)}
     out: list[str | None] = []
     for i, (suspect, _) in enumerate(chunk):
@@ -254,6 +265,46 @@ def vote(suspect: Suspect, answers: list[str | None]) -> str | None:
     return stressed if votes > len(answers) / 2 else None
 
 
+def lines_sha256(lines: list[dict[str, Any]]) -> str:
+    """Fingerprint of the lines' texts: another engine's script with the same lines needs no new check."""
+    import hashlib
+
+    texts = [join_lines(line.get("text")) for line in lines]
+    return hashlib.sha256(json.dumps(texts, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def decided(answers: list[str | None]) -> str | None:
+    """The stress a majority of all models gave (a correction or the one RUAccent had)."""
+    counts = Counter(a for a in answers if a)
+    if not counts:
+        return None
+    stressed, votes = counts.most_common(1)[0]
+    return stressed if votes > len(answers) / 2 else None
+
+
+def load_season(path: Path | None) -> dict[str, dict[str, Any]]:
+    """{word: {"stressed", "source", ...}} of a season's stress file; empty when there is none."""
+    if not path or not path.is_file():
+        return {}
+    return dict(json.loads(path.read_text(encoding="utf-8")).get("words", {}))
+
+
+def save_season(path: Path, new: dict[str, dict[str, Any]], episode: str) -> int:
+    """Add the words decided in an episode; words already there (decided earlier or edited by hand)
+    are never replaced. Returns the number added."""
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"schema": SEASON_SCHEMA, "words": {}}
+    words = data.setdefault("words", {})
+    added = 0
+    for word, entry in sorted(new.items()):
+        if word not in words:
+            words[word] = {**entry, "episode": episode}
+            added += 1
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return added
+
+
 def _client(llm_config: dict[str, Any], model: str, env_file: Path | None, **extra: Any) -> LLMClient:
     # reasoning models spend part of max_tokens on thinking before the JSON answer
     return LLMClient(LLMConfig.from_dict({**llm_config, "model": model, **extra,
@@ -263,8 +314,10 @@ def _client(llm_config: dict[str, Any], model: str, env_file: Path | None, **ext
 
 def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config: dict[str, Any],
           models: list[str], env_file: Path | None = None, screen: dict[str, Any] | None = None,
-          names: dict[str, str] | None = None, second: bool = True) -> dict[str, Any]:
-    """Accent the lines exactly as the engine will, then re-check guessed words and homographs."""
+          names: dict[str, str] | None = None, second: bool = True,
+          season: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Accent the lines exactly as the engine will, then re-check guessed words and homographs
+    (names and guessed words in ``season`` are taken from there, not asked)."""
     engine = build_engine({**engine_config, "normalization": {
         **engine_config.get("normalization", {}), "stress_dict": None}})
     items = [{"cue_id": str(i), "index": i, "text": join_lines(line.get("text"))} for i, line in enumerate(lines)]
@@ -279,6 +332,11 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
              "(%d sentences where the second placer disagrees) to check with %d models", len(lines), counts["guess"],
              counts["homograph"], counts["name"], counts["disputed"], sum(len(s.disputed) for s in suspects),
              len(models))
+    season = season or {}
+    known = [x for x in suspects if x.source in ("guess", "name") and x.word in season]
+    suspects = [x for x in suspects if x not in known]
+    if known:
+        log.info("stress: %d names and guessed words decided earlier in the season", len(known))
     clients = [_client(llm_config, model, env_file) for model in models]
     pairs = queries(suspects)
     screened: list[str | None] = [None] * len(pairs)
@@ -302,6 +360,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
     checked = set(todo)
     verdicts: dict[str, dict[str, Any]] = {}
     guessed: dict[str, str] = {}
+    new_words: dict[str, dict[str, Any]] = {}  # names and guessed words decided here, for the season
     sentences: dict[str, dict[str, str]] = {}
     for n, (s, context) in enumerate(pairs):
         votes = [a[n] for a in answers]
@@ -315,6 +374,16 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
             guessed[s.word] = corrected
         elif corrected:
             sentences.setdefault(context, {})[s.word] = corrected
+        if n in checked and s.source in ("guess", "name") and (stressed := decided(votes)):
+            new_words[s.word] = {"stressed": stressed, "source": s.source, "votes": dict(zip(models, votes)),
+                                 **({"name_en": s.name_en} if s.name_en else {})}
+    for s in known:
+        stressed = str(season[s.word]["stressed"])
+        verdicts[s.word] = {"word": s.word, "accented": s.accented, "source": s.source, "count": s.count,
+                            "variants": [], "contexts": [], "season": stressed,
+                            **({"name_en": s.name_en} if s.name_en else {})}
+        if stressed != s.accented and valid_stress(s, stressed):
+            guessed[s.word] = stressed
     return {
         "schema": "voiceover-stress-v3",
         "prompt_version": PROMPT_VERSION,
@@ -326,6 +395,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         "corrected": {"guess": sum(v["source"] == "guess" for k, v in verdicts.items() if k in guessed),
                       "name": sum(v["source"] == "name" for k, v in verdicts.items() if k in guessed),
                       "homograph_sentences": sum(len(v) for v in sentences.values())},
+        "season": {"used": len(known), "decided": new_words},
         "verdicts": list(verdicts.values()),
         "llm": {**stats, **{model: client.stats() for model, client in zip(models, clients)}},
     }
@@ -359,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-second", action="store_true", help="No second stress placer (silero-stress)")
     parser.add_argument("--names", type=Path, default=None,
                         help="Glossary JSON (stt.glossary): its people's names are checked in every case form")
+    parser.add_argument("--season", type=Path, default=None,
+                        help="<season>.stress.json: names / guessed words decided in earlier episodes (read and extended)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -371,8 +443,14 @@ def main(argv: list[str] | None = None) -> int:
     lines = json.loads(args.source.read_text(encoding="utf-8"))
     names = glossary_names(json.loads(args.names.read_text(encoding="utf-8"))) if args.names else None
     result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen, names=names,
-                   second=not args.no_second)
-    args.out.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+                   second=not args.no_second, season=load_season(args.season))
+    result["lines_sha256"] = lines_sha256(lines)
+    tmp = args.out.with_suffix(".tmp")  # engines of the other lane may be reading the old one
+    tmp.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    tmp.replace(args.out)
+    if args.season:
+        added = save_season(args.season, result["season"]["decided"], args.source.resolve().parent.name)
+        log.info("stress: %d words taken from %s, %d added to it", result["season"]["used"], args.season.name, added)
     log.info("stress: corrected %d guessed words, %d name forms, %d homographs in their sentences -> %s",
              result["corrected"]["guess"], result["corrected"]["name"], result["corrected"]["homograph_sentences"],
              args.out)

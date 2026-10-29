@@ -69,3 +69,39 @@ def test_second_placer_disagreements_mark_their_sentences() -> None:
     assert found["после"].source == "homograph" and found["после"].disputed == ["После всего."]
     assert found["пора"].source == "disputed" and found["пора"].contexts == ["Пора идти."]
     assert "всего" not in found and "идти" not in found
+
+
+def test_season_words_are_decided_once(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from voiceover import stress_check
+
+    assert stress_check.decided(["н+атали", "н+атали", None]) == "н+атали"
+    assert stress_check.decided(["н+атали", "натал+и", None]) is None  # no majority: asked again next episode
+
+    class Engine:
+        def prepare(self, items):  # noqa: ANN001
+            return [SimpleNamespace(tts_text=t) for t in ("Натал+и и Ал+ек.", "Натал+и тут.")]
+
+    engine = Engine()
+    engine._accentizer = SimpleNamespace(custom_dict={}, omographs={}, accents={"натали": "натал+и", "алек": "ал+ек"})
+    monkeypatch.setattr(stress_check, "build_engine", lambda config: engine)
+    asked: list[list[str]] = []
+
+    def ask(pairs, client):  # noqa: ANN001
+        asked.append([s.word for s, _ in pairs])
+        return [{"натали": "н+атали", "алек": "+алек"}[s.word] for s, _ in pairs]
+
+    monkeypatch.setattr(stress_check, "ask", ask)
+    monkeypatch.setattr(stress_check, "_client", lambda *a, **k: SimpleNamespace(stats=lambda: {}))
+    names = {"натали": "Natalie", "алек": "Alec"}
+    lines = [{"text": "Натали и Алек."}, {"text": "Натали тут."}]
+    season = {"натали": {"stressed": "н+атали", "source": "name"}}  # decided in an earlier episode
+    result = stress_check.check(lines, {}, {}, ["a", "b", "c"], names=names, second=False, season=season)
+    assert asked == [["алек"]] * 3  # only the new name goes to the three models
+    assert result["dictionary"] == {"алек": "+алек", "натали": "н+атали"}
+    assert set(result["season"]["decided"]) == {"алек"}
+    path = Path(tmp_path) / "S.stress.json"
+    assert stress_check.save_season(path, {"натали": {"stressed": "натал+и"}, **result["season"]["decided"]}, "E02") == 2
+    assert stress_check.save_season(path, {"натали": {"stressed": "н+атали"}}, "E03") == 0  # never replaced
+    assert stress_check.load_season(path)["натали"]["stressed"] == "натал+и"
