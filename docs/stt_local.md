@@ -282,6 +282,17 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   models on every sentence: S29E03 28 corrections (luna as the screener 24, everything 27; before
   28.10: 15) with 110 paid answers (luna 125, everything 325). The engines say the marked stress
   in 98.4-99.3% of words (TeraAnaly on S29E03), so the marks are what matters.
+- **A stress mark on every word (fixed 29.10).** RUAccent got the cues ten at a time as one string
+  (the list's repr, split at `[ ] , "`), the classic pipeline's way: it then read the pieces
+  between commas and quotes apart, glued the first word of a cue to the repr's quote ("'Это") and
+  marked almost nothing after an ellipsis, so 1.8-2.9% of the words with 2+ vowels reached the
+  engines with no stress (S51E01: 143 of 4950, among them Эрик and Алексис at a cue's start, which
+  the stress check had corrected) and each engine guessed. Now every cue goes alone
+  (`normalization.accent_per_cue`, default true), the pieces between ellipses apart, and words
+  RUAccent's stress-usage predictor leaves bare ("это", "или", "сразу", "слишком") get their
+  dictionary stress (`normalization.fill_stress`; not homographs, not after a stressed
+  one-syllable word: "н+е было"): S51E01 0.3%, S29E01 0.4%, S20E03 0.1% left, no slower. Episodes
+  voiced before keep their takes until re-voiced (`--force stress`).
 - **One stress per name for the season (since 29.10, `"season_stress": true`).** Names and guessed
   words that a majority of the models decided (a correction or RUAccent's stress confirmed) go to
   `<season>.stress.json` next to the season glossary, with the votes; later episodes take them from

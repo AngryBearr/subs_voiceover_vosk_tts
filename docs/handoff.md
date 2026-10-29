@@ -111,6 +111,17 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   with ESpeech and Vosk (its host lines and the stress listener on the GPU) together; alone
   TeraTTS's voice-over process peaked at 6.7 GB, ESpeech's two processes at ~5.1 GB.
 - The user's rule since 29.10: stability first, no re-voicing of S20 / S29 until the user says so.
+- **29.10 afternoon**: (1) the season cast from its Wikipedia article (`stt/cast.py`: a cast model
+  without `:online` reads the article the program fetched; the user's `llm.stages.cast` starts
+  with sol through the subscription, free; S51, S29, S20, Australian S10 found that way).
+  (2) A stress bug since the start: RUAccent got ten cues as one joined string, which left
+  1.8-2.9% of the words with no stress mark (the first word of most cues, corrected names at a
+  cue's start, words after "..."); the engines guessed them. Fixed (per cue, apart at ellipses,
+  dictionary stress for bare words): 0.1-0.4% left. Checked by the text of S51E01 / S29E01 / S20E03
+  and a 5-min S51E02 run in `output/stt_probe` (all three tracks, 0 of 311 words bare). S51E01's
+  finished video still has the old stress (re-voice: `stt.run <S51E01> --engine f5,teratts,vosk
+  --force stress`, the changed ~440 lines only). The user also heard wrong stresses where the
+  vote itself is wrong (S51E01 "Айовы": sol and Claude for +Айовы).
 - 318 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
 - Disk: `/home` 80 GB free after the cleanup of 29.10 (it was 22 GB).
 
