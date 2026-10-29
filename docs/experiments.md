@@ -18,6 +18,9 @@ What helps (in use), with the measurement that decided it:
 | TeraTTS female voice ru_f1+ru_f2 (28.10) | the user's choice by ear (ru_f1 alone sounded cartoonish) | roadmap §6 |
 | Stability: GPU out-of-memory retries, the subscription check before a run, UI warning | runs no longer die on a busy GPU or fall back to paid routers unnoticed | `docs/stt_local.md` |
 | One-command install, self-test, settings page, TTS cache cleanup (28-29.10) | not yet tried by a person on a clean machine | roadmap §5 |
+| Stress vote through the subscriptions: sol + gemini-4-argon + claude-haiku-5.5 of OpenCode Go (29.10) | S29E03, 164 sentences: the same 27 corrections as the paid trio; free, ~1 min per episode | `docs/stt_local.md`, Language models |
+| One stress per name for the season (29.10) | S29E01-E10: no name was stressed differently between episodes even without it; ~180 questions saved per season, hand fixes season-wide | `docs/stt_local.md` |
+| Vosk in a CPU lane beside the GPU engines, half the CPU threads (29.10) | 10-min piece, three engines: 25.4 -> 16.4 min (all cores for Vosk: 19.6 min) | `docs/stt_local.md` |
 
 Tried and dropped:
 
@@ -33,12 +36,12 @@ Tried and dropped:
 | Splitting a cluster into sub-voices | lost accuracy on S10 (narration and on-location voice split) |
 | The season cast from the web as naming evidence | no gain in names (kept for one spelling per person) |
 | Qwen3-ASR or MOSS-Transcribe-Diarize as a third fusion input | within the LLM's run-to-run spread |
+| deepseek-v4-pro, grok-4.7, kimi-k3.1-pro, glm-5.3 (OpenCode Go) as stress voters | as good or better than haiku (147/149 where the paid trio agreed) but 20+ min for 55 sentences (timeouts) |
 | Stress marks on one-syllable names | no change: short names like «Вэл» are misheard by the checking ASR, not misspoken |
 | Active speaker detection + faces | dropped by the user before testing (a dead end) |
 | Several clips per person by the line's mood (ESpeech) | dropped by the user: one voice per person is enough while some clusters still mix people |
 
-Not done yet (see `docs/roadmap.md`): one stress per name for the whole season, Vosk in parallel
-with the GPU engines, a separate voice for the host in the Vosk and TeraTTS tracks, re-voicing
+Not done yet (see `docs/roadmap.md`): the user's pick of the host's voice (`output/host_voices/`), re-voicing
 S20 and S29 with all of the above, finishing S29 (E11, E13-E15, missing tracks of E01-E08), a
 clean-machine test of `scripts/install.sh`, Vosk TTS 0.11 when it is out, RuVoice stress placer,
 Shmyrev's TTS metrics, words at speaker changes without a pause, newer diarization and

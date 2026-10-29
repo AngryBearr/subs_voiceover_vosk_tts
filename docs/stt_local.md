@@ -80,6 +80,17 @@ expired login is logged as a warning (the LLM steps then go through the paid rou
 middle of a run. A stage that runs out of GPU memory (another program on the card) is started
 again after a minute, up to twice; ASR with half the batch size.
 
+Several engines in one run: `stt.run ... --engine f5,teratts,vosk` (the UI does this) goes
+episode by episode. With `"parallel_cpu": true` in `voiceover` (default) Vosk, which synthesises
+on the CPU, runs in a second lane beside ESpeech and TeraTTS: the GPU lane makes an episode's
+shared stages (recognition, glossary, names, translation), then both lanes voice it, Vosk with half
+the CPU threads (ONNX Runtime sessions capped: on all cores it slowed ESpeech's own CPU work from
+7.5 to 12.3 min on a 10-min piece); the stress check, the review list and the finished video take
+turns. A 10-min test piece of S29E05 in all three engines, cold caches: 25.4 min one after the
+other, 19.6 min in two lanes without the CPU cap, 16.4 min with it (a third less; the speech check
+of the clips the same). The stress check is no longer redone for each engine (the lines are the
+same: `stress.json` records them).
+
 A run can be stopped at any time (Ctrl+C, or "Стоп" in the UI) and started again with the same
 command: finished episodes and stages are skipped, the recognition keeps its finished parts
 (each ASR model, alignment, OCR, diarization), and the voice-over keeps every line already
@@ -111,9 +122,20 @@ offers luna or sol). Personal settings go into `stt_config.local.json` next to `
 
 ```json
 {"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": "orcarouter",
-         "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "openrouter:google/gemini-4-argon"]}},
+         "stages": {"stress": ["openai/gpt-6.1-sol", "opencode:opencode-go/gemini-4-argon",
+                               "opencode:opencode-go/claude-haiku-5-5"]}},
  "ui": {"llm_transport_choice": true}}
 ```
+
+With an OpenCode Go subscription as well (`opencode auth login`, provider `opencode-go`), its
+models are named `opencode:opencode-go/<model>` (no paid fallback: the router has no such ids;
+a voter that does not answer is left out of the vote). The stress vote is then free: on S29E03's
+164 checked sentences sol + gemini-4-argon (OpenCode Go) + any third gave exactly the 27
+corrections of the paid trio (sol, claude-sonnet-5.5 by OrcaRouter, gemini-4-argon by
+OpenRouter), because sol and gemini agree on 162 of 164; gemini through OpenCode Go agreed with
+the paid trio wherever the three agreed (149 of 149). Third voters there: deepseek-v4-pro and
+grok-4.7 147/149 but over 20 min for 55 sentences (timeouts), kimi-k3.1-pro 140, glm-5.3 139,
+claude-haiku-5-5 118 in ~1 min: haiku, as it only breaks the rare sol / gemini ties.
 
 `ui.llm_transport_choice` shows the UI switch "Подписка (opencode) / API OpenRouter".
 
@@ -197,6 +219,12 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
 
 ## Voices, stress and the speech check
 
+- **The host's voice (since 29.10, `"host_voice"` in `voiceover`, e.g. `"ru_m1+eng_m3"`).** In the
+  Vosk and TeraTTS tracks the season cast's host (`role` "Host" in `<season>.cast.json`, else a
+  speaker card whose role says host) speaks with this TeraTTS voice, so he does not sound like the
+  male contestants; in the Vosk track his lines are TeraTTS clips (`teratts:<voice>`), as people
+  without a clip are in the ESpeech track. The ESpeech track keeps his own cloned voice. Off with
+  `null`; a change applies to episodes dubbed after it (`--force dub` for earlier ones).
 - **Engines.** Vosk (CPU, 4 workers; voices 49 female / 56 male) or TeraTTSv2 (GPU, ~0.35 s per
   line; ru_f1+ru_f2 / ru_m5: the female voice is an equal blend of ru_f1 and ru_f2 since 28.10,
   picked by ear: ru_f1 alone sounded cartoonish; any built-in voice or blend `a+b` works). Every line gets the voice of its speaker's gender;
@@ -241,6 +269,18 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   models on every sentence: S29E03 28 corrections (luna as the screener 24, everything 27; before
   28.10: 15) with 110 paid answers (luna 125, everything 325). The engines say the marked stress
   in 98.4-99.3% of words (TeraAnaly on S29E03), so the marks are what matters.
+- **One stress per name for the season (since 29.10, `"season_stress": true`).** Names and guessed
+  words that a majority of the models decided (a correction or RUAccent's stress confirmed) go to
+  `<season>.stress.json` next to the season glossary, with the votes; later episodes take them from
+  there without asking, so a name sounds the same in every episode. Words already in the file are
+  never replaced, so changing a word's `"stressed"` there by hand fixes it for the whole season
+  (the episodes voiced before need `--force stress`). Homographs stay per sentence. S29E01-E10
+  checked one by one (sol + OpenCode Go voters, ~1 min per episode, free): 73 names and guessed
+  words, 40 of them in several episodes, every one already stressed the same in all episodes (the
+  names check with the English original is stable), so the file changes no stress there; it saves
+  the ~180 later questions, holds if a vote wobbles and takes a season-wide hand fix. Fewer items
+  change how the rest are batched: 2 of 86 homograph votes of S29E02 came out differently (LLM
+  noise; one better: "за обе ст+ороны").
 - **Stress heard in the takes (since 28.10, `"listen_stress": true` in `voiceover`).** The words
   the stress check looked at (`stress.json`: names, homographs, guessed and disputed words) are
   heard in every take by TeraAnaly (`voiceover.stress_listen`); a take whose voice said another

@@ -1,4 +1,4 @@
-# Handoff (27.10.2026, updated 28.10 night)
+# Handoff (27.10.2026, updated 29.10)
 
 For the next agent working on this repository. Read `AGENTS.md` first, then `docs/stt_local.md`
 (how the pipeline works) and `docs/roadmap.md` (what comes next).
@@ -93,7 +93,11 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   `.bak`). `install.sh` was tested only up to its checks on this machine (running it whole would
   update the existing environments); `stt.selftest --quick` passes here. The "picture" idea
   (active speaker detection + faces) is dropped by the user.
-- 311 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
+- **29.10**: cleanup (`docs/experiments.md`), `voiceover.cache_clean`, the season stress file,
+  stress votes through OpenCode Go (the user's `stt_config.local.json`: sol + gemini-4-argon +
+  claude-haiku-5-5; the shared default stays OpenRouter), two lanes (`--engine f5,teratts,vosk`;
+  the UI does it), `host_voice` (not set yet: the user picks from `output/host_voices/`).
+- 317 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
 - Disk: `/home` 80 GB free after the cleanup of 29.10 (it was 22 GB).
 
 ## Working with this user

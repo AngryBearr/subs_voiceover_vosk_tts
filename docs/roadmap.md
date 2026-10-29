@@ -5,6 +5,23 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Next steps (29.10.2026)
+
+Done on 29.10: the cleanup (`docs/experiments.md`: what helped, what did not), the TTS cache
+cleanup command and UI buttons, one stress per name for the season (`<season>.stress.json`),
+the stress vote through the subscriptions (sol + gemini-4-argon and claude-haiku-5.5 of OpenCode
+Go: S29E03 the same 27 corrections as the paid trio), Vosk in a CPU lane beside the GPU engines
+(a 10-min piece in all three engines 25.4 -> 16.4 min), a TeraTTS voice for the host in the Vosk
+and TeraTTS tracks (8 candidates in `output/host_voices/` for the user to pick). Dropped by the
+user: several clips per person by the mood of the line (ESpeech; some clusters still mix people).
+
+1. **The host's voice**: the user picks one of `output/host_voices/*.wav`; then `host_voice` in
+   `stt_config.json`.
+2. **Re-voice S20 and S29 with all of it**, then finish S29 (E11, E13-E15, the missing tracks of
+   E01-E08), in two lanes. Afterwards `voiceover.cache_clean --delete` drops the old takes.
+3. Smaller: a clean-machine test of `scripts/install.sh`, Vosk 0.11 when it is out, newer
+   diarization / speaker-embedding models, the translation check only if it measurably helps.
+
 ## Next steps (28.10.2026, evening)
 
 Done on 28.10 (details in the sections below and in `docs/stt_local.md`): DiariZen v2 as the
