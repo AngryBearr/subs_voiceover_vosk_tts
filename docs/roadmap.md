@@ -5,6 +5,31 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan agreed 29.10.2026 (evening): stability of the speakers and the text, measured
+
+Measured without voicing, free (LLM steps through the subscription). Status kept here.
+
+1. **A measurement base**: S51E02-E05 recognised up to the speaker naming (`stt.run --until
+   speakers`), their AMZN SDH subtitles (speaker labels, ~350 a episode) in `output/s51_subs/`;
+   `stt.sdh_eval` on E01-E05. S51E01 baseline: diarization purity 66.3% (refined), labelled
+   cues on their person's main speaker 65.3%, ~76% voiced under the right name. - in progress
+2. **Speakers**: a newer speaker-embedding model (ReDimNet2) for the refinement (and the voice
+   bank if it helps), and a speaker-count hint from the season cast for the diarizer; each
+   against the base of step 1. - to do
+3. **ASR on the Demucs vocal stem** (Cohere + Whisper + fusion + alignment), WER against the
+   episodes' own English subtitles, against the plain audio. - to do
+4. **Number expansion**: ru-normalizr (MIT, pymorphy3) for numbers, our own rules for times,
+   letter abbreviations and number ranges ("3-4 года" -> "три-четыре года"); on 64 test phrases
+   rutextnorm made ~15 mistakes ("Мне 22 года" -> "двадцать второго года"), ru-normalizr 3 (the
+   ranges). - done 29.10: numbers by ru-normalizr sentence by sentence, ranges and "A или B" by
+   our rule, times / scores / letter abbreviations by rutextnorm as before; the 64 phrases right
+   (only the counting form changed: "пять килограмм"); `tests/test_voiceover_normalize.py`.
+
+Left out on purpose: DiCoW (only if step 2 shows the errors sit at speaker boundaries),
+Sortformer v2.1 / multitalker-parakeet (at most 4 speakers), the translation check (paid second
+model), The Amazing Race (after these), overlaps / chants / the crowd layer, short one-word lines,
+OCR details, Vosk with 8 processes (no gain: Vosk ends long before ESpeech).
+
 ## Next steps (29.10.2026)
 
 Done on 29.10: the cleanup (`docs/experiments.md`: what helped, what did not), the TTS cache

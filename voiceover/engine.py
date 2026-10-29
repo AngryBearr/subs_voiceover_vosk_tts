@@ -238,7 +238,8 @@ class VoskEngine:
                 **self.synth_identity(),
                 "normalization": {
                     "enabled": enabled,
-                    "expander": f"rutextnorm/{importlib.metadata.version('rutextnorm')}" if enabled else None,
+                    "expander": f"rutextnorm/{importlib.metadata.version('rutextnorm')}+ru-normalizr/"
+                                f"{importlib.metadata.version('ru-normalizr')}" if enabled else None,
                     "accent": f"ruaccent/{importlib.metadata.version('ruaccent')}" if enabled else None,
                     "punctuation_map": "vosk_text.normalize_vosk_text",
                     "prepare_version": 2,  # bump when the preparation code changes engine texts
