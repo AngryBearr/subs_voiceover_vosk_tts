@@ -118,7 +118,7 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   1.8-2.9% of the words with no stress mark (the first word of most cues, corrected names at a
   cue's start, words after "..."); the engines guessed them. Fixed (per cue, apart at ellipses,
   dictionary stress for bare words): 0.1-0.4% left. Checked by the text of S51E01 / S29E01 / S20E03
-  and a 5-min S51E02 run in `output/stt_probe` (all three tracks, 0 of 311 words bare). S51E01's
+  and a 5-min S51E02 run in its own folder (all three tracks, 0 of 311 words bare; deleted after). S51E01's
   finished video still has the old stress (re-voice: `stt.run <S51E01> --engine f5,teratts,vosk
   --force stress`, the changed ~440 lines only). The user also heard wrong stresses where the
   vote itself is wrong (S51E01 "Айовы": sol and Claude for +Айовы).
