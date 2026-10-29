@@ -5,6 +5,27 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan agreed 29.10.2026 (night): people merged, joined lines, audio LLMs
+
+1. **DiariZen's AHC threshold** (0.5 now): lower / higher, scored like step 2 below (S51E01-E05,
+   then S10). - to do
+2. **Where the speaker errors sit**: the share of wrong labelled lines inside a cue that joins two
+   people's words (SDH: two differently labelled lines in one cue), and a set of such joined places.
+   - done 29.10 (numbers in step 3)
+3. **Audio LLMs on OpenRouter** (models that transcribe and tell speakers apart) on those joined
+   places: the clip, the candidate speakers and our transcript in, who says what out; scored on
+   the SDH labels, the cost stated first. This sends audio out of the machine (only these test
+   clips). - in progress. Where the errors sit (step 2, done): of the 886 labelled lines 61.9%
+   right; of the wrong ones 67% next to one of our speaker changes (<= 1 s), 16% in a cue joining
+   two labelled people (45 such cues), 17% a whole turn on another voice.
+4. **New speaker diarization models on Hugging Face** (2026): what is there, what is worth a test. - done
+   29.10: nvidia/Nemotron-3-Diarization (Sept 2026, up to 8 speakers, OpenMDW licence: for short
+   windows, not whole episodes), BUT-FIT SE-DiCoW / DiCoW v3.3 (Whisper that transcribes each
+   speaker given DiariZen's output: the words at speaker changes), pyannote community-1 (in use as
+   the fallback); nothing that beats DiariZen v2 on whole episodes.
+5. **AGENTS.md** brought up to date (environments, RUAccent per cue, the new modules). - done 29.10
+6. **Re-voice S51E01** with the stress fix and the number fix (`--force stress`). - to do
+
 ## Plan agreed 29.10.2026 (evening): stability of the speakers and the text, measured
 
 Measured without voicing, free (LLM steps through the subscription). Status kept here.

@@ -32,19 +32,30 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
 
 ## 3. Окружения и основные пайплайны
 
-- **Окружения** (создание: `bash scripts/setup_envs.sh`):
+- **Окружения** (всё сразу: `bash scripts/install.sh`, проверка: `subs_env/bin/python -m stt.selftest`;
+    по отдельности: `bash scripts/setup_envs.sh`):
     - `subs_env` — всё: распознание (`stt/`), перевод, озвучка (`voiceover/`, Vosk, TeraTTS),
         проверка речи, Gradio, классические скрипты. Ставится из `requirements.txt` через uv с
         `overrides-onnxruntime.txt` (модуль `onnxruntime` даёт только `onnxruntime-gpu`).
-    - `stt_qwen_env` — необязательное, только для сравнений с Qwen3-ASR / Qwen3-ForcedAligner
-        (`qwen-asr` требует transformers 4.57); пайплайн по умолчанию его не использует.
+    - `f5_env` — `f5-tts` для озвучки клонированными голосами (ESpeech, `voiceover/f5_worker.py`).
+    - `diarizen_env` — DiariZen v2, разделение говорящих по умолчанию (код в `models/diarizen/repo`);
+        без него `stt.run` берёт pyannote.
+    - `stt_qwen_env` — необязательное, только для сравнений с Qwen3-ASR; удалено 29.10
+        (`bash scripts/setup_envs.sh qwen` создаёт заново); пайплайн его не использует.
+- **Настройки**: `stt_config.json` (общие, в git) и поверх него `stt_config.local.json` (личные, не в
+    git: модели через подписку, папки); `voiceover_config.json` — детали озвучки. Интерфейс:
+    `bash scripts/run_ui.sh` (вкладки «Обработка», «Банк голосов», «Проверка и правка реплик»,
+    «Настройки», «Справка»).
 - **Видео → русская озвучка целиком**:
     `subs_env/bin/python -m stt.run <видео или маска>` — английские субтитры со спикерами,
     глоссарий, имена, перевод под тайминг, сценарий озвучки, voiceover, проверка речи, микс.
     Настройки в `stt_config.json`, подробности в `docs/stt_local.md`.
 - **Озвучка готовых русских субтитров**: `uv run -m voiceover.pipeline run <subs.json> --out <dir>`
     (настройки в `voiceover_config.json`).
-- Ключи API (`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`) лежат в `.env`; никогда не выводить их.
+- **Правка реплик серии**: `corrections.json` в папке серии (интерфейс или `stt.subtitle_edit`
+    export/import для Subtitle Edit); повторный `stt.run` озвучивает заново только изменённые реплики.
+- Ключи API (`OPENROUTER_API_KEY`, `ORCAROUTER_API_KEY`, `DEEPSEEK_API_KEY`, токен HF) лежат в `.env`;
+    никогда не выводить их, как и токены opencode (`auth.json`).
 
 ## 4. Классический пайплайн SRT → JSON → RUNorm + RUAccent → Vosk → микс
 
@@ -75,6 +86,14 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
         `skip_regex=r"[\[\],\"]"` и последующим `ast.literal_eval`.
     - При ошибке парсинга строковый результат разбивается fallback-ом на
         поэлементную обработку, длина списка сохраняется.
+    - Озвучка (`voiceover/engine.py`) так не делает: склеенная строка оставляла без ударения
+        2-3% слов (первое слово реплики, слова после многоточия). Там каждая реплика идёт отдельно
+        (`ruaccent_pass(per_cue=True)`, части между многоточиями отдельно), словам без ударения
+        ставится словарное (`fill_dictionary_stress`), ударение, поставленное человеком (`зам+ок`),
+        главнее всех (`keep_user_stress`). CLI `utils.text_normalizer` по умолчанию оставляет
+        склейку; `--accent-per-cue` включает новый способ.
+    - Числа в озвучке (`voiceover/normalize.py`) читает `ru-normalizr` (падеж по контексту),
+        диапазоны «3-4 года» — своё правило, время, счёт и аббревиатуры — `rutextnorm`.
 
 - **JSON → Vosk TTS (синтез)**
     - Точка входа: `synthesize.synthesize_cli`.
@@ -139,7 +158,8 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
     - Использовать существующий контекстный менеджер вида
         `_ForceCPUProviders` (или аналог) для принудительного CPU;
         **не** патчить `Model.__init__` и не создавать модель до входа в
-        контекст.
+        контекст. Число потоков ONNX Runtime ограничивает так же устроенный
+        `_LimitThreads` (Vosk рядом с ESpeech на видеокарте: `VOICEOVER_CPU_THREADS`).
 
 ## 7. Стиль кода, модульность и переиспользование
 
