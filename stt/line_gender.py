@@ -88,11 +88,15 @@ def main(argv: list[str] | None = None) -> int:
         from stt.voice import AgeGenderEstimator
 
         audio = read_wav(args.folder / "audio.wav")
+        source = args.folder / "source.json"  # a test piece: audio.wav starts at its "start" (seconds)
+        offset_ms = float(load_json(source).get("start") or 0.0) * 1000 if source.exists() else 0.0
         estimator = AgeGenderEstimator(device=args.device)
         estimator.load()
         for cue in todo:
-            piece = audio[int(cue["start"] / 1000 * SAMPLE_RATE):int(min(cue["end"], cue["start"] + MAX_MS) / 1000
-                                                                      * SAMPLE_RATE)]
+            begin, end = cue["start"] - offset_ms, min(cue["end"], cue["start"] + MAX_MS) - offset_ms
+            piece = audio[max(0, int(begin / 1000 * SAMPLE_RATE)):max(0, int(end / 1000 * SAMPLE_RATE))]
+            if len(piece) < SAMPLE_RATE // 2:
+                continue
             _, probs = estimator.predict(piece.astype(np.float32))
             adult = probs[:2] / max(float(probs[:2].sum()), 1e-9)
             p_female[cue["index"]] = round(float(adult[0]), 3)
