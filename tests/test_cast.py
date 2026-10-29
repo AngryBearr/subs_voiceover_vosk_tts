@@ -71,7 +71,7 @@ def test_check_speakers_keeps_name_over_quoted_nickname() -> None:
 
 
 def test_find_cast_falls_back_to_the_next_model(monkeypatch: Any) -> None:
-    answers = {"a": RuntimeError("refused"), "b": {"cast": [{"name": "X"}]}, "c": CAST}
+    answers = {"a:online": RuntimeError("refused"), "b:online": {"cast": [{"name": "X"}]}, "c:online": CAST}
 
     def fake_fetch(client: Any, folder: str, file: str, heard: list[str]) -> dict[str, Any]:
         answer = answers[client]
@@ -81,9 +81,53 @@ def test_find_cast_falls_back_to_the_next_model(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(cast_module, "OpenRouterClient", lambda model, reasoning=None: model)
     monkeypatch.setattr(cast_module, "fetch_cast", fake_fetch)
-    found = find_cast(["a", "b", "c"], "Season 29", "ep.mkv", [])
-    assert found["model"] == "c" and len(found["failed"]) == 2
+    found = find_cast(["a:online", "b:online", "c:online"], "Season 29", "ep.mkv", [])
+    assert found["model"] == "c:online" and len(found["failed"]) == 2
     import pytest
 
     with pytest.raises(RuntimeError, match="no model found the cast"):
-        find_cast(["a", "b"], "Season 29", "ep.mkv", [])
+        find_cast(["a:online", "b:online"], "Season 29", "ep.mkv", [])
+    monkeypatch.setattr(cast_module, "wiki_cast", lambda client, *args: {**CAST, "model": client, "usage": {}})
+    assert find_cast(["a:online", "opencode:openai/gpt-6.1-sol"], "Season 29", "ep.mkv", [])["model"] \
+        == "opencode:openai/gpt-6.1-sol"  # no ":online": the Wikipedia article
+
+
+class _Client:
+    """Answers the three Wikipedia steps in turn and records the prompts."""
+
+    def __init__(self, answers: list[dict[str, Any]]) -> None:
+        self.answers, self.prompts, self.model = answers, [], "opencode:openai/gpt-6.1-sol"
+        self.usage = OpenRouterClient("opencode:x").usage
+
+    def chat_json(self, system: str, user: str) -> dict[str, Any]:
+        self.prompts.append(user)
+        return self.answers.pop(0)
+
+
+def _wiki(params: dict[str, Any]) -> dict[str, Any]:
+    if params["action"] == "query":
+        hits = {"Survivor 51": ["Survivor 51", "List of Survivor (American TV series) contestants"],
+                "Survivor season 51": ["Survivor 51"]}[params["srsearch"]]
+        return {"query": {"search": [{"title": t, "snippet": "<b>Survivor</b> season"} for t in hits]}}
+    assert params == {"action": "parse", "page": "Survivor 51", "prop": "wikitext", "redirects": 1}
+    return {"parse": {"title": "Survivor 51", "wikitext": {
+        "*": "==Contestants==\nAna Sani<ref name=\"a\">{{cite web|url=x}}</ref> and Devin Way<ref name=\"b\"/>"}}}
+
+
+def test_wiki_cast_searches_picks_and_reads_the_article() -> None:
+    client = _Client([{"queries": ["Survivor 51", "Survivor season 51"]}, {"title": "Survivor 51"},
+                      {"show": "Survivor", "season": "51", "cast": [{"name": "Ana Sani"}, {"name": "Devin Way"}, {}]}])
+    found = cast_module.wiki_cast(client, "Season_51", "Survivor.S51E01.mkv", ["Devin"], wiki=_wiki)
+    assert [p["name"] for p in found["cast"]] == ["Ana Sani", "Devin Way"]
+    assert found["sources"] == ["https://en.wikipedia.org/wiki/Survivor_51"]
+    assert "- List of Survivor (American TV series) contestants:" in client.prompts[1]  # hits listed once each
+    assert client.prompts[1].count("- Survivor 51:") == 1
+    assert "Ana Sani and Devin Way" in client.prompts[2] and "cite web" not in client.prompts[2]  # no references
+
+
+def test_wiki_cast_fails_without_the_seasons_article() -> None:
+    import pytest
+
+    client = _Client([{"queries": ["Survivor 51"]}, {"title": None}])
+    with pytest.raises(RuntimeError, match="no Wikipedia article"):
+        cast_module.wiki_cast(client, "Season_51", "Survivor.S51E01.mkv", [], wiki=_wiki)

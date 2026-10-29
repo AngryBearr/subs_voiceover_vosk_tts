@@ -245,6 +245,14 @@ class RunTest(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertIn("openrouter:openai/gpt-6-luna:online,openrouter:anthropic/claude-haiku-5.5:online", calls[0])
             ep.cast.unlink()
+            ep.config = {**ep.config, "llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"],
+                                              "router": ["orcarouter", "openrouter"], "stages": {"cast": [
+                                                  "openai/gpt-6.1-sol", "openai/gpt-6-luna:online"]}}}
+            with mock.patch("stt.cast.main", side_effect=fake_main):
+                self.assertTrue(ep._find_cast())
+            self.assertIn("opencode+orcarouter+openrouter:openai/gpt-6.1-sol,openrouter:openai/gpt-6-luna:online",
+                          calls[1])  # the subscription reads Wikipedia; web search only by OpenRouter
+            ep.cast.unlink()
             with mock.patch("stt.cast.main", side_effect=RuntimeError("no web")):
                 self.assertFalse(ep._find_cast())  # a failed lookup is only a warning
             ep.config = {"cast": {"enabled": False}}
@@ -316,6 +324,9 @@ class RunTest(unittest.TestCase):
         no_fallback = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
             "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "fallback": False}})
         self.assertEqual(no_fallback.llm("fuse"), "opencode:openai/gpt-6-luna")
+        self.assertEqual(chain.route("openai/gpt-6-luna:online"), "openrouter:openai/gpt-6-luna:online")  # web search
+        self.assertEqual(chain.route("openrouter:anthropic/claude-haiku-5.5:online"),
+                         "openrouter:anthropic/claude-haiku-5.5:online")
 
     def test_opencode_falls_back_to_the_paid_router(self) -> None:
         from unittest import mock

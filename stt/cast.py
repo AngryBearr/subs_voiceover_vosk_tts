@@ -1,9 +1,23 @@
 """The cast of a season from the web: names, spelling, gender and relations of everyone who speaks.
 
-A cheap LLM with web search (OpenRouter ":online", another vendor's model if it fails) reads the show and season off the folder and
-file names, once per season (``<out-root>/<folder>.cast.json``). The glossary takes the cast's
-spellings, the speaker naming gets the cast as evidence, and after naming every speaker is
-checked against it (``check_speakers``):
+Once per season (``<out-root>/<folder>.cast.json``) a model reads the show and season off the folder
+and file names and lists the cast from one of two sources, per model of ``--model`` (tried in
+order, the next one when one fails or refuses):
+
+- a model id ending in ``:online`` searches the web itself (OpenRouter's web search; the shared
+  default: gpt-6-luna, Claude Haiku if it fails);
+- any other model gets the English Wikipedia article of the season: it names up to three
+  searches, picks the article among the hits, and lists the cast from the article's text (the
+  program fetches the pages; the model never browses). Through the OpenCode login of a
+  subscription this costs nothing. gpt-6.1-sol this way (29.10, 3 requests, 20-30 s a season):
+  S51 (fall 2026, after the model's training) the same 21 castaways + host as the web search;
+  S29 the same 19 ("Dale Wentworth" where the web search wrote "Bradley "Dale" Wentworth"); S20
+  the same 21 + the 6 loved ones of the family visit; Australian Survivor S10 "Heroes V Villains",
+  24 + host. A gender the article does not give is left out (S51 Ori Jean-Charles; the web search
+  said female, the voice says male).
+
+The glossary takes the cast's spellings, the speaker naming gets the cast as evidence, and after
+naming every speaker is checked against it (``check_speakers``):
 
 - a name that is another spelling of a cast member's name becomes the cast's spelling ("John
   Misch" -> "Jon Misch"); nicknames stay as they are;
@@ -25,12 +39,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
+import urllib.parse
+import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from stt.llm import OpenRouterClient
 from stt.runner import load_json, save_json
+from utils.llm_route import split_route
 
 log = logging.getLogger("stt.cast")
 
@@ -57,12 +76,74 @@ def fetch_cast(client: OpenRouterClient, folder_name: str, file_name: str, heard
             "sources": answer.get("sources") or [], "model": client.model, "usage": client.usage.to_dict()}
 
 
+WIKI_API = "https://en.wikipedia.org/w/api.php"
+WIKI_CHARS = 60000  # article text given to the model (a season article without references: 20-40k)
+WIKI_FIND_PROMPT = """You find the English Wikipedia article about one season of a TV show.
+The user gives the video folder and file names (they name the show and season). Give up to three
+Wikipedia search queries, the most likely first; the article's exact title if you know it
+("Survivor: San Juan del Sur", "Australian Survivor: Heroes V Villains"), else the title such
+articles usually have ("Survivor 51"). Answer JSON only: {"queries": ["...", ...]}"""
+WIKI_PICK_PROMPT = """You pick the English Wikipedia article about one season of a TV show.
+The user gives the video folder and file names and the hits of a Wikipedia search (title: snippet).
+Answer JSON only: {"title": "<exact title of the season's own article>"} or {"title": null} when no
+hit is that season's article (a list of contestants or the show's main article is not)."""
+WIKI_CAST_PROMPT = SYSTEM_PROMPT.replace(
+    "Use web search.",
+    "Use the Wikipedia article the user gives (wikitext); list only people it names, gender from\n"
+    "the article (pronouns) or from the name when clear.").replace(
+    ', "sources": ["<url>", ...]}', "}")
+
+
+def _wiki_get(params: dict[str, Any]) -> dict[str, Any]:
+    url = WIKI_API + "?" + urllib.parse.urlencode({**params, "format": "json"})
+    request = urllib.request.Request(url, headers={"User-Agent": "subs-voiceover-stt/1.0 (season cast lookup)"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def article_text(wikitext: str, limit: int = WIKI_CHARS) -> str:
+    """Wikitext without references and comments (most of an article's size), cut to ``limit``."""
+    text = re.sub(r"<!--.*?-->", "", wikitext, flags=re.S)
+    text = re.sub(r"<ref[^>/]*/>", "", text)
+    text = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.S)
+    return text[:limit]
+
+
+def wiki_cast(client: OpenRouterClient, folder_name: str, file_name: str, heard: list[str],
+              wiki: Callable[[dict[str, Any]], dict[str, Any]] = _wiki_get) -> dict[str, Any]:
+    """The cast from the season's Wikipedia article: the model names searches, picks the hit, reads it."""
+    names = f"Folder: {folder_name}\nFile: {file_name}"
+    queries = [str(q) for q in (client.chat_json(WIKI_FIND_PROMPT, names).get("queries") or []) if q][:3]
+    hits: dict[str, str] = {}
+    for query in queries:
+        for hit in wiki({"action": "query", "list": "search", "srsearch": query, "srlimit": 5})["query"]["search"]:
+            hits.setdefault(hit["title"], re.sub(r"<[^>]+>", "", hit.get("snippet", "")))
+    if not hits:
+        raise RuntimeError(f"no Wikipedia hits for {queries}")
+    listing = "\n".join(f"- {title}: {snippet}" for title, snippet in hits.items())
+    title = client.chat_json(WIKI_PICK_PROMPT, f"{names}\nHits:\n{listing}").get("title")
+    if title not in hits:
+        raise RuntimeError(f"no Wikipedia article of the season among {list(hits)}")
+    page = wiki({"action": "parse", "page": title, "prop": "wikitext", "redirects": 1})["parse"]
+    prompt = (f"{names}\nNames heard: {', '.join(heard) or '-'}\n\nWikipedia article "
+              f"\"{page['title']}\":\n{article_text(page['wikitext']['*'])}")
+    answer = client.chat_json(WIKI_CAST_PROMPT, prompt)
+    cast = [p for p in (answer.get("cast") or []) if isinstance(p, dict) and p.get("name")]
+    url = "https://en.wikipedia.org/wiki/" + urllib.parse.quote(page["title"].replace(" ", "_"))
+    return {"show": answer.get("show"), "season": answer.get("season"), "cast": cast, "sources": [url],
+            "model": client.model, "usage": client.usage.to_dict()}
+
+
 def find_cast(models: list[str], folder_name: str, file_name: str, heard: list[str]) -> dict[str, Any]:
-    """The first answer with a real cast; a failure or refusal moves on to the next model."""
+    """The first answer with a real cast; a failure or refusal moves on to the next model.
+
+    A model id ending in ``:online`` searches the web itself; any other reads the Wikipedia article.
+    """
     errors = []
     for model in models:
         try:
-            cast = fetch_cast(OpenRouterClient(model, reasoning="low"), folder_name, file_name, heard)
+            lookup = fetch_cast if split_route(model)[1].endswith(":online") else wiki_cast
+            cast = lookup(OpenRouterClient(model, reasoning="low"), folder_name, file_name, heard)
         except Exception as error:  # noqa: BLE001 - the next model may answer
             errors.append(f"{model}: {error}"[:300])
             log.warning("cast: %s failed: %s", model, error)
@@ -123,11 +204,12 @@ def check_speakers(speakers: list[dict[str, Any]], cast: dict[str, Any]) -> list
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Find the cast of a season on the web (once per season)")
+    parser = argparse.ArgumentParser(description="Find the cast of a season (web search or Wikipedia, once per season)")
     parser.add_argument("folder", type=Path, help="Episode output folder (its source.json names the video)")
     parser.add_argument("--cast", type=Path, required=True, help="Season cast JSON to write (kept if it exists)")
     parser.add_argument("--model", default=",".join(DEFAULT_MODELS),
-                        help="Models with web search, comma-separated: the next one if one fails or refuses")
+                        help="Models, comma-separated, the next one if one fails or refuses: ids ending in "
+                             "':online' search the web, others read the season's Wikipedia article")
     parser.add_argument("--force", action="store_true", help="Look up again even if the cast file exists")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)

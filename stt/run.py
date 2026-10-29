@@ -133,16 +133,18 @@ class Episode:
         llm = self.config.get("llm") or {"model": self.config.get("llm_model", "openai/gpt-6-luna")}
         stages = llm.get("stages") or {}
         model = stages[stage] if stages.get(stage) is not None else llm["model"]
-        patterns = llm.get("opencode") or []
+        return [self.route(m) for m in model] if isinstance(model, list) else self.route(model)
+
+    def route(self, name: str) -> str:
+        """A model id with its route (``llm``): see ``llm()``; web search (``:online``) is OpenRouter's."""
+        llm = self.config.get("llm") or {}
+        if name.endswith(":online"):
+            return with_route(name, ["openrouter"])
         router = llm.get("router", "openrouter")
         routers = [router] if isinstance(router, str) else list(router)
-
-        def route(name: str) -> str:
-            if any(fnmatch.fnmatchcase(name, p) for p in patterns):
-                return with_route(name, ["opencode", *routers] if llm.get("fallback", True) else ["opencode"])
-            return with_route(name, routers)
-
-        return [route(m) for m in model] if isinstance(model, list) else route(model)
+        if any(fnmatch.fnmatchcase(name, p) for p in llm.get("opencode") or []):
+            return with_route(name, ["opencode", *routers] if llm.get("fallback", True) else ["opencode"])
+        return with_route(name, routers)
 
     def stamp(self, stage: str) -> Path:
         """Marks when a stage last finished (per engine for the engine's stages)."""
@@ -236,7 +238,7 @@ class Episode:
         return self.voice_bank.with_name(self.voice_bank.name.replace(".voices.json", ".cast.json"))
 
     def _find_cast(self) -> bool:
-        """Look the season's cast up once (cheap LLM with web search); a failure only costs the evidence."""
+        """Look the season's cast up once (web search or the Wikipedia article); a failure only costs the evidence."""
         cfg = self.config.get("cast") or {}
         if not cfg.get("enabled", True):
             return False
@@ -244,9 +246,9 @@ class Episode:
             from stt import cast
 
             models = (self.config.get("llm") or {}).get("stages", {}).get("cast") or cast.DEFAULT_MODELS
+            models = [models] if isinstance(models, str) else models
             try:
-                cast.main([str(self.out), "--cast", str(self.cast), "--model",
-                           ",".join([models] if isinstance(models, str) else models)])
+                cast.main([str(self.out), "--cast", str(self.cast), "--model", ",".join(self.route(m) for m in models)])
             except Exception as error:  # noqa: BLE001 - names still come from the transcript and the voices
                 log.warning("[%s] cast lookup failed: %s", self.media.stem, error)
         return self.cast.exists()

@@ -131,6 +131,12 @@ This is the user's own setup since 29.10: OpenAI models (sol for every single-mo
 the subscription, other models through OrcaRouter, OpenRouter only where OrcaRouter does not work
 or lacks the model (gemini-4-argon; web search `:online` of the cast lookup is OpenRouter's only).
 A router that answers 404 (no such model) hands over to the next one at once, without retries.
+The season's cast (`llm.stages.cast`, once per season): a model id ending in `:online` searches
+the web (OpenRouter only; the shared default luna, then Claude Haiku, ~$0.02); any other model
+reads the season's English Wikipedia article, which the program finds and fetches for it, so the
+user's `"cast": ["openai/gpt-6.1-sol", "openrouter:openai/gpt-6-luna:online", ...]` costs nothing
+and falls back to the web search only when Wikipedia has no article (`stt/cast.py`: S51, S29,
+S20, Australian S10 found that way).
 
 With an OpenCode Go subscription as well (`opencode auth login`, provider `opencode-go`), its
 models are named `opencode:opencode-go/<model>` (no paid fallback: the router has no such ids;
