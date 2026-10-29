@@ -242,6 +242,8 @@ class VoskEngine:
                     "accent": f"ruaccent/{importlib.metadata.version('ruaccent')}" if enabled else None,
                     "punctuation_map": "vosk_text.normalize_vosk_text",
                     "prepare_version": 2,  # bump when the preparation code changes engine texts
+                    **({"accent_per_cue": True} if self.normalization.get("accent_per_cue", True) else {}),
+                    **({"fill_stress": True} if self.normalization.get("fill_stress", True) else {}),
                     **({"keep_input_yo_homographs": True} if self.normalization.get("keep_input_yo_homographs")
                        else {}),
                     **({"stress_dict_sha256": _sha256_text(json.dumps(self._stress_dict(), ensure_ascii=False,
@@ -306,6 +308,7 @@ class VoskEngine:
         from voiceover.normalize import expand, space_after_ellipsis
         self._load_accentizer()
         batch_size = int(self.normalization.get("batch_size", 10))
+        per_cue = bool(self.normalization.get("accent_per_cue", True))  # the joined batch drops stress marks
         expanded: list[dict[str, Any] | None] = []
         errors: list[str | None] = []
         notes: list[tuple[str, ...]] = []
@@ -326,13 +329,14 @@ class VoskEngine:
             chunk = pending[offset:offset + batch_size]
             rows = [expanded[index] for index in chunk]
             try:
-                out = ruaccent_pass(rows, self._accentizer, batch_size=len(rows))  # type: ignore[arg-type]
+                out = ruaccent_pass(rows, self._accentizer, batch_size=len(rows), per_cue=per_cue)  # type: ignore[arg-type]
                 for index, row in zip(chunk, out):
                     accented[index] = join_lines(row["text"])
             except Exception:  # noqa: BLE001 - retry one by one to isolate the failing cue
                 for index in chunk:
                     try:
-                        out = ruaccent_pass([expanded[index]], self._accentizer, batch_size=1)  # type: ignore[list-item]
+                        out = ruaccent_pass([expanded[index]], self._accentizer, batch_size=1,  # type: ignore[list-item]
+                                            per_cue=per_cue)
                         accented[index] = join_lines(out[0]["text"])
                     except Exception as exc:  # noqa: BLE001
                         errors[index] = f"RUAccent: {exc}"[:300]
@@ -352,6 +356,9 @@ class VoskEngine:
                     from voiceover.normalize import keep_yo_spelling
                     text = keep_yo_spelling(expanded[index]["_normalized_text"], text,  # type: ignore[index]
                                             self._accentizer.yo_homographs, self._accentizer.accents)
+                if self.normalization.get("fill_stress", True):
+                    from utils.text_normalizer import fill_dictionary_stress
+                    text = fill_dictionary_stress(text, self._accentizer.accents, self._accentizer.omographs)
                 text = normalize_vosk_text(text)
                 sentence_fixes = self._stress_dict().get("sentences")
                 if sentence_fixes:

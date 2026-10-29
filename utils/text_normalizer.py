@@ -188,14 +188,66 @@ def runorm_pass(
     return normalized_items
 
 
+_ELLIPSIS_RE = re.compile(r"(\.{3}|…)")
+_LETTER_RE = re.compile(r"[^\W\d_]")
+
+
+def accent_cue(accentizer: RUAccent, text: str) -> str:
+    """RUAccent on one cue; the pieces between ellipses go alone: after "..." RUAccent stresses
+    almost nothing ("Это... стр+ашно" came out "+Это... страшно", "около... тридцати часов")."""
+    return "".join(accentizer.process_all(part) if _LETTER_RE.search(part) and not _ELLIPSIS_RE.fullmatch(part)
+                   else part for part in _ELLIPSIS_RE.split(text))
+
+
+_WORD_RE = re.compile(r"[А-Яа-яЁё+]+")
+_VOWELS = set("аеёиоуыэюяАЕЁИОУЫЭЮЯ")
+
+
+def fill_dictionary_stress(text: str, accents: Dict[str, str], omographs: Dict[str, Any]) -> str:
+    """The dictionary stress for words RUAccent left unmarked (its stress-usage predictor drops it
+    on words said weakly: "это", "или", "сразу", "слишком"), so no TTS engine guesses them.
+
+    Homographs stay unmarked, and so does a word after a stressed one-syllable word: the stress
+    moved there ("н+е было", "н+а пол").
+    """
+    out: List[str] = []
+    last = 0
+    previous = ""
+    for match in _WORD_RE.finditer(text):
+        word = match.group()
+        out.append(text[last:match.start()])
+        last = match.end()
+        key = word.lower()
+        form = accents.get(key) if sum(ch in _VOWELS for ch in word) >= 2 and "+" not in word \
+            and "ё" not in key and key not in omographs else None
+        moved = "+" in previous and sum(ch in _VOWELS for ch in previous) == 1
+        if form and form.count("+") == 1 and form.replace("+", "") == key and not moved:
+            position = form.index("+")
+            word = word[:position] + "+" + word[position:]
+        out.append(word)
+        previous = word
+    out.append(text[last:])
+    return "".join(out)
+
+
 def ruaccent_pass(
     subtitles: List[Dict[str, Any]],
     accentizer: RUAccent,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    per_cue: bool = False,
 ) -> List[Dict[str, Any]]:
     """Только RUAccent: берёт _normalized_text, ставит ударения и записывает в text.
 
     Ожидает, что в элементах есть поле _normalized_text (как после runorm_pass).
+
+    By default a batch goes to RUAccent as one string (the list's repr, split at ``[ ] , "``).
+    ``per_cue``: every cue on its own instead (``accent_cue``, also apart at ellipses). The joined
+    string loses stress: RUAccent then reads the pieces between commas and quotes apart, and the
+    first word of a cue is glued to the repr's quote ("'Это"); on S51E01 2.9% of the words with 2+
+    vowels came out with no stress at all (the first word of most cues, names the stress check had
+    corrected, "только", "племя"), per cue 1.6%, per cue and apart at ellipses 1.4% (mostly words
+    RUAccent's stress-usage predictor leaves unstressed: "это", "или", "сразу"; for TTS
+    ``fill_dictionary_stress`` gives those their dictionary stress: 0.3% left).
     """
     items = [dict(it) for it in subtitles]
     if any(not isinstance(it.get("_normalized_text"), str) for it in items):
@@ -205,13 +257,15 @@ def ruaccent_pass(
         batch = items[i : i + batch_size]
         batch_texts = [it.get("_normalized_text", "") for it in batch]
 
-        batch_string = str(batch_texts)
-        processed_batch_string = accentizer.process_all(batch_string, skip_regex=r"[\[\],\"]")
-
-        try:
-            processed_texts = ast.literal_eval(processed_batch_string)
-        except (SyntaxError, ValueError):
-            processed_texts = [accentizer.process_all(t) for t in batch_texts]
+        if per_cue:
+            processed_texts = [accent_cue(accentizer, t) for t in batch_texts]
+        else:
+            batch_string = str(batch_texts)
+            processed_batch_string = accentizer.process_all(batch_string, skip_regex=r"[\[\],\"]")
+            try:
+                processed_texts = ast.literal_eval(processed_batch_string)
+            except (SyntaxError, ValueError):
+                processed_texts = [accentizer.process_all(t) for t in batch_texts]
 
         if (not isinstance(processed_texts, list) or len(processed_texts) != len(batch)
                 or any(not isinstance(text, str) for text in processed_texts)):
@@ -239,13 +293,15 @@ def normalize_and_accent_subtitles(
     accentizer: RUAccent,
     batch_size: int = DEFAULT_BATCH_SIZE,
     separator: str = DEFAULT_SEPARATOR,
+    per_cue: bool = False,
 ) -> List[Dict[str, Any]]:
     """Полный пайплайн: RUNorm -> RUAccent, возвращает новый список сабов.
 
     text всегда заменяется на список из одной строки, остальные поля не трогаются.
+    ``per_cue``: RUAccent on every cue alone (see ``ruaccent_pass``).
     """
     normalized_items = runorm_pass(subtitles, normalizer)
-    return ruaccent_pass(normalized_items, accentizer, batch_size=batch_size)
+    return ruaccent_pass(normalized_items, accentizer, batch_size=batch_size, per_cue=per_cue)
 
 
 def normalize_json_file(
@@ -255,6 +311,7 @@ def normalize_json_file(
     separator: str = DEFAULT_SEPARATOR,
     norm_device: str = "cpu",
     accent_device: str = "CUDA",
+    per_cue: bool = False,
 ) -> None:
     with open(input_path, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
@@ -267,6 +324,7 @@ def normalize_json_file(
         accentizer,
         batch_size=batch_size,
         separator=separator,
+        per_cue=per_cue,
     )
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -296,6 +354,13 @@ if __name__ == "__main__":
         help="Device for RUNorm",
     )
 
+    parser.add_argument(
+        "--accent-per-cue",
+        dest="per_cue",
+        action="store_true",
+        help="RUAccent on every cue alone (slower; the joined batch leaves some words without stress)",
+    )
+
     args = parser.parse_args()
 
     normalize_json_file(
@@ -305,4 +370,5 @@ if __name__ == "__main__":
         separator=args.separator,
         norm_device=args.norm_device,
         accent_device=args.accent_device,
+        per_cue=args.per_cue,
     )
