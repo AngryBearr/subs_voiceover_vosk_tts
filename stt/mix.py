@@ -86,9 +86,12 @@ def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: f
 
 
 def encode_track(wav: Path, out: Path, bitrate: str = "192k") -> None:
-    """A mixed WAV as an AAC track (``.m4a``): a tenth of the size, muxed into videos without re-encoding."""
+    """A mixed WAV as an AAC track (``.m4a``): a tenth of the size, muxed into videos without re-encoding.
+    The file appears only when complete (another engine's lane may be muxing the episode's video)."""
+    partial = out.with_name(out.stem + ".partial" + out.suffix)
     subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(wav), "-c:a", "aac",
-                    "-b:a", bitrate, str(out)], check=True)
+                    "-b:a", bitrate, str(partial)], check=True)
+    partial.replace(out)
 
 
 def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path | None, start: float = 0.0,
