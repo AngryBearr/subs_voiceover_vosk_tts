@@ -21,6 +21,9 @@ What helps (in use), with the measurement that decided it:
 | Stress vote through the subscriptions: sol + gemini-4-argon + claude-haiku-5.5 of OpenCode Go (29.10) | S29E03, 164 sentences: the same 27 corrections as the paid trio; free, ~1 min per episode | `docs/stt_local.md`, Language models |
 | One stress per name for the season (29.10) | S29E01-E10: no name was stressed differently between episodes even without it; ~180 questions saved per season, hand fixes season-wide | `docs/stt_local.md` |
 | Vosk in a CPU lane beside the GPU engines, half the CPU threads (29.10) | 10-min piece, three engines: 25.4 -> 16.4 min (all cores for Vosk: 19.6 min) | `docs/stt_local.md` |
+| Stress mark on every word: RUAccent per cue, apart at ellipses, dictionary stress for bare words (29.10) | words reaching the engines with no stress 1.8-2.9% -> 0.1-0.4% (S51E01, S29E01, S20E03); corrected names at a cue's start now stressed | `docs/stt_local.md` |
+| Numbers by ru-normalizr + a range rule (29.10) | 64 subtitle-like phrases: ~15 wrong -> 0 ("Мне 22 года", "около 3-4 лет"); the dubbing translations write numbers in words (4 of 18003 lines had digits) | `voiceover/normalize.py` |
+| Season cast from Wikipedia through the subscription (29.10) | free; S51, S29, S20, Australian S10 as complete as the paid web search | `stt/cast.py` |
 
 Tried and dropped:
 
@@ -30,6 +33,9 @@ Tried and dropped:
 | Seed-VC: TeraTTS converted into the heroes' voices | a strong English accent by ear (the user) |
 | Accent-free cloning in general | dropped by the user: stress and pronunciation matter more than a slight accent |
 | DiariZen on the Demucs vocal stem | no gain over the plain audio |
+| ASR on the Demucs vocal stem (29.10) | S51E01-E05 against the AMZN subtitles, WER: fusion 13.84% plain vs 14.04% vocals, Cohere 17.94 / 17.61, Whisper 15.78 / 16.01; no gain where the music is loud either |
+| ReDimNet2-B6 (PalabraAI, VoxCeleb2 or + VoxBlink2) instead of ResNet293 for the refinement (29.10) | S51E01-E05 (886 SDH-labelled lines), the whole naming chain: lines on their person 62.0% -> 63.1%, people merged 44 -> 34 of 103, under the right name 65.8% -> 66.5%; but Australian S10 (5 episodes, 334 lines): 61.1% -> 59.9-60.5%, merged 37 -> 39. Not a gain that holds; kept as `--refine-speakers redimnet2-b6[-vb2]` |
+| A speaker-count hint from the season cast for DiariZen (29.10) | nothing to gain: DiariZen's VBx clustering ignores the speaker count (`min/max/num_clusters` "not used" in its code); only the instantaneous count is capped |
 | TeraTTS teacher sampler | no change (0.49% vs 0.52%, same lost words and speed) |
 | Moving lines by the season voice bank | S10 names 63.6% before and after; 2 of 4 labelled moves wrong |
 | Trusting a line's own voice over its speaker's known gender | the gender model is often the one that is wrong (shouting men heard as women) |

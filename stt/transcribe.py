@@ -28,6 +28,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from stt.refine_speakers import REDIMNET2, WESPEAKER
 from stt.runner import load_json, save_json
 
 log = logging.getLogger("stt.transcribe")
@@ -298,7 +299,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-speakers", type=int, default=None)
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--gender-threshold", type=float, default=0.7, help="Min confidence, else 'unknown'")
-    parser.add_argument("--refine-speakers", default="none", choices=["none", "resnet293", "pyannote"],
+    parser.add_argument("--refine-speakers", default="none", choices=["none", "pyannote", *WESPEAKER, *REDIMNET2],
                         help="Re-assign diarized turns that sound clearly like another speaker (stt.refine_speakers)")
     parser.add_argument("--refine-margin", type=float, default=0.1,
                         help="How much closer to the other speaker a turn must sound to move")

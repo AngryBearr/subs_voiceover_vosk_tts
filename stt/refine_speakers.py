@@ -36,6 +36,14 @@ WESPEAKER: dict[str, tuple[str, str]] = {
     "resnet293": ("Wespeaker/wespeaker-voxceleb-resnet293-LM", "WeSpeakerResNet293"),
 }
 
+# ReDimNet2 (PalabraAI, MIT, torch.hub, pinned commit; weights of the v1.0.0 release): B6 0.29 / 0.52 / 0.99% EER on
+# VoxCeleb1-O/E/H with 12M parameters (WeSpeaker ResNet293: ~0.45 / 0.66 / 1.18%, 28M)
+REDIMNET2_REPO = "PalabraAI/redimnet2:c5bbe0b76e37df698c403f8844e41304ceab6307"  # the vb2 weights need code after v1.0.0
+REDIMNET2: dict[str, dict[str, str]] = {
+    "redimnet2-b6": {"model_name": "b6", "train_type": "lm"},  # VoxCeleb2
+    "redimnet2-b6-vb2": {"model_name": "b6", "train_type": "lm", "dataset": "vb2+vox2_v0"},  # + VoxBlink2
+}
+
 Embed = Callable[[np.ndarray], np.ndarray]
 
 
@@ -64,7 +72,27 @@ class WespeakerTorch:
         return vector / (np.linalg.norm(vector) + 1e-9)
 
 
+class ReDimNet2Torch:
+    """ReDimNet2 from torch.hub: 16 kHz audio -> unit embedding (192 values)."""
+
+    def __init__(self, name: str, device: str = "cuda") -> None:
+        import torch
+
+        model = torch.hub.load(REDIMNET2_REPO, "redimnet2", pretrained=True, trust_repo=True, **REDIMNET2[name])
+        self.model = model.to(device).eval()
+        self.device = device
+        self._torch = torch
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        wav = self._torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))[None].to(self.device)
+        with self._torch.inference_mode():
+            vector = self.model(wav)[0].float().cpu().numpy()
+        return vector / (np.linalg.norm(vector) + 1e-9)
+
+
 def make_embedder(name: str, device: str = "cuda") -> Embed:
+    if name in REDIMNET2:
+        return ReDimNet2Torch(name, device)
     if name == "pyannote":
         from stt.voice_bank import SegmentEmbedder
 

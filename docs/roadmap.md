@@ -12,12 +12,18 @@ Measured without voicing, free (LLM steps through the subscription). Status kept
 1. **A measurement base**: S51E02-E05 recognised up to the speaker naming (`stt.run --until
    speakers`), their AMZN SDH subtitles (speaker labels, ~350 a episode) in `output/s51_subs/`;
    `stt.sdh_eval` on E01-E05. S51E01 baseline: diarization purity 66.3% (refined), labelled
-   cues on their person's main speaker 65.3%, ~76% voiced under the right name. - in progress
+   cues on their person's main speaker 65.3%, ~76% voiced under the right name. - done 29.10: E01-E05
+   (886 labelled lines): on their person's main speaker 62.0%, 44 of 103 people merged with
+   another, 65.7% voiced under the right name (E02 the worst: 56.8%, 13 of 21 merged).
 2. **Speakers**: a newer speaker-embedding model (ReDimNet2) for the refinement (and the voice
    bank if it helps), and a speaker-count hint from the season cast for the diarizer; each
-   against the base of step 1. - to do
+   against the base of step 1. - done 29.10, no default changed: ReDimNet2-B6 + VoxBlink2 (margin
+   0.05) on S51 62.0% -> 63.1%, merged 44 -> 34, names 65.8% -> 66.5%, but on Australian S10
+   61.1% -> 59.9-60.5% (merged 37 -> 39): within the noise of a few lines. The count hint does
+   nothing: DiariZen's VBx ignores the speaker count. `docs/experiments.md`.
 3. **ASR on the Demucs vocal stem** (Cohere + Whisper + fusion + alignment), WER against the
-   episodes' own English subtitles, against the plain audio. - to do
+   episodes' own English subtitles, against the plain audio. - done 29.10, dropped: fusion WER
+   13.84% plain vs 14.04% on the vocal stem (S51E01-E05).
 4. **Number expansion**: ru-normalizr (MIT, pymorphy3) for numbers, our own rules for times,
    letter abbreviations and number ranges ("3-4 года" -> "три-четыре года"); on 64 test phrases
    rutextnorm made ~15 mistakes ("Мне 22 года" -> "двадцать второго года"), ru-normalizr 3 (the

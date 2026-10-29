@@ -161,25 +161,26 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   the user re-logs with `opencode auth login`.
 - Reference subtitles of S20 run 0.5-3 s early, stepping at ad breaks: compare texts, not times.
 - Old repacks can have damaged video packets (S20E06): OCR now skips them.
+- A wait loop `until ... ! pgrep -f "<pattern>"` never ends: pgrep finds the waiting shell itself,
+  whose command line holds the pattern. Wait on a file the job writes at its end instead.
+- Folder names with spaces ("...RAWR(Not Here to Get a Pedicure)", S51E05): never pass them
+  through an unquoted `$(ls ...)` list.
 
 ## Next steps (updated 29.10)
 
 Everything planned is in `docs/roadmap.md`. The user's rule: stability first, single test
 episodes, no re-voicing of S20 / S29 until the user calls it stable.
 
-1. Speaker stability, measured: S51 (AMZN WEB-DL) has SDH subtitles with ~350 speaker labels per
-   episode (`stt.sdh_eval`); S51E01 baseline: labelled lines on their person's main speaker 65.3%
-   (cues), diarization purity 66.3% refined, 2 people merged; the labelled lines voiced under the
-   right person's name ~76%. Candidates: a newer speaker-embedding model for the refinement and the
-   voice bank, a speaker-count hint from the cast, words at speaker boundaries.
-2. ASR on the Demucs vocal stem (never measured; diarization on it was, no gain).
-3. The number expansion of `voiceover.normalize` (rutextnorm) inflects wrongly: "Прошло 3 года" ->
-   "третьего года", "3-4 года" -> "трёхчетвёртого года", "с 10 часов" -> "с десять"; the dubbing
-   translations write numbers in words (4 of 18003 lines had digits), the voice-over of ready
-   Russian subtitles does not.
-4. S29 when the user says so: Vosk / TeraTTS for E05-E10, ESpeech for E01, E02, E04, then
+1. Speaker stability (the plan of 29.10 evening in `docs/roadmap.md`, steps 1-4 done): S51E01-E05
+   recognised up to the naming in `output/stt`, their AMZN subtitles with SDH speaker labels in
+   `output/s51_subs/` (`stt.sdh_eval`, `stt.refine_speakers.sdh_score`). Base: 62.0% of 886
+   labelled lines on their person's main speaker, 44 of 103 people merged, 65.7% under the right
+   name. ReDimNet2 did not give a gain that holds on S10 too; ASR on the vocal stem no gain;
+   numbers fixed (ru-normalizr). Next candidates: DiariZen's AHC threshold (people merged), words
+   at speaker changes (DiCoW), the naming step itself (65.7% names vs 62.0% clusters).
+2. S29 when the user says so: Vosk / TeraTTS for E05-E10, ESpeech for E01, E02, E04, then
    E11, E13-E15; S20E02 / E03 in cloned voices.
-5. A clean-machine test of `scripts/install.sh` by a person; Vosk TTS 0.11 when it is out.
+3. A clean-machine test of `scripts/install.sh` by a person; Vosk TTS 0.11 when it is out.
 
 Open question to the user: the branch `origin/feat/developing-subtitle-shortening-skills` has 27
 commits not in `develop`; keep or delete?
