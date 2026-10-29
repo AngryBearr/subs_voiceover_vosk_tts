@@ -94,10 +94,24 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   update the existing environments); `stt.selftest --quick` passes here. The "picture" idea
   (active speaker detection + faces) is dropped by the user.
 - **29.10**: cleanup (`docs/experiments.md`), `voiceover.cache_clean`, the season stress file,
-  stress votes through OpenCode Go (the user's `stt_config.local.json`: sol + gemini-4-argon +
-  claude-haiku-5-5; the shared default stays OpenRouter), two lanes (`--engine f5,teratts,vosk`;
-  the UI does it), `host_voice` (not set yet: the user picks from `output/host_voices/`).
-- 317 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
+  two lanes (`--engine f5,teratts,vosk`; the UI does it), `host_voice` `eng_m3+eng_m4` (picked by
+  the user). The user's LLM rule (`stt_config.local.json`): a step with one model, sol or luna,
+  goes through OpenCode; other models through OrcaRouter; OpenRouter only where OrcaRouter fails or
+  lacks the model (gemini-4-argon, web search for the cast). OpenCode Go voters were tried and
+  rejected by the user. Stress voters: sol + claude-sonnet-5.5 (OrcaRouter) + gemini-4-argon
+  (OpenRouter); the shared default stays OpenRouter.
+- **S51** (`output/stt`, videos in the user's `Season_51` folder: read only): E01 (86 min, the
+  new season's first episode: cast from the web, glossary, voice bank and clips from scratch) in
+  one detached run of `stt.run ... --engine f5,teratts,vosk`, 1 h 31 min, no failure, nothing done
+  by hand: recognition 15 min, LLM steps 7 min, stress check 3 min, ESpeech 46 min with Vosk
+  alongside (20 min), TeraTTS 10 min, checks and mixing ~5 min per track. Speech check: ESpeech
+  1.06%, TeraTTS 0.82%, Vosk 0.95% character errors; 37 lines in the review list. Cristian Chavez
+  and Ana Sani got no clean clip (TeraTTS voices in the ESpeech track); Ori Jean-Charles: voice
+  and text say male, the web cast female (kept male, by design). GPU memory: peak 11.2 of 16 GB
+  with ESpeech and Vosk (its host lines and the stress listener on the GPU) together; alone
+  TeraTTS's voice-over process peaked at 6.7 GB, ESpeech's two processes at ~5.1 GB.
+- The user's rule since 29.10: stability first, no re-voicing of S20 / S29 until the user says so.
+- 318 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
 - Disk: `/home` 80 GB free after the cleanup of 29.10 (it was 22 GB).
 
 ## Working with this user

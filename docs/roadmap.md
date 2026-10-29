@@ -15,10 +15,12 @@ Go: S29E03 the same 27 corrections as the paid trio), Vosk in a CPU lane beside 
 and TeraTTS tracks (8 candidates in `output/host_voices/` for the user to pick). Dropped by the
 user: several clips per person by the mood of the line (ESpeech; some clusters still mix people).
 
-1. **The host's voice**: the user picks one of `output/host_voices/*.wav`; then `host_voice` in
-   `stt_config.json`.
-2. **Re-voice S20 and S29 with all of it**, then finish S29 (E11, E13-E15, the missing tracks of
-   E01-E08), in two lanes. Afterwards `voiceover.cache_clean --delete` drops the old takes.
+1. ~~**The host's voice**~~: the user picked `eng_m3+eng_m4` (29.10), now the default `host_voice`.
+2. **Stability first** (the user, 29.10): no re-voicing of S20 / S29 and no big batches until the
+   user calls the pipeline stable; single test episodes meanwhile. S51E01 (86 min, new season, all
+   three engines in two lanes) ran on its own in 1 h 31 min without a failure (`docs/handoff.md`).
+   Then re-voice S20 and S29 and finish S29 (E11, E13-E15, the missing tracks of E01-E08);
+   afterwards `voiceover.cache_clean --delete` drops the old takes.
 3. Smaller: a clean-machine test of `scripts/install.sh`, Vosk 0.11 when it is out, newer
    diarization / speaker-embedding models, the translation check only if it measurably helps.
 
