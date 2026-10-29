@@ -8,14 +8,19 @@ The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `mod
 ## Plan agreed 29.10.2026 (night): people merged, joined lines, audio LLMs
 
 1. **DiariZen's AHC threshold** (0.5 now): lower / higher, scored like step 2 below (S51E01-E05,
-   then S10). - to do
+   then S10). - stopped by the user 30.10 before the S10 check. S51E01-E05 after the refinement:
+   0.5 (now) 63.4% / 45 of 101 merged; 0.4 64.5% / 45; 0.3 59.5% / 62; 0.5 with Fb 0.6 62.7% / 39.
 2. **Where the speaker errors sit**: the share of wrong labelled lines inside a cue that joins two
    people's words (SDH: two differently labelled lines in one cue), and a set of such joined places.
    - done 29.10 (numbers in step 3)
 3. **Audio LLMs on OpenRouter** (models that transcribe and tell speakers apart) on those joined
    places: the clip, the candidate speakers and our transcript in, who says what out; scored on
    the SDH labels, the cost stated first. This sends audio out of the machine (only these test
-   clips). - in progress. Where the errors sit (step 2, done): of the 886 labelled lines 61.9%
+   clips). - done 30.10, no gain: on the 45 joined places (121 labelled lines) our pipeline 45.5%
+   right, gemini-4-argon 45.5%, gpt-audio-mini 41.3%, gemini-3.8-flash 44.0% (12 broken answers),
+   qwen3.8-omni-flash 36.4% (too slow, stopped); $0.64 in all. A third of those lines: the right
+   person is not among the speakers our pipeline has nearby (merged into another voice), so no
+   choice can fix them. Where the errors sit (step 2, done): of the 886 labelled lines 61.9%
    right; of the wrong ones 67% next to one of our speaker changes (<= 1 s), 16% in a cue joining
    two labelled people (45 such cues), 17% a whole turn on another voice.
 4. **New speaker diarization models on Hugging Face** (2026): what is there, what is worth a test. - done
@@ -24,7 +29,7 @@ The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `mod
    speaker given DiariZen's output: the words at speaker changes), pyannote community-1 (in use as
    the fallback); nothing that beats DiariZen v2 on whole episodes.
 5. **AGENTS.md** brought up to date (environments, RUAccent per cue, the new modules). - done 29.10
-6. **Re-voice S51E01** with the stress fix and the number fix (`--force stress`). - to do
+6. **Re-voice S51E01** with the stress fix and the number fix (`--force stress`). - not started (the user stopped the plan)
 
 ## Plan agreed 29.10.2026 (evening): stability of the speakers and the text, measured
 
