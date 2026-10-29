@@ -51,6 +51,8 @@ SETTINGS: list[Setting] = [
     Setting(("paths", "finished"), "Папка готовых видео", "folder", "Папки", nullable=True,
             info="Видео кладутся в подпапку STT_<сезон>; пусто: в папку серии"),
     Setting(("ui", "engines"), "Движки, отмеченные при запуске", "engines", "Запуск", ENGINES),
+    Setting(("voiceover", "parallel_cpu"), "Vosk одновременно с TeraTTS и ESpeech (Vosk на процессоре)", "bool",
+            "Запуск"),
     Setting(("mode",), "Распознавание", "choice", "Распознавание", MODES),
     Setting(("diarizer",), "Кто когда говорит", "choice", "Распознавание",
             {"DiariZen v2 (точнее; окружение diarizen_env)": "diarizen-v2",
@@ -66,6 +68,8 @@ SETTINGS: list[Setting] = [
     Setting(("llm", "stages", "stress_screen"), "Модель первого отсева ударений", "choice", "Языковые модели",
             {"luna": "openai/gpt-6-luna", "Sol": "openai/gpt-6.1-sol"}),
     Setting(("voiceover", "stress_check"), "Проверять ударения (три языковые модели)", "bool", "Озвучка"),
+    Setting(("voiceover", "season_stress"), "Одно ударение имени на весь сезон (файл <сезон>.stress.json)", "bool",
+            "Озвучка"),
     Setting(("voiceover", "listen_stress"), "Слушать ударения в дублях (имена, омографы) и переозвучивать неверные",
             "bool", "Озвучка"),
     Setting(("voiceover", "speech_check"), "Проверять речь озвучки распознаванием", "bool", "Озвучка"),
@@ -76,6 +80,8 @@ SETTINGS: list[Setting] = [
     Setting(("voiceover", "engines", "teratts", "voices", "female"), "TeraTTS: женский голос", "voice", "Озвучка",
             info="Голос или смесь двух: ru_f1+ru_f2"),
     Setting(("voiceover", "engines", "teratts", "voices", "male"), "TeraTTS: мужской голос", "voice", "Озвучка"),
+    Setting(("voiceover", "host_voice"), "Голос ведущего в дорожках Vosk и TeraTTS (TeraTTS)", "voice", "Озвучка",
+            info="Пусто: ведущий говорит мужским голосом дорожки. В дорожке героев у него свой голос", nullable=True),
     Setting(("voiceover", "engines", "f5", "fallback"), "ESpeech: голос людей без образца", "choice", "Озвучка",
             {"Голоса TeraTTS (выше)": "teratts", "Клон голоса Vosk": "vosk"}),
     Setting(("voiceover", "engines", "f5", "nfe"), "ESpeech: качество", "choice", "Озвучка",
@@ -92,7 +98,8 @@ SETTINGS: list[Setting] = [
 ]
 
 FALLBACKS: dict[tuple[str, ...], Any] = {("line_gender",): True, ("review",): True, ("ui", "engines"): ["vosk"],
-                                         ("voiceover", "listen_stress"): True}
+                                         ("voiceover", "listen_stress"): True, ("voiceover", "season_stress"): True,
+                                         ("voiceover", "parallel_cpu"): True}
 
 
 def teratts_styles() -> set[str]:
@@ -174,6 +181,8 @@ def from_form(setting: Setting, value: Any) -> Any:
     text = str(value or "").strip()
     if setting.kind == "voice":
         known = teratts_styles()
+        if not text and setting.nullable:
+            return None
         parts = text.split("+") if text else []
         if not parts or len(parts) > 2 or any(part not in known for part in parts):
             raise ValueError(f"«{setting.label}»: голос TeraTTS ({', '.join(sorted(known))}) или смесь двух через +")

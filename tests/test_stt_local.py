@@ -863,3 +863,60 @@ class SelftestTest(unittest.TestCase):
             checks.append(selftest.Check("d", broken))
             self.assertEqual(selftest.main([]), 1)
         self.assertEqual(ran, ["ok", "ok", "ok"])
+
+
+class LanesTest(unittest.TestCase):
+    def test_vosk_runs_beside_the_gpu_engines_after_the_shared_stages(self) -> None:
+        import argparse
+        import threading
+        from unittest import mock
+
+        from stt import run
+
+        self.assertEqual(run.lanes(["f5", "teratts", "vosk"], True), [["f5", "teratts"], ["vosk"]])
+        self.assertEqual(run.lanes(["f5", "vosk"], False), [["f5", "vosk"]])
+        self.assertEqual(run.lanes(["vosk"], True), [["vosk"]])
+        calls: list[tuple[str, str, str]] = []
+        lock = threading.Lock()
+
+        class FakeEpisode:
+            def __init__(self, media, out_root, args, config, lock=None):  # noqa: ANN001
+                self.media, self.args = media, args
+
+            def run(self) -> None:
+                with lock:
+                    calls.append((self.media.name, self.args.engine, self.args.until))
+
+        args = argparse.Namespace(engine="f5,vosk", until="mix")
+        with mock.patch.object(run, "Episode", FakeEpisode):
+            run.run_lanes([Path("e1.mkv"), Path("e2.mkv")], Path("out"), args, {}, ["f5", "vosk"])
+        for media in ("e1.mkv", "e2.mkv"):
+            mine = [c for c in calls if c[0] == media]
+            self.assertEqual(mine[0], (media, "f5", "translate"))  # the GPU lane does the shared stages first
+            self.assertEqual(sorted(mine[1:]), [(media, "f5", "mix"), (media, "vosk", "mix")])
+
+
+class StressStageTest(unittest.TestCase):
+    def test_another_engine_with_the_same_lines_keeps_the_stress_check(self) -> None:
+        import argparse
+        import json
+
+        from stt.run import STAGES, Episode
+        from voiceover.stress_check import lines_sha256
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(season_glossary=None, force=None, engine="vosk", until="mix", start=None)
+            episode = Episode(Path(tmp) / "S" / "e1.mkv", Path(tmp) / "work", args, {"voiceover": {}})
+            (episode.out / ".stages").mkdir(parents=True)
+            lines = [{"text": ["Привет."]}]
+            (episode.out / "dub.ru.vosk.json").write_text(json.dumps(lines), encoding="utf-8")
+            (episode.out / "stress.json").write_text(json.dumps({"lines_sha256": lines_sha256(lines)}), encoding="utf-8")
+            for mark in ("stress", "dub.vosk"):  # the engine's script is newer than the check
+                (episode.out / ".stages" / mark).touch()
+            episode.forced_from = STAGES.index("stress")  # set by the dub stage that just ran
+            self.assertFalse(episode.needed("stress", [episode.out / "stress.json"], "dub"))
+            (episode.out / "dub.ru.vosk.json").write_text(json.dumps([{"text": ["Пока."]}]), encoding="utf-8")
+            self.assertTrue(episode.needed("stress", [episode.out / "stress.json"], "dub"))
+            episode.args.force = "stress"
+            (episode.out / "dub.ru.vosk.json").write_text(json.dumps(lines), encoding="utf-8")
+            self.assertTrue(episode.needed("stress", [episode.out / "stress.json"], "dub"))

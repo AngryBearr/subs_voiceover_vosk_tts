@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from utils.vosk_text import normalize_vosk_text
 
@@ -123,19 +123,55 @@ class _ForceCPUProviders:
         return False
 
 
+class _LimitThreads:
+    """Context manager: ONNX Runtime sessions created inside use at most ``threads`` threads each.
+
+    vosk_tts builds its own ``SessionOptions``; ORT ignores OMP_NUM_THREADS and takes every physical
+    core per session, so several synthesis processes next to the GPU engines starve them.
+    """
+
+    def __init__(self, threads: int | None) -> None:
+        self.threads = threads
+
+    def __enter__(self):
+        if not self.threads:
+            return self
+        import onnxruntime as ort
+
+        self._ort = ort
+        self._prev = ort.SessionOptions
+        threads, base = int(self.threads), ort.SessionOptions
+
+        def limited() -> Any:
+            options = base()
+            options.intra_op_num_threads = threads
+            options.inter_op_num_threads = 1
+            return options
+
+        ort.SessionOptions = limited  # type: ignore[assignment,misc]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if hasattr(self, "_prev"):
+            self._ort.SessionOptions = self._prev  # type: ignore[misc]
+        return False
+
+
 def create_synth(
     model_path: str,
     device: str = "cpu",
+    threads: int | None = None,
 ) -> Synth:
     """Create and return a Synth instance with proper provider handling.
 
-    This centralizes device/provider selection so it can be reused in batch flows.
+    This centralizes device/provider selection so it can be reused in batch flows. ``threads``
+    caps the CPU threads of each ONNX session (None: ONNX Runtime's default, every physical core).
     """
     model_dir = Path(model_path)
     device = (device or "cpu").lower()
 
     if device in ("cpu",):
-        with _ForceCPUProviders():
+        with _ForceCPUProviders(), _LimitThreads(threads):
             model = Model(model_path=str(model_dir))
     elif device in ("cuda", "gpu"):
         try:

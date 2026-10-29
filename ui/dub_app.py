@@ -96,24 +96,19 @@ def job_config(mode: str, model: str, subtitles: bool, duck_voices: bool, stress
 
 
 def _run(job: Job) -> None:
-    """The job's thread: stt.run once per engine, logging into one file."""
+    """The job's thread: one stt.run for all engines (Vosk next to the GPU engines, ``stt.run``)."""
     with job.log_path.open("ab") as log_file:
-        for engine in job.engines:
-            job.engine = engine
-            cmd = [sys.executable, "-m", "stt.run", *map(str, job.files), "--out-root", str(job.out_root),
-                   "--config", str(job.config_path), "--engine", engine, *job.extra]
-            log_file.write(f"\n=== {time.strftime('%H:%M:%S')} {engine}: {' '.join(cmd)}\n".encode())
-            log_file.flush()
-            job.process = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT,
-                                           start_new_session=True)
-            code = job.process.wait()
-            if job.state == "остановлено":
-                break
-            if code != 0:
-                job.state = f"ошибка ({engine}, код {code}): смотрите лог"
-                break
-        else:
-            job.state = "готово"
+        engines = ",".join(job.engines)
+        job.engine = engines
+        cmd = [sys.executable, "-m", "stt.run", *map(str, job.files), "--out-root", str(job.out_root),
+               "--config", str(job.config_path), "--engine", engines, *job.extra]
+        log_file.write(f"\n=== {time.strftime('%H:%M:%S')} {engines}: {' '.join(cmd)}\n".encode())
+        log_file.flush()
+        job.process = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT,
+                                       start_new_session=True)
+        code = job.process.wait()
+        if job.state != "остановлено":
+            job.state = "готово" if code == 0 else f"ошибка (код {code}): смотрите лог"
     job.finished = time.time()
 
 
@@ -161,8 +156,10 @@ def stop_job() -> str:
         return "Остановлено. Готовые этапы сохранены: следующий запуск продолжит с места остановки."
 
 
-def _current_stage(job: Job, stem: str, log_tail: str) -> str | None:
-    found = re.findall(rf"\[{re.escape(stem)}\] (\w+) \.\.\.", log_tail)
+def _current_stage(job: Job, stem: str, log_tail: str, engine: str) -> str | None:
+    """The stage the log last started for this episode: a shared one, or this engine's."""
+    found = [stage for stage, who in re.findall(rf"\[{re.escape(stem)}\] (\w+)(?: \((\w+)\))? \.\.\.", log_tail)
+             if who in ("", engine)]
     return found[-1] if found else None
 
 
@@ -174,12 +171,12 @@ def progress_rows(job: Job | None) -> list[list[str]]:
     for media in job.files:
         stages_dir = job.out_root / media.stem / ".stages"
         row = [media.stem]
-        current = _current_stage(job, media.stem, tail) if job.state == "идёт" else None
         for engine in job.engines:
+            current = _current_stage(job, media.stem, tail, engine) if job.state == "идёт" else None
             done = [s for s in STAGES if (stages_dir / (f"{s}.{engine}" if s in ENGINE_STAGES else s)).exists()]
             if "mix" in done and result_file(job, media, engine):
                 cell = "✅ готово"
-            elif current and engine == job.engine:
+            elif current:  # a shared stage counts for every engine of the episode
                 cell = f"⏳ {len(done)}/{len(STAGES)}: {STAGE_RU.get(current, current)}"
             else:
                 cell = f"{len(done)}/{len(STAGES)}"

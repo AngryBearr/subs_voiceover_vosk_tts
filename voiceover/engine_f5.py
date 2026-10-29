@@ -29,16 +29,14 @@ from typing import Any
 
 import numpy as np
 
-from dataclasses import replace
-
-from voiceover.engine import PreparedText, SynthResult, VoskEngine, _sha256_file, cache_key, postprocess_wav
+from voiceover.engine import (TERATTS, PreparedText, SynthResult, VoskEngine, _sha256_file, cache_key,
+                              postprocess_wav)
 from voiceover.stress_listen import listened
 from voiceover.text import syllables
 
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TERATTS = "teratts:"  # a voice spoken by TeraTTS instead of cloned by F5
 FALLBACK_TEXT = "Сегодня на острове снова жарко, и всех ждёт непростое испытание. Посмотрим, кто справится лучше."
 
 
@@ -125,16 +123,6 @@ class F5Engine(VoskEngine):
         """The clip's path and content: another clip under the same name is another voice."""
         return voice if voice.startswith(TERATTS) else voice_id(clip_path(voice))
 
-    def _teratts_engine(self) -> Any:
-        if self._teratts is None:
-            from voiceover.engine_teratts import TeraTTSEngine
-
-            self._teratts = TeraTTSEngine({"voice": "ru_m5", "device": self.device, "trim": dict(self.trim),
-                                           "listen_stress": self.listen_stress,
-                                           "normalization": self.normalization,  # the stress words to hear
-                                           **self.teratts_config})
-        return self._teratts
-
     def _voice(self, row: PreparedText) -> str:  # type: ignore[override]
         return self.voice if row.voice is None else str(row.voice)
 
@@ -143,16 +131,8 @@ class F5Engine(VoskEngine):
         return max(0.6, syllables(text) / (self.target_syl_per_sec * self.base_rate) + 0.25)
 
     def synthesize_many(self, prepared: list[PreparedText], cache_dir: Path, workers: int = 1) -> list[SynthResult]:
-        spoken = [row for row in prepared if self._voice(row).startswith(TERATTS)]
-        if spoken:  # people without a clip: TeraTTS voices, the rest cloned by F5
-            tera = self._teratts_engine()
-            by_tera = tera.synthesize_many([replace(row, voice=self._voice(row)[len(TERATTS):]) for row in spoken],
-                                           cache_dir)
-            cloned = self._synthesize_f5([row for row in prepared if not self._voice(row).startswith(TERATTS)],
-                                         cache_dir)
-            done = {r.cue_id: r for r in [*by_tera, *cloned]}
-            return [done[row.cue_id] for row in prepared]
-        return self._synthesize_f5(prepared, cache_dir)
+        # people without a clip: TeraTTS voices, the rest cloned by F5
+        return self._with_teratts(prepared, cache_dir, lambda rows: self._synthesize_f5(rows, cache_dir))
 
     def _synthesize_f5(self, prepared: list[PreparedText], cache_dir: Path) -> list[SynthResult]:
         if not prepared:

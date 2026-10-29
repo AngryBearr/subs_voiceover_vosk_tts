@@ -25,6 +25,11 @@ overrides it), `season` the season's files (glossary, cast, voice bank and voice
 `work`), `finished` the finished videos in a sub-folder per season (default: each episode's folder).
 `mix.tracks`: "combined" puts every voice-over finished so far into one video as its own audio
 track (`mix.track_order` first, the first is the default track), "separate" writes a video per engine.
+
+Several engines (`--engine f5,teratts,vosk`) run episode by episode; with `voiceover.parallel_cpu`
+(default) Vosk, which synthesises on the CPU, runs in a second lane next to the GPU engines: it
+starts an episode once the GPU lane has its English subtitles and translation, and the stages
+both lanes share (stress check, review list, the finished video) take turns.
 """
 
 from __future__ import annotations
@@ -40,7 +45,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -96,8 +103,10 @@ def finished_folder(config: dict[str, Any], media: Path) -> Path | None:
 
 
 class Episode:
-    def __init__(self, media: Path, out_root: Path, args: argparse.Namespace, config: dict[str, Any]) -> None:
+    def __init__(self, media: Path, out_root: Path, args: argparse.Namespace, config: dict[str, Any],
+                 lock: threading.Lock | None = None) -> None:
         self.media = media
+        self.lock = lock  # shared with the other lane's Episode of the same video (parallel engines)
         self.out = out_root / media.stem
         self.args = args
         self.config = config
@@ -106,6 +115,7 @@ class Episode:
         default_season = season_dir / f"{media.parent.name}.glossary.json"
         self.season = Path(args.season_glossary) if args.season_glossary else default_season
         self.voice_bank = self.season.with_name(self.season.name.replace(".glossary.json", "") + ".voices.json")
+        self.season_stress = self.season.with_name(self.season.name.replace(".glossary.json", "") + ".stress.json")
         self.forced_from: int | None = STAGES.index(args.force) if args.force else None
         vo = config.get("voiceover", {})
         self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk"))
@@ -136,7 +146,7 @@ class Episode:
 
     def stamp(self, stage: str) -> Path:
         """Marks when a stage last finished (per engine for the engine's stages)."""
-        engine_stage = stage in ("dub", "voiceover", "check", "mix")
+        engine_stage = stage in ENGINE_STAGES
         return self.out / ".stages" / (f"{stage}.{self.engine}" if engine_stage else stage)
 
     def needed(self, stage: str, outputs: list[Path], previous: str | None = None,
@@ -147,6 +157,10 @@ class Episode:
         Finish marks, not file times: some stages update earlier outputs (speakers rewrites
         subs.en.json), which must not make the earlier stages look stale.
         """
+        user_forced = self.args.force is not None and STAGES.index(stage) >= STAGES.index(self.args.force)
+        if stage == "stress" and not user_forced and all(p.exists() for p in outputs) and self.stamp(stage).exists() \
+                and self._stress_input_unchanged():
+            return False  # another engine's dubbing script with the same lines: the same stress check
         if self.forced_from is not None and STAGES.index(stage) >= self.forced_from:
             return True
         if not all(p.exists() for p in outputs):
@@ -175,13 +189,15 @@ class Episode:
         }
         for position, stage in enumerate(STAGES[: until + 1]):
             func, outputs, *inputs = steps[stage]
-            if not self.needed(stage, outputs, STAGES[position - 1] if position else None, *inputs):
-                log.info("[%s] %s: done earlier", self.media.stem, stage)
-                continue
-            log.info("[%s] %s ...", self.media.stem, stage)
-            func()
-            self.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
-            self.stamp(stage).touch()
+            with self.lock if self.lock and stage in SHARED_STAGES else nullcontext():
+                if not self.needed(stage, outputs, STAGES[position - 1] if position else None, *inputs):
+                    log.info("[%s] %s: done earlier", self.media.stem, stage)
+                    continue
+                label = f"{stage} ({self.engine})" if stage in ENGINE_STAGES else stage
+                log.info("[%s] %s ...", self.media.stem, label)
+                func()
+                self.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
+                self.stamp(stage).touch()
             if self.forced_from is None or position < self.forced_from:
                 self.forced_from = position + 1  # later stages depend on fresh output
 
@@ -272,6 +288,10 @@ class Episode:
         if "voices" not in engine:
             raise SystemExit(f"voiceover.engines.{self.engine}.voices missing in the config")
         engine.setdefault("listen_stress", bool(cfg.get("listen_stress", True)))  # takes heard for checked stress
+        host = cfg.get("host_voice")
+        if host and self.engine == "vosk":  # the host's lines in a TeraTTS voice inside the Vosk track
+            tera = {k: v for k, v in cfg.get("engines", {}).get("teratts", {}).items() if k not in ("voices", "sample_rate")}
+            engine["teratts"] = {"listen_stress": engine["listen_stress"], **tera, "voice": host}
         if self.engine == "f5":  # speakers without a clip: TeraTTS voices, or a Vosk voice cloned by F5
             from voiceover.engine_f5 import TERATTS, fallback_references, voice_id
 
@@ -315,6 +335,30 @@ class Episode:
         log.info("[%s] F5 voices: %d speakers with their own clip", self.media.stem, len(mapping))
         return path
 
+    def _host_speakers(self) -> list[str]:
+        """Speaker ids of the show's host: people of the season cast with a "host" role (else the
+        speaker cards' own role)."""
+        from stt.voice_bank import same_person
+
+        cards = load_json(self.out / "speakers.json")
+        cast = load_json(self.cast).get("cast", []) if self.cast.exists() else []
+        hosts = [p["name"] for p in cast if "host" in str(p.get("role", "")).lower()]
+        if hosts:
+            return [c["id"] for c in cards if c.get("name") and any(same_person(c["name"], h) for h in hosts)]
+        return [c["id"] for c in cards if re.search(r"\bhost\b", str(c.get("role", "")).lower())]
+
+    def _host_voices(self) -> Path | None:
+        """{speaker id: voice} giving the host ``voiceover.host_voice`` (TeraTTS) in the Vosk / TeraTTS track."""
+        host = self.config["voiceover"].get("host_voice")
+        if not host or self.engine not in ("vosk", "teratts"):
+            return None
+        voice = f"teratts:{host}" if self.engine == "vosk" else str(host)
+        mapping = {sid: voice for sid in self._host_speakers()}
+        path = self.out / f"speaker_voices.{self.engine}.json"
+        save_json(path, mapping)
+        log.info("[%s] host voice %s for %s", self.media.stem, host, ", ".join(mapping) or "nobody (no host found)")
+        return path
+
     def dub(self) -> None:
         from stt import dub
 
@@ -323,6 +367,8 @@ class Episode:
                 "--output", f"dub.ru.{self.engine}.json"]
         if self.engine == "f5":
             argv += ["--speaker-voices", str(self._speaker_voices())]
+        elif (host := self._host_voices()) is not None:
+            argv += ["--speaker-voices", str(host)]
         dub.main(argv)
 
     def _module(self, name: str, module: str, args: list[str], *, oom_retries: int = 2,
@@ -377,6 +423,17 @@ class Episode:
         save_json(config_path, vo_config)
         return config_path
 
+    def _stress_input_unchanged(self) -> bool:
+        """The stress check was made on exactly the lines of this engine's dubbing script."""
+        from voiceover.stress_check import lines_sha256
+
+        dub, result = self.out / f"dub.ru.{self.engine}.json", self.out / "stress.json"
+        try:
+            recorded = load_json(result).get("lines_sha256")
+            return bool(recorded) and dub.exists() and recorded == lines_sha256(load_json(dub))
+        except (OSError, ValueError):
+            return False
+
     def stress(self) -> None:
         cfg = self.config["voiceover"]
         if not cfg.get("stress_check", True):
@@ -390,6 +447,8 @@ class Episode:
                 "--models", ",".join(models if isinstance(models, list) else [models])]
         if (self.out / "glossary.json").exists():  # the show's names, checked in every case form
             args += ["--names", str((self.out / "glossary.json").resolve())]
+        if cfg.get("season_stress", True):  # one stress per name for the whole season
+            args += ["--season", str(self.season_stress.resolve())]
         self._module("stress", "voiceover.stress_check", args + (["--screen", screen] if screen else ["--no-screen"]))
 
     def voiceover(self) -> None:
@@ -419,12 +478,13 @@ class Episode:
         self._module(f"check.{self.engine}", "voiceover.speech_check", [str(self.vo_dir.resolve()),
                                                                          "--root", str(REPO_ROOT)])
         review = self.out / "review.json"
-        if self.config.get("review", True) and (
-                not review.exists() or review.stat().st_mtime < (self.out / "subs.ru.json").stat().st_mtime):
-            try:  # lines to check by ear: a help for a person, never a reason to stop the episode
-                self._module("review", "stt.review", [str(self.out.resolve())])
-            except SystemExit as error:
-                log.warning("[%s] %s", self.media.stem, error)
+        with self.lock or nullcontext():  # the other lane may be writing it
+            if self.config.get("review", True) and (
+                    not review.exists() or review.stat().st_mtime < (self.out / "subs.ru.json").stat().st_mtime):
+                try:  # lines to check by ear: a help for a person, never a reason to stop the episode
+                    self._module("review", "stt.review", [str(self.out.resolve())])
+                except SystemExit as error:
+                    log.warning("[%s] %s", self.media.stem, error)
 
     def track(self, engine: str) -> Path:
         """The engine's finished voice-over mix (AAC), kept for the videos."""
@@ -485,7 +545,72 @@ class Episode:
         if not cfg.get("keep_wav"):  # ~0.5 GB per episode and engine; the AAC track is what the video gets
             out_wav.unlink()
         if cfg.get("mux"):  # a test piece gets a short re-encoded video of the piece
-            self.mux()
+            with self.lock or nullcontext():  # one video for all engines: one writer at a time
+                self.mux()
+
+
+SHARED_STAGES = {"transcribe", "glossary", "speakers", "translate", "stress"}  # one result for all engines
+ENGINE_STAGES = {"dub", "voiceover", "check", "mix"}
+CPU_ENGINES = {"vosk"}  # synthesise on the CPU: can run next to the GPU engines
+
+
+def lanes(engines: list[str], parallel: bool) -> list[list[str]]:
+    """Engines in the order they run: one lane, or the GPU engines and the CPU ones side by side."""
+    gpu = [e for e in engines if e not in CPU_ENGINES]
+    cpu = [e for e in engines if e in CPU_ENGINES]
+    return [gpu, cpu] if parallel and gpu and cpu else [engines]
+
+
+def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, config: dict[str, Any],
+              engines: list[str]) -> None:
+    """Every episode in every engine; the second lane (CPU engines) starts an episode once the first
+    has its shared stages, so the GPU-heavy recognition never runs twice at once."""
+    groups = lanes(engines, bool((config.get("voiceover") or {}).get("parallel_cpu", True)))
+    locks = {media: threading.Lock() for media in files}
+    shared = {media: threading.Event() for media in files}
+    errors: list[BaseException] = []
+
+    def episode(media: Path, engine: str, until: str | None = None) -> Episode:
+        lane_args = argparse.Namespace(**{**vars(args), "engine": engine, "until": until or args.until})
+        return Episode(media, out_root, lane_args, config, lock=locks[media])
+
+    def lane(group: list[str], first: bool) -> None:
+        for media in files:
+            if errors:
+                return
+            try:
+                if first and len(groups) > 1:
+                    try:
+                        episode(media, group[0], STAGES[min(STAGES.index(args.until), STAGES.index("translate"))]).run()
+                    finally:
+                        shared[media].set()
+                elif not first:
+                    shared[media].wait()
+                for engine in group:
+                    episode(media, engine).run()
+            except BaseException as error:  # noqa: BLE001 - stop both lanes, report after they end
+                errors.append(error)
+                for event in shared.values():
+                    event.set()
+                return
+
+    if len(groups) == 1:
+        lane(groups[0], True)
+    else:
+        from voiceover.engine import CPU_THREADS_ENV
+
+        # Vosk on all cores starved the GPU engines' own CPU work (10-min piece: ESpeech 7.5 -> 12.3 min)
+        os.environ.setdefault(CPU_THREADS_ENV, str(max(2, (os.cpu_count() or 4) // 2)))
+        log.info("engines in two lanes: %s on the GPU, %s on the CPU alongside (%s CPU threads)", ", ".join(groups[0]),
+                 ", ".join(groups[1]), os.environ[CPU_THREADS_ENV])
+        threads = [threading.Thread(target=lane, args=(group, n == 0), name=f"lane-{n}") for n, group in
+                   enumerate(groups)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    if errors:
+        raise errors[0]
 
 
 SUBSCRIPTION_DOWN = "The ChatGPT subscription login of OpenCode does not work (run `opencode auth login`)"
@@ -536,7 +661,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--until", choices=STAGES, default="mix", help="Last stage to run")
     parser.add_argument("--force", choices=STAGES, default=None, help="Recompute this stage and the ones after it")
     parser.add_argument("--season-glossary", default=None, help="Default: <out-root>/<folder>.glossary.json")
-    parser.add_argument("--engine", default=None, help="TTS engine (voiceover.engines in the config: vosk | teratts)")
+    parser.add_argument("--engine", default=None,
+                        help="TTS engine(s) (voiceover.engines in the config): vosk | teratts | f5, or several: f5,teratts,vosk")
     parser.add_argument("--start", type=float, default=None, help="Process from this time (tests), seconds")
     parser.add_argument("--duration", type=float, default=None, help="Process this many seconds (tests)")
     args = parser.parse_args(argv)
@@ -553,8 +679,9 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"Media not found: {missing or args.media}")
     out_root = Path(args.out_root or (config.get("paths") or {}).get("work") or "output/stt").expanduser()
     check_subscription(config)
-    for media in files:
-        Episode(media, out_root, args, config).run()
+    engines = [e.strip() for e in (args.engine or (config.get("voiceover") or {}).get("engine", "vosk")).split(",")
+               if e.strip()]
+    run_lanes(files, out_root, args, config, engines)
 
 
 if __name__ == "__main__":

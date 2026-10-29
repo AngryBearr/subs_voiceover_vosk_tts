@@ -15,7 +15,7 @@ import logging
 import multiprocessing
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -128,6 +128,16 @@ def postprocess_wav(path: Path, trim: dict[str, Any]) -> tuple[float, float, int
 
 
 _WORKER_SYNTH: Any = None
+CPU_THREADS_ENV = "VOICEOVER_CPU_THREADS"  # set by stt.run when Vosk shares the CPU with the GPU engines
+
+
+def cpu_threads() -> int:
+    """CPU threads Vosk may use: all cores, or ``VOICEOVER_CPU_THREADS`` (the rest feeds the GPU engines)."""
+    cores = os.cpu_count() or 4
+    try:
+        return max(1, min(cores, int(os.environ.get(CPU_THREADS_ENV, cores))))
+    except ValueError:
+        return cores
 
 
 def _worker_init(model_path: str, device: str, threads: int | None = None) -> None:
@@ -136,7 +146,8 @@ def _worker_init(model_path: str, device: str, threads: int | None = None) -> No
         for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             os.environ.setdefault(name, str(threads))
     from synthesize.synthesize import create_synth
-    _WORKER_SYNTH = create_synth(model_path, device)
+    # ONNX Runtime ignores the variables above: its sessions get the cap only when the CPU is shared
+    _WORKER_SYNTH = create_synth(model_path, device, threads if os.environ.get(CPU_THREADS_ENV) else None)
 
 
 def _worker_synth(job: dict[str, Any]) -> dict[str, Any]:
@@ -153,8 +164,16 @@ def _worker_synth(job: dict[str, Any]) -> dict[str, Any]:
                 "edge_trimmed_ms": 0, "reduced_pauses": 0, "error": f"{type(exc).__name__}: {exc}"[:500]}
 
 
+TERATTS = "teratts:"  # a line's voice spoken by TeraTTS inside another engine's track (host, people without a clip)
+
+
 class VoskEngine:
-    """Vosk TTS behind the ``Engine`` protocol."""
+    """Vosk TTS behind the ``Engine`` protocol.
+
+    A line whose voice is ``teratts:<voice>`` (the host's voice of ``voiceover.host_voice``) is spoken
+    by TeraTTS with the ``teratts`` settings, in its own cache; the track mixes both (clips are
+    resampled when placed).
+    """
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
@@ -167,8 +186,36 @@ class VoskEngine:
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
         self.listen_stress = bool(config.get("listen_stress", True))
+        self.teratts_config = dict(config.get("teratts", {}))  # for teratts:<voice> lines
+        self._teratts: Any = None
         self._identity: dict[str, Any] | None = None
         self._accentizer: Any = None
+
+    def _is_teratts(self, row: PreparedText) -> bool:
+        return str(self.voice if row.voice is None else row.voice).startswith(TERATTS)
+
+    def _teratts_engine(self) -> Any:
+        if getattr(self, "_teratts", None) is None:
+            from voiceover.engine_teratts import TeraTTSEngine
+
+            self._teratts = TeraTTSEngine({"voice": "ru_m5", "device": "cuda", "trim": dict(self.trim),
+                                           "listen_stress": getattr(self, "listen_stress", True),
+                                           "normalization": self.normalization,  # the stress words to hear
+                                           **self.teratts_config})
+        return self._teratts
+
+    def _with_teratts(self, prepared: list[PreparedText], cache_dir: Path,
+                      own: Any) -> list[SynthResult]:
+        """``teratts:<voice>`` lines by TeraTTS, the rest by ``own`` (rows -> results), in the rows' order."""
+        spoken = [row for row in prepared if self._is_teratts(row)]
+        if not spoken:
+            return own(prepared)
+        tera = self._teratts_engine()
+        by_tera = tera.synthesize_many([replace(row, voice=str(self.voice if row.voice is None else row.voice)
+                                                [len(TERATTS):]) for row in spoken], cache_dir)
+        rest = own([row for row in prepared if not self._is_teratts(row)])
+        done = {r.cue_id: r for r in [*by_tera, *rest]}
+        return [done[row.cue_id] for row in prepared]
 
     def synth_identity(self) -> dict[str, Any]:
         """Everything that changes the audio of a given engine text."""
@@ -314,6 +361,9 @@ class VoskEngine:
         return results
 
     def synthesize_many(self, prepared: list[PreparedText], cache_dir: Path, workers: int = 1) -> list[SynthResult]:
+        return self._with_teratts(prepared, cache_dir, lambda rows: self._synthesize_vosk(rows, cache_dir, workers))
+
+    def _synthesize_vosk(self, prepared: list[PreparedText], cache_dir: Path, workers: int = 1) -> list[SynthResult]:
         """Synthesize every distinct engine text once; ``cache_dir`` is keyed by text.
 
         A cached entry is a ``<key>.wav`` plus ``<key>.json`` with the measured
@@ -350,12 +400,13 @@ class VoskEngine:
                                                        encoding="utf-8")
             cached[key] = entry
 
+        cores = cpu_threads()
         if job_list and workers <= 1:
-            _worker_init(str(self.model_path), self.device)
+            _worker_init(str(self.model_path), self.device, cores if cores < (os.cpu_count() or cores) else None)
             for job in job_list:
                 store(job, _worker_synth(job))
         elif job_list:
-            threads = max(1, (os.cpu_count() or workers) // workers)
+            threads = max(1, cores // workers)
             context = multiprocessing.get_context("spawn")
             with context.Pool(min(workers, len(job_list)), initializer=_worker_init,
                               initargs=(str(self.model_path), self.device, threads)) as pool:

@@ -38,7 +38,9 @@ def test_videos_and_progress(tmp_path: Path) -> None:
     log.write_text("INFO stt.run: [a] speakers ...\n")
     job = dub_app.Job(files=[tmp_path / "a.mp4"], out_root=out, engines=["vosk", "teratts"],
                       config_path=tmp_path / "c.json", log_path=log, engine="vosk")
-    assert dub_app.progress_rows(job) == [["a", "⏳ 3/9: спикеры", "2/9"]]
+    assert dub_app.progress_rows(job) == [["a", "⏳ 3/9: спикеры", "⏳ 2/9: спикеры"]]  # shared stage
+    log.write_text("INFO stt.run: [a] speakers ...\nINFO stt.run: [a] voiceover (vosk) ...\n")
+    assert dub_app.progress_rows(job) == [["a", "⏳ 3/9: озвучка", "⏳ 2/9: спикеры"]]
     for mark in ("speakers", "translate", "stress", "voiceover.vosk", "check.vosk", "mix.vosk"):
         (stages / mark).write_text("")
     (out / "a" / "a.ru.vosk.mkv").write_text("")

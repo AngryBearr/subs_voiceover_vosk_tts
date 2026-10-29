@@ -200,3 +200,48 @@ def test_f5_engine_sends_listened_words_and_hears_cached_takes_once(tmp_path: Pa
     assert runs[1][0]["take_wav"] == runs[1][0]["out_wav"]
     engine.synthesize_many(rows, tmp_path / "cache")
     assert len(runs) == 2  # heard: nothing left to do
+
+
+def test_vosk_track_sends_teratts_lines_to_teratts(tmp_path: Path) -> None:
+    from voiceover.engine import SynthResult, VoskEngine
+
+    engine = VoskEngine.__new__(VoskEngine)
+    engine.voice = 56
+
+    def result(row: PreparedText, who: str) -> SynthResult:
+        return SynthResult(cue_id=row.cue_id, path=f"{who}:{row.voice}", sha256="", raw_sec=1.0, speech_sec=1.0,
+                           edge_trimmed_ms=0, reduced_pauses=0, error=None)
+
+    class Tera:
+        def synthesize_many(self, rows, cache_dir):  # noqa: ANN001
+            return [result(row, "tera") for row in rows]
+
+    engine._teratts = Tera()
+    rows = [PreparedText("c1", "a", "Прив+ет.", "ok"), PreparedText("c2", "b", "Пок+а.", "ok", voice="teratts:ru_m1"),
+            PreparedText("c3", "c", "Д+а.", "ok", voice=49)]
+    out = engine._with_teratts(rows, tmp_path, lambda own: [result(row, "vosk") for row in own])
+    assert [r.path for r in out] == ["vosk:None", "tera:ru_m1", "vosk:49"]
+
+
+def test_the_host_gets_the_host_voice(tmp_path: Path) -> None:
+    import argparse
+    import json
+
+    from stt.run import Episode
+
+    out_root = tmp_path / "work"
+    media = tmp_path / "Season 29" / "S29E01.mkv"
+    media.parent.mkdir()
+    args = argparse.Namespace(season_glossary=None, force=None, engine="vosk", until="mix", start=None)
+    config = {"voiceover": {"host_voice": "ru_m1+eng_m3", "engines": {}}}
+    episode = Episode(media, out_root, args, config)
+    episode.out.mkdir(parents=True)
+    (episode.out / "speakers.json").write_text(json.dumps([{"id": "S01", "name": "Jeff Probst", "role": "narrator"},
+                                                           {"id": "S02", "name": "Jon Misch", "role": "host?"}]))
+    episode.cast.write_text(json.dumps({"cast": [{"name": "Jeff Probst", "role": "Host"},
+                                                 {"name": "Jon Misch", "role": "Contestant"}]}))
+    assert json.loads(episode._host_voices().read_text()) == {"S01": "teratts:ru_m1+eng_m3"}
+    episode.engine = "teratts"
+    assert json.loads(episode._host_voices().read_text()) == {"S01": "ru_m1+eng_m3"}
+    episode.engine = "f5"
+    assert episode._host_voices() is None  # the host's own cloned voice there

@@ -31,6 +31,8 @@
   "voiceover": {
     "config": "voiceover_config.json",
     "engine": "vosk",
+    "parallel_cpu": true,
+    "host_voice": null,
     "engines": {
       "vosk": {"voices": {"female": 49, "male": 56}},
       "teratts": {"voices": {"female": "ru_f1+ru_f2", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.0,
@@ -42,6 +44,7 @@
     "units": {"enabled": false},
     "normalization": {"keep_input_yo_homographs": true},
     "stress_check": true,
+    "season_stress": true,
     "listen_stress": true,
     "speech_check": true
   },
