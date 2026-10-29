@@ -230,6 +230,42 @@ def fill_dictionary_stress(text: str, accents: Dict[str, str], omographs: Dict[s
     return "".join(out)
 
 
+USER_STRESS_RE = re.compile(r"(?<=[А-Яа-яЁё])\+(?=[аеёиоуыэюяАЕЁИОУЫЭЮЯ])|(?<![\w+])\+(?=[аеёиоуыэюяАЕЁИОУЫЭЮЯ])")
+
+
+def strip_user_stress(text: str) -> str:
+    """The text without stress marks a person typed ("зам+ок" -> "замок"); "2+2" stays."""
+    return USER_STRESS_RE.sub("", text)
+
+
+def keep_user_stress(accented: str, user: str) -> str:
+    """The accented text with the stress of every word the person marked ("зам+ок") put back.
+
+    The person's words are found in order among the accented ones (number expansion may add
+    words in between); a marked word gets the person's mark instead of RUAccent's.
+    """
+    def plain(word: str) -> str:
+        return word.replace("+", "").casefold().replace("ё", "е")
+
+    users = _WORD_RE.findall(user)
+    if not any("+" in w for w in users):
+        return accented
+    out: List[str] = []
+    last = position = 0
+    for match in _WORD_RE.finditer(accented):
+        word = match.group()
+        found = next((j for j in range(position, len(users)) if plain(users[j]) == plain(word)), None)
+        if found is not None:
+            position = found + 1
+            if "+" in users[found]:
+                bare = word.replace("+", "")
+                marks = [i - n for n, i in enumerate(i for i, ch in enumerate(users[found]) if ch == "+")]
+                word = "".join(("+" if i in marks else "") + ch for i, ch in enumerate(bare))
+        out.append(accented[last:match.start()] + word)
+        last = match.end()
+    return "".join(out) + accented[last:]
+
+
 def ruaccent_pass(
     subtitles: List[Dict[str, Any]],
     accentizer: RUAccent,

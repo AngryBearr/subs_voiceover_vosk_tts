@@ -279,6 +279,8 @@ def export_final(out_dir: Path, *, cues: list[dict[str, Any]], units: list[dict[
         else:
             display += [(cues_by_id[c]["start"], cues_by_id[c]["end"], cues_by_id[c]["text"]) for c in unit["cue_ids"]]
     display.sort(key=lambda entry: entry[0])
+    from utils.text_normalizer import strip_user_stress  # stress a person marked ("зам+ок") is for the voice only
+    display = [(start, end, strip_user_stress(text)) for start, end, text in display]
     (out_dir / "display.srt").write_text(srt_text(display), encoding="utf-8")
 
     # --- ledger

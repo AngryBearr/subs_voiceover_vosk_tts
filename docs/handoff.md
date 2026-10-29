@@ -122,6 +122,13 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   finished video still has the old stress (re-voice: `stt.run <S51E01> --engine f5,teratts,vosk
   --force stress`, the changed ~440 lines only). The user also heard wrong stresses where the
   vote itself is wrong (S51E01 "Айовы": sol and Claude for +Айовы).
+- **29.10 evening**: line editing (`stt.subtitle_edit`, the UI tab "Проверка и правка реплик" that
+  replaced "Проверка реплик", the tab "Справка" from `ui/help.md`): text / speaker / gender / "not
+  voiced" per line with a length check, the Subtitle Edit round trip (ASS with Actor and gender
+  styles, or SRT), typed stress `+` that wins and stays out of the subtitles. Checked end to end on
+  5 min of S51E02 in its own folder (deleted after): first voicing 17 min; four edits (two texts,
+  one gender in the UI, one speaker through an edited ASS) -> the same `stt.run` 7 min, 3 of 86
+  lines synthesised again per engine (the speaker change kept the same fallback voice: cached).
 - 318 tests pass, 1 skipped (`subs_env/bin/python -m pytest tests -q`).
 - Disk: `/home` 80 GB free after the cleanup of 29.10 (it was 22 GB).
 

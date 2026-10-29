@@ -76,25 +76,49 @@ def test_voice_bank_rows(tmp_path: Path) -> None:
     assert audio.endswith("Julie_McGee.wav") and "S29E01" in info and "0.93" in info
 
 
-def test_review_rows_and_corrections(tmp_path: Path) -> None:
+def test_edit_tab_rows_form_save_and_round_trip(tmp_path: Path) -> None:
     import json
 
     episode = tmp_path / "ep"
     episode.mkdir()
+    (episode / "subs.ru.json").write_text(json.dumps([
+        {"index": 19, "start": 60265, "end": 62000, "text": ["Как фамилия?"], "gender": "male", "speaker": "S01",
+         "speaker_name": "Джефф", "text_en": ["Last name?"], "window_ms": 2000},
+        {"index": 20, "start": 63000, "end": 63500, "text": ["Это очень длинная реплика для такого времени."],
+         "gender": "male", "speaker": "S02", "speaker_name": "John Rocker", "text_en": ["Long."], "window_ms": 600}],
+        ensure_ascii=False))
     (episode / "review.json").write_text(json.dumps([{"line": 19, "time": "00:01:00,265", "speaker": "Джефф",
                                                       "voice": "male", "sounds_like": "John Rocker (0.64)",
-                                                      "text_ru": "Как фамилия?"}]))
-    (episode / "speakers.json").write_text(json.dumps([{"id": "S02", "name": "John Rocker", "gender": "male",
-                                                        "cues": 3}]))
-    assert dub_app.list_reviewed(str(tmp_path)) == ["ep"]
-    assert dub_app.review_rows(str(tmp_path), "ep")[0][:5] == [19, "00:01:00", "Джефф", "male",
-                                                              "похоже на John Rocker (0.64)"]
-    assert "1 правок" in dub_app.add_correction(str(tmp_path), "ep", 19, {"speaker": "S02"})
-    dub_app.add_correction(str(tmp_path), "ep", 19, {"text": "Как твоя фамилия?"})
-    assert json.loads((episode / "corrections.json").read_text()) == {"19": {"speaker": "S02",
-                                                                             "text": "Как твоя фамилия?"}}
-    assert dub_app.review_rows(str(tmp_path), "ep")[0][6].startswith('{"speaker": "S02"')
-    assert dub_app.speaker_choices(str(tmp_path), "ep") == ["S02: John Rocker (male)"]
+                                                      "text_ru": "Как фамилия?"}], ensure_ascii=False))
+    (episode / "speakers.json").write_text(json.dumps([
+        {"id": "S01", "name": "Jeff Probst", "label_ru": "Джефф", "gender": "male", "cues": 1},
+        {"id": "S02", "name": "John Rocker", "gender": "male", "cues": 3}], ensure_ascii=False))
+    root = str(tmp_path)
+    assert dub_app.list_episodes(root) == ["ep"] and dub_app.list_reviewed(root) == ["ep"]
+    assert dub_app.edit_rows(root, "ep", dub_app.SHOW[1]) == [
+        [19, "00:01:00", "Джефф", "муж", "Как фамилия?", "", "", "похоже на John Rocker (0.64)"]]
+    assert [r[0] for r in dub_app.edit_rows(root, "ep", dub_app.SHOW[3])] == [20]  # too long for its time
+    assert [r[0] for r in dub_app.edit_rows(root, "ep", dub_app.SHOW[0], "rocker")] == [20]
+    text, fit, choice, gender, skip, hint = dub_app.line_form(root, "ep", 19)
+    assert (text, choice, gender, skip) == ("Как фамилия?", "S01: Jeff Probst (male)", "Мужской", False)
+    assert "влезет" in fit and "похоже на John Rocker" in hint
+    message = dub_app.save_line(root, "ep", 19, "Как твоя фамилия?", "S02: John Rocker (male)", "Мужской", False)
+    assert "говорящий: Джефф → John Rocker" in message
+    assert json.loads((episode / "corrections.json").read_text()) == {"19": {"text": "Как твоя фамилия?",
+                                                                             "speaker": "S02"}}
+    assert dub_app.edit_rows(root, "ep", dub_app.SHOW[2])[0][6] == '{"text": "Как твоя фамилия?", "speaker": "S02"}'
+    assert "ничего не изменилось" in dub_app.save_line(root, "ep", 19, "Как твоя фамилия?",
+                                                       "S02: John Rocker (male)", "Мужской", False)
+    dub_app.undo_line(root, "ep", 19)
+    assert json.loads((episode / "corrections.json").read_text()) == {}
+    assert dub_app.speaker_choices(root, "ep") == ["S01: Jeff Probst (male)", "S02: John Rocker (male)"]
+    path, _ = dub_app.export_subtitles(root, "ep", "ASS (Subtitle Edit: говорящий и пол)", "Вся серия")
+    edited = Path(path).read_text(encoding="utf-8-sig").replace(",Мужской,Джефф,", ",Женский,Джефф,")
+    Path(path).write_text(edited, encoding="utf-8-sig")
+    rows, text = dub_app.import_rows(root, "ep", path)
+    assert rows == [[19, "00:01:00", "пол: женский", ""]] and "Изменённых реплик: 1" in text
+    assert "Записано правок: 1" in dub_app.import_apply(root, "ep", path)
+    assert json.loads((episode / "corrections.json").read_text()) == {"19": {"gender": "female"}}
 
 
 def test_status_warns_when_the_subscription_login_fails(tmp_path: Path, monkeypatch) -> None:

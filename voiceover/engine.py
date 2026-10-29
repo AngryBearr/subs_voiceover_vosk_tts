@@ -299,10 +299,11 @@ class VoskEngine:
         """Expand numbers/abbreviations by rules, then add stress; fail closed per cue."""
         results: list[PreparedText] = []
         if not self.normalization.get("enabled", True):
+            from utils.text_normalizer import strip_user_stress
             for item in items:
-                display = fix_homoglyphs(join_lines(item.get("text")))
-                results.append(PreparedText(str(item["cue_id"]), display, normalize_vosk_text(display), "disabled",
-                                            voice=item.get("voice")))
+                typed = fix_homoglyphs(join_lines(item.get("text")))
+                results.append(PreparedText(str(item["cue_id"]), strip_user_stress(typed), normalize_vosk_text(typed),
+                                            "disabled", voice=item.get("voice")))
             return results
         from utils.text_normalizer import ruaccent_pass
         from voiceover.normalize import expand, space_after_ellipsis
@@ -312,8 +313,9 @@ class VoskEngine:
         expanded: list[dict[str, Any] | None] = []
         errors: list[str | None] = []
         notes: list[tuple[str, ...]] = []
+        from utils.text_normalizer import keep_user_stress, strip_user_stress
         for item in items:
-            display = fix_homoglyphs(join_lines(item.get("text")))
+            display = strip_user_stress(fix_homoglyphs(join_lines(item.get("text"))))
             try:
                 result = expand(space_after_ellipsis(display))
                 expanded.append({"index": item.get("index"), "_normalized_text": result.text})
@@ -341,7 +343,8 @@ class VoskEngine:
                     except Exception as exc:  # noqa: BLE001
                         errors[index] = f"RUAccent: {exc}"[:300]
         for index, item in enumerate(items):
-            display = fix_homoglyphs(join_lines(item.get("text")))
+            typed = fix_homoglyphs(join_lines(item.get("text")))  # may hold stress a person marked ("зам+ок")
+            display = strip_user_stress(typed)
             cue_id = str(item["cue_id"])
             if expanded[index] is None:
                 results.append(PreparedText(cue_id, display, normalize_vosk_text(display), "failed", errors[index],
@@ -364,6 +367,7 @@ class VoskEngine:
                 if sentence_fixes:
                     from voiceover.stress_check import apply_sentence_fixes
                     text = apply_sentence_fixes(text, sentence_fixes, text.replace("+", ""))
+                text = keep_user_stress(text, typed)  # a person's mark wins over every other
                 results.append(PreparedText(cue_id, display, text, "ok", None, notes[index], voice=item.get("voice")))
         return results
 

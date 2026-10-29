@@ -50,7 +50,27 @@ the other; progress per episode and stage, the log, the finished files. Tab "Н�
 defaults people change (folders, engines ticked at start, recognition, models, voices, checks,
 mix), saved into `stt_config.local.json` as differences from `stt_config.json` only (other
 personal keys there, such as the subscription, are kept; the previous file stays as `.bak`);
-"Сбросить" removes the page's keys. The "Обработка" form starts from these values.
+"Сбросить" removes the page's keys. The "Обработка" form starts from these values. Tab "Проверка и
+правка реплик" (since 29.10; it replaced "Проверка реплик"): every Russian line of an episode
+(filters: the review list, edited lines, lines too long for their time; search), the original and
+the voice-over of a line, and its text, speaker (with a voice sample: the season clip, else the
+person's longest line), gender and "not voiced", saved into `corrections.json` with a length check
+(`stt.subtitle_edit.fit`: syllables per second of the line's time against the voice-over's base
+5, comfort 6.3 and ceiling 6.7); the Subtitle Edit round trip (below); "Переозвучить изменённое".
+Tab "Справка": how to work with all of it, in plain Russian (`ui/help.md`).
+
+Editing lines outside the UI (`stt.subtitle_edit`): `export <episode folder> [--review] [--srt]`
+writes the lines as they will be voiced (corrections applied) into `<episode>/edit/`: ASS for
+Subtitle Edit (speaker in "Actor", gender as the style "Мужской" / "Женский", "Не озвучивать",
+the line number in "Effect"; `--review` only the review list, with what was heard as a hidden
+`{...}` note) or SRT (`[Speaker] text`). `import <episode folder> <file> [--dry-run]` matches the
+edited lines by number or start time (±0.5 s), lists the changes and writes them into
+`corrections.json` as differences from `subs.ru.json` (a line edited back to its translation
+loses its correction; unknown speakers and new lines are reported, not applied). The next
+`stt.run` of the episode redoes the dubbing script, the stress check, the voice-over (only the
+changed lines are synthesised: every other take is in the TTS cache), the checks and the mix.
+A stress typed as `+` before the vowel ("зам+ок") wins over RUAccent and the stress check and
+never reaches the video's subtitles (`utils.text_normalizer.keep_user_stress`).
 
 `scripts/install.sh` (Linux, NVIDIA driver with CUDA 12.8+): checks the GPU, disk and `uv`
 (offers to install it), creates subs_env, f5_env and diarizen_env (`--basic`: subs_env only;

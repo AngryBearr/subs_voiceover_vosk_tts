@@ -47,3 +47,14 @@ def test_fill_dictionary_stress() -> None:
     assert fill_dictionary_stress("в+от замок", accents, omographs) == "в+от замок"  # a homograph
     assert fill_dictionary_stress("ср+азу всё", accents, omographs) == "ср+азу всё"  # marked / ё
     assert fill_dictionary_stress("Род-Айленд", accents, omographs) == "Род-Айленд"  # not in the dictionary
+
+
+def test_user_stress_marks_win_and_leave_the_display() -> None:
+    from utils.text_normalizer import keep_user_stress, strip_user_stress
+
+    assert strip_user_stress("Это зам+ок, а не 2+2. +Эрик!") == "Это замок, а не 2+2. Эрик!"
+    assert keep_user_stress("+Это з+амок на двер+и.", "Это зам+ок на двери.") == "+Это зам+ок на двер+и."
+    assert keep_user_stress("Т+ы из +Айовы, д+а?", "Ты из Ай+овы, да?") == "Т+ы из Ай+овы, д+а?"
+    # number expansion adds words: the marked one is still found in order
+    assert keep_user_stress("В дв+е т+ысячи гор+оде зам+ок", "В 2000 город+е з+амок") == "В дв+е т+ысячи город+е з+амок"
+    assert keep_user_stress("+Это всё", "Это всё") == "+Это всё"
