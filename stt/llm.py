@@ -207,7 +207,7 @@ class OpenRouterClient:
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
                 last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
-                if exc.code in (400, 401, 402, 403):
+                if exc.code in (400, 401, 402, 403, 404):  # 404: this router lacks the model
                     break
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, KeyError, IndexError) as exc:
                 last_error = exc

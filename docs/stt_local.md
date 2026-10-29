@@ -121,11 +121,16 @@ offers luna or sol). Personal settings go into `stt_config.local.json` next to `
 (not in git, merged on top by `stt.run` and the UI), e.g. requests through a ChatGPT subscription:
 
 ```json
-{"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": "orcarouter",
-         "stages": {"stress": ["openai/gpt-6.1-sol", "opencode:opencode-go/gemini-4-argon",
-                               "opencode:opencode-go/claude-haiku-5-5"]}},
+{"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"],
+         "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5",
+                               "openrouter:google/gemini-4-argon"]}},
  "ui": {"llm_transport_choice": true}}
 ```
+
+This is the user's own setup since 29.10: OpenAI models (sol for every single-model step) through
+the subscription, other models through OrcaRouter, OpenRouter only where OrcaRouter does not work
+or lacks the model (gemini-4-argon; web search `:online` of the cast lookup is OpenRouter's only).
+A router that answers 404 (no such model) hands over to the next one at once, without retries.
 
 With an OpenCode Go subscription as well (`opencode auth login`, provider `opencode-go`), its
 models are named `opencode:opencode-go/<model>` (no paid fallback: the router has no such ids;
@@ -135,7 +140,8 @@ corrections of the paid trio (sol, claude-sonnet-5.5 by OrcaRouter, gemini-4-arg
 OpenRouter), because sol and gemini agree on 162 of 164; gemini through OpenCode Go agreed with
 the paid trio wherever the three agreed (149 of 149). Third voters there: deepseek-v4-pro and
 grok-4.7 147/149 but over 20 min for 55 sentences (timeouts), kimi-k3.1-pro 140, glm-5.3 139,
-claude-haiku-5-5 118 in ~1 min: haiku, as it only breaks the rare sol / gemini ties.
+claude-haiku-5-5 118 in ~1 min: haiku, as it only breaks the rare sol / gemini ties. The user
+chose not to use OpenCode Go for the votes (29.10): OrcaRouter / OpenRouter, as above.
 
 `ui.llm_transport_choice` shows the UI switch "Подписка (opencode) / API OpenRouter".
 
@@ -219,7 +225,8 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
 
 ## Voices, stress and the speech check
 
-- **The host's voice (since 29.10, `"host_voice"` in `voiceover`, e.g. `"ru_m1+eng_m3"`).** In the
+- **The host's voice (since 29.10, `"host_voice"` in `voiceover`: `"eng_m3+eng_m4"`, picked by the user
+  by ear from 8 blends).** In the
   Vosk and TeraTTS tracks the season cast's host (`role` "Host" in `<season>.cast.json`, else a
   speaker card whose role says host) speaks with this TeraTTS voice, so he does not sound like the
   male contestants; in the Vosk track his lines are TeraTTS clips (`teratts:<voice>`), as people

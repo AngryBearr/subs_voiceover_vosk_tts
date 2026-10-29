@@ -342,6 +342,28 @@ class RunTest(unittest.TestCase):
         self.assertEqual(posted, [("orcarouter", "openai/gpt-6.1-sol")] * 2)
         self.assertEqual(client.transport, "orcarouter")
 
+    def test_router_without_the_model_hands_over_at_once(self) -> None:
+        import io
+        import urllib.error
+        from unittest import mock
+
+        import stt.llm
+
+        posted: list[str] = []
+
+        def post(self: stt.llm.OpenRouterClient, body: dict, router: str = "openrouter") -> dict:
+            posted.append(router)
+            if router == "orcarouter":
+                raise urllib.error.HTTPError("u", 404, "model_not_found", {}, io.BytesIO(b"no such model"))
+            return {"model": "g", "choices": [{"message": {"content": '{"ok": 1}'}}], "usage": {}}
+
+        with mock.patch.object(stt.llm.OpenRouterClient, "_post", post), \
+                mock.patch.object(stt.llm, "load_api_key", return_value="k"), \
+                mock.patch.object(stt.llm.time, "sleep"):
+            client = stt.llm.OpenRouterClient("orcarouter+openrouter:google/gemini-4-argon")
+            self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
+        self.assertEqual(posted, ["orcarouter", "openrouter"])  # no retries of the missing model
+
     def test_opencode_model_needs_no_api_key(self) -> None:
         from unittest import mock
 

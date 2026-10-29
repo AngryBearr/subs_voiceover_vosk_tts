@@ -32,7 +32,7 @@
     "config": "voiceover_config.json",
     "engine": "vosk",
     "parallel_cpu": true,
-    "host_voice": null,
+    "host_voice": "eng_m3+eng_m4",
     "engines": {
       "vosk": {"voices": {"female": 49, "male": 56}},
       "teratts": {"voices": {"female": "ru_f1+ru_f2", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.0,
