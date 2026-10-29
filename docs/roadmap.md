@@ -306,10 +306,9 @@ So that a new user only clones the branch, runs one script and then works in the
 - **S20E02 / E03 in cloned voices** were voiced before Courtney's and Danielle's clips existed,
   so these two speak with the fallback voice there (E01, E04, E05, E07 were re-voiced). A
   `stt.run ... --engine f5` of the two would give them their own voices.
-- **A warning in the UI when the ChatGPT subscription login of opencode has expired**: runs fall
-  back to the paid routers silently (26.10 the token expired mid-season).
-- **TTS cache**: sets of older engine versions pile up in `output/tts_cache/` (40 of 45 were
-  stale on 27.10); a cleanup command that keeps the sets the episode folders use.
+- ~~**A warning in the UI when the ChatGPT subscription login of opencode has expired**~~: done
+  (the check before a run, the UI status and the fallback warning; `docs/experiments.md`).
+- ~~**TTS cache**~~: done 29.10 (`voiceover.cache_clean`, the buttons in "Настройки").
 
 ## Not planned
 
