@@ -50,13 +50,31 @@ Tried and dropped:
 | Several clips per person by the line's mood (ESpeech) | dropped by the user: one voice per person is enough while some clusters still mix people |
 | DiariZen without its 11-frame median filter (30.10) | S20 F1 0.843 / 0.856 (with the exclusive layer), S51 62.1% / 61.4%: no gain |
 | Audio LLMs on the 45 joined places of S51 (29-30.10, `output/exp_joined/`) | gemini-4-argon 45.5% of the labelled lines right vs our 45.5%, gemini-3.8-flash 44.0% vs 48.8%, gpt-audio-mini 41.3%, qwen3.8-omni-flash 36.4%; $0.04-0.31 per run |
+| DiCoW v3.3 and SE-DiCoW as the judge of who says which word (30.10, `output/exp_boundary/dicow/`, `dicow_env`; 0.12-0.2 s per target and 30 s window) | They follow the mask. A shout of another person under the target's mask lands in the target's text ("we got a lead" in Jeff Probst's), with SE-DiCoW's voice sample too. Masks widened by 0.5 s, boundaries moved by which candidate wrote the words, S20 E01/E05/E10/E14 exact on the `>>` marks: F1 0.795 -> 0.785 (SE-DiCoW), 0.785 at best (v3.3); of SE-DiCoW's moves 12 reached a marked word and 31 left one. S51 lines 63.4% -> 64.2% (noise). No mask, the voice sample alone (S51E01): 10% of labelled lines right vs our 65%. Weak hint only: words no candidate wrote are caption turns 5.2% of the time vs 0.8% |
+| A text LLM on sentence boundaries we give to one speaker (30.10, gpt-6.1-sol, `output/exp_boundary/text/report.md`) | S20: 2180 boundaries, 12.5% are caption turns; its claims right 65-74%, it finds 29-39% of them. Upper bound if the acoustics always found the person: F1 0.878 -> 0.890. Measured, not plugged in |
+| Levelling loudness (30.10, a measurement, no levelling was run) | Not the cause of wrong speakers. S51 885 SDH lines: right 61.7 / 64.0 / 64.4 / 65.8% from the quietest quarter to the loudest, median level -22.0 dBFS right vs -22.1 wrong, correlation 0.007 (with the line's length 0.164: short lines are the hard ones). Reality TV is already compressed: half the lines sit within 2.4 dB. The speaker model does not see gain at all: ResNet293 on a 1 s window at gain 0.1 and 3 gives cosine 1.000 |
+| The centre channel of 5.1 sources instead of the mono downmix (30.10, not run) | Dropped by the user: old seasons are not 5.1 (S51E02/E05 and S20 are stereo). Measured for the record: on S51E01/E03/E04 the centre holds the voices (-23 dB, left and right -31 to -35), but it is not clean: -24 to -27 dB where we have no words. The Demucs vocal stem, a similar cleaning, gave no gain either |
 | Word-level Viterbi without the change bonus, or with a bonus for the diarizer's label (30.10) | without: removed as many real changes as it added (S20E01: 33 vs 30); label bonus 0.15: S20 F1 0.873 vs 0.878 |
 
 Not done yet (see `docs/roadmap.md`): the user's pick of the host's voice (`output/host_voices/`), re-voicing
 S20 and S29 with all of the above, finishing S29 (E11, E13-E15, missing tracks of E01-E08), a
 clean-machine test of `scripts/install.sh`, Vosk TTS 0.11 when it is out, RuVoice stress placer,
-Shmyrev's TTS metrics, words at speaker changes without a pause, newer diarization and
-speaker-embedding models, S20E02/E03 in Courtney's and Danielle's own voices.
+Shmyrev's TTS metrics, newer diarization and speaker-embedding models, S20E02/E03 in Courtney's and Danielle's own voices.
+
+## Deleted on 30.10.2026
+
+The data of the speaker boundary experiments (the conclusions are in the tables above and in
+`docs/roadmap.md`, plan of 30.10). Scripts, logs and the text LLM's report stay, not in git:
+`output/exp_boundary/` (`prepare.py` + `run.sh` make the variant folders again, `sweep_words.py`,
+`score.py`; `dicow/boundary.py` scores a boundary exactly on the `>>` marks, `stt.turn_eval` allows one
+word either side), `output/exp_ahc/`, `output/exp_joined/` (with the paid answers of the audio LLMs).
+
+| Deleted | What it was | Made again by |
+|---|---|---|
+| `output/exp_boundary/s20`, `s51`, `smoke`, `runcheck`, `dicow/out` | copies of 9 episodes' inputs, 4 diarization variants, the Viterbi sweep, DiCoW's transcripts | the scripts above, ~1.5 h on the GPU |
+| `output/exp_ahc/ahc*`, `s10`, `s10_audio` | DiariZen with other AHC thresholds (S51), the unfinished S10 check | `output/exp_ahc/run_s51.sh`, `run_s10.sh` |
+| `dicow_env`, `models/dicow`, Hugging Face cache: DiCoW_v3_3, SE-DiCoW | python 3.11, torch 2.5.1 cu124, transformers 4.55, pandas; `BUTSpeechFIT/DiCoW`; the models with `trust_remote_code` | only if DiCoW is ever tried again |
+| `~/.cache/uv` | downloaded packages (the environments keep their own copies) | the next install downloads again |
 
 ## Deleted on 29.10.2026
 

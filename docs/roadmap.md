@@ -26,18 +26,27 @@ captions' turn changes. The steps, in the order agreed with the user:
    bonus 0.15, no label prior). Side effect fixed on the way: the cue `overlap` flag now means two
    diarized speakers at once, not a label disagreement (the dub dropped relabelled shouts as
    "interjection over another speaker"); S51E01-E05 365 -> 205 flagged cues.
-3. **Text as the second signal at the boundary** - to do: a text LLM through the subscription says
-   whether a cue holding two sentences ("You want to do it? I will do it.") is an exchange of two
-   people; where it is, the cue splits and the acoustics (step 2's centroids) decide who.
-4. Candidates after that, measured the same way: DiCoW / SE-DiCoW (Whisper conditioned on a speaker
-   mask, only on windows around speaker changes), DOVER-Lap voting of pyannote + DiariZen + a third
-   diarizer on windows (Sortformer v2.1, Nemotron-3-Diarization), the exclusive layer from one
-   segmentation pass, DiariZen's AHC threshold 0.4 (the night plan, diarization only: S51 64.5% vs
-   63.4%, the S10 check not done, not yet tried with this chain). Not for now: more audio LLMs on the
-   joined places (step 3 of the night plan: none beat the pipeline).
+3. **Text as the second signal at the boundary** - measured 30.10, not plugged in: gpt-6.1-sol through
+   the subscription read S20 E01/E05/E10/E14 (~100 s per episode) and judged the 2180 sentence
+   boundaries we give to one speaker, of which 12.5% are caption turns. Its claims are right 65-74%,
+   and it finds 29-39% of those turns. Even if the acoustics then found the right person for every
+   claim, F1 would go 0.878 -> 0.890 at most. A real but small signal (`output/exp_boundary/text/`).
+4. **DiCoW / SE-DiCoW** - tried 30.10, dropped (`docs/experiments.md`): they do not judge who speaks,
+   they follow the mask they are given.
+5. Candidates after that, measured the same way, cheapest first:
+   - DiariZen's AHC threshold 0.4 with this chain (the night plan, diarization only: S51 64.5% vs
+     63.4%, the S10 check not done; ~10 min per season of test episodes);
+   - season voice bank prints as extra states of the word-level Viterbi: it only knows this episode's
+     clusters, so a merged person (39 of 103 on S51) has no centroid of their own to win a word;
+   - DOVER-Lap voting of pyannote + DiariZen + a third diarizer on windows (Sortformer v2.1,
+     Nemotron-3-Diarization); the exclusive layer from one segmentation pass (speed only);
+   - last, a two-voice separator (ClearerVoice MossFormer2) on overlapped stretches, each stream then
+     embedded: the only untested way to take down a background voice, 16% of S51E01's changes overlap.
+   Not worth trying: loudness levelling and the centre channel (`docs/experiments.md`), more audio LLMs
+   on the joined places (step 3 of the night plan: none beat the pipeline).
    The settings of steps 1-2 were picked on the same 9 episodes they are scored on; S10 is unchecked,
    and S51's +1.5 points are close to the noise of a few lines (S20's recall gain is not).
-5. The user listens to an episode voiced with the new chain before S20 / S29 are re-voiced.
+6. The user listens to an episode voiced with the new chain before S20 / S29 are re-voiced.
 
 ## Plan agreed 29.10.2026 (night): people merged, joined lines, audio LLMs
 

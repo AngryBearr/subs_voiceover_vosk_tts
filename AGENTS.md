@@ -53,7 +53,8 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
 - **Спикеры**: DiariZen v2 с эксклюзивным слоем (`diarizer_options`) → уточнение отрезков ResNet293
     (`speaker_refine`) → пословная перемаркировка Витерби (`stt/boundaries.py`, `word_speakers`;
     эмбеддинги слов кэшируются в `words.emb.<model>.npz`). Метрики: `stt.turn_eval` (метки `>>`
-    субтитров CBS, S20) и `stt.sdh_eval --cues` (SDH-метки, S51); стенд в `output/exp_boundary/`.
+    субтитров CBS, S20) и `stt.sdh_eval --cues` (SDH-метки, S51); скрипты замеров в `output/exp_boundary/`.
+    Что уже пробовали и не помогло (DiCoW, аудио-LLM, громкость, вокальная дорожка): `docs/experiments.md`.
 - **Озвучка готовых русских субтитров**: `uv run -m voiceover.pipeline run <subs.json> --out <dir>`
     (настройки в `voiceover_config.json`).
 - **Правка реплик серии**: `corrections.json` в папке серии (интерфейс или `stt.subtitle_edit`

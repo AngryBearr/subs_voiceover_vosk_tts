@@ -524,7 +524,8 @@ Better on each of the 9 episodes. The median filter DiariZen applies to its segm
 `"median_filter": false` drops it) changed nothing (F1 0.843 / 0.856, S51 62.1% / 61.4%). The Viterbi
 without the change bonus removed as many real changes as it added (a one-word "yep" sounds like its
 neighbour in a 1 s window); a bonus for keeping the diarizer's own label of a word (0.15) costs recall
-(S20 F1 0.873). The sweep and its scores: `output/exp_boundary/` (`run.sh`, `sweep_words.py`, `score.py`).
+(S20 F1 0.873). The sweep's scripts and logs (not in git, its data was deleted): `output/exp_boundary/` (`prepare.py`,
+`run.sh`, `sweep_words.py`, `score.py`).
 
 Benchmarked and dropped (summary below): Parakeet v2/v3/Unified/TDT 1.1B, Canary 1B v2/180M/Qwen
 2.5B, Granite Speech 4.1 (+plus), Voxtral Mini 3B/Realtime 4B, Kyutai STT 2.6B, Moonshine v2,

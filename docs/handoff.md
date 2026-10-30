@@ -179,7 +179,8 @@ episodes, no re-voicing of S20 / S29 until the user calls it stable.
    numbers fixed (ru-normalizr). Next candidates: DiariZen's AHC threshold (people merged), words
    at speaker changes (DiCoW), the naming step itself (65.7% names vs 62.0% clusters). 30.10: the
    exclusive layer and the word-level Viterbi relabelling are in and on by default (roadmap, plan of
-   30.10: S20 F1 0.841 -> 0.878, S51 lines 62.0% -> 63.5%); next the text signal at the boundary.
+   30.10: S20 F1 0.841 -> 0.878, S51 lines 62.0% -> 63.5%). DiCoW dropped, the text LLM a small signal
+   (same plan); next the user's listening test, then AHC 0.4 and the voice bank's prints in the Viterbi.
 2. S29 when the user says so: Vosk / TeraTTS for E05-E10, ESpeech for E01, E02, E04, then
    E11, E13-E15; S20E02 / E03 in cloned voices.
 3. A clean-machine test of `scripts/install.sh` by a person; Vosk TTS 0.11 when it is out.
