@@ -24,6 +24,8 @@ What helps (in use), with the measurement that decided it:
 | Stress mark on every word: RUAccent per cue, apart at ellipses, dictionary stress for bare words (29.10) | words reaching the engines with no stress 1.8-2.9% -> 0.1-0.4% (S51E01, S29E01, S20E03); corrected names at a cue's start now stressed | `docs/stt_local.md` |
 | Numbers by ru-normalizr + a range rule (29.10) | 64 subtitle-like phrases: ~15 wrong -> 0 ("Мне 22 года", "около 3-4 лет"); the dubbing translations write numbers in words (4 of 18003 lines had digits) | `voiceover/normalize.py` |
 | Season cast from Wikipedia through the subscription (29.10) | free; S51, S29, S20, Australian S10 as complete as the paid web search | `stt/cast.py` |
+| DiariZen exclusive layer (30.10) | S20 E01/E05/E10/E14 speaker changes vs the `>>` marks: F1 0.841 -> 0.856; S51 SDH lines 62.0% -> 61.7% (noise), people merged 44 -> 41 | `docs/stt_local.md`, Models |
+| Word-level Viterbi relabelling (30.10) | on top of it: S20 F1 0.856 -> 0.878 (recall 0.828 -> 0.873); S51 lines 61.7% -> 63.5%, people merged 41 -> 39; 9 of 9 episodes better | `stt/boundaries.py`, roadmap 30.10 |
 
 Tried and dropped:
 
@@ -46,6 +48,9 @@ Tried and dropped:
 | Stress marks on one-syllable names | no change: short names like «Вэл» are misheard by the checking ASR, not misspoken |
 | Active speaker detection + faces | dropped by the user before testing (a dead end) |
 | Several clips per person by the line's mood (ESpeech) | dropped by the user: one voice per person is enough while some clusters still mix people |
+| DiariZen without its 11-frame median filter (30.10) | S20 F1 0.843 / 0.856 (with the exclusive layer), S51 62.1% / 61.4%: no gain |
+| Audio LLMs on the 45 joined places of S51 (29-30.10, `output/exp_joined/`) | gemini-4-argon 45.5% of the labelled lines right vs our 45.5%, gemini-3.8-flash 44.0% vs 48.8%, gpt-audio-mini 41.3%, qwen3.8-omni-flash 36.4%; $0.04-0.31 per run |
+| Word-level Viterbi without the change bonus, or with a bonus for the diarizer's label (30.10) | without: removed as many real changes as it added (S20E01: 33 vs 30); label bonus 0.15: S20 F1 0.873 vs 0.878 |
 
 Not done yet (see `docs/roadmap.md`): the user's pick of the host's voice (`output/host_voices/`), re-voicing
 S20 and S29 with all of the above, finishing S29 (E11, E13-E15, missing tracks of E01-E08), a

@@ -439,10 +439,13 @@ stage.
 
 1. ASR yields one stream of words: the dominant voice is transcribed, quieter voices under it
    mostly are not; cues are built from that stream, so they follow each other (S10E01: 2 of
-   1180 cues overlap in time). `overlap: true` marks cues with another speaker audible under
-   them (~9%).
-2. Speaker labels flicker at turn edges; short sentences get one (majority) speaker and other
-   speaker changes are moved to sentence boundaries (cues ending mid-sentence 31% → 12%).
+   1180 cues overlap in time). `overlap: true` marks cues where two diarized speakers talk at the
+   same time for 30%+ of the cue (3-6%; until 30.10 a cue whose speaker disagreed with the
+   diarizer's turn under it counted too, ~9%, which made the dub drop shouts the word-level pass
+   had just put right).
+2. Speaker labels flicker at turn edges; after the word-level Viterbi pass (Models) short sentences
+   get one (majority) speaker and other speaker changes are moved to sentence boundaries (cues
+   ending mid-sentence 31% → 12%).
 3. `stt.dub` drops interjections/backchannels ("Yeah", "Wow", "Go, go!") that sit on another
    speaker or inside a rapid exchange (S10E01: 36 of 1180): they stay audible in the original.
 4. The voice-over timeline solver never lets two Russian lines collide: it shifts lines within
@@ -498,6 +501,30 @@ conversation with named speakers, fixing lines like "Get him, George!" on George
 fixes per episode but changed nothing on the SDH-labelled lines, and the line's own voice was
 closer to the new speaker in only 26 of 62 fixes it could judge: not used. Gender/age: `audeering/wav2vec2-large-robust-24-ft-age-gender`
 (CC-BY-NC-SA-4.0, abstains below 0.7).
+
+Since 30.10 DiariZen also returns an exclusive layer (`"diarizer_options": {"exclusive": true}`): one
+speaker per 20 ms frame, the strongest of the simultaneously active ones by the segmentation model's
+soft scores, which the words are labelled by (pyannote's pipeline gives such a layer itself). Then
+the words get a second look (`stt.boundaries`, `"word_speakers"` in `stt_config.json`): every word an
+embedding of a 1 s window around it (ResNet293 in batches, ~80 s per episode, cached in
+`words.emb.<model>.npz`), every speaker a centroid of its words far from any speaker change, and a
+Viterbi pass picks the label sequence: cosine to the centroids, a penalty of 0.3 for changing speaker
+between consecutive words (fading with the pause between them) and a bonus of 0.15 for a change where
+the diarizer has one. This splits turns the diarizer merged (a shout inside the host's speech) and
+moves boundaries by a word. Measured on S20 E01/E05/E10/E14 against the CBS captions' `>>` turn
+marks (`stt.turn_eval`) and on the S51E01-E05 SDH speaker labels (`stt.sdh_eval --cues`, 886 lines):
+
+| Speakers chain | S20 speaker changes: recall / precision / F1 | S51 labelled lines on their person / people merged |
+|---|---|---|
+| DiariZen + ResNet293 refinement (29.10) | 0.811 / 0.874 / 0.841 | 62.0% / 44 of 103 |
+| + exclusive layer | 0.828 / 0.885 / 0.856 | 61.7% / 41 |
+| + word-level Viterbi (the default since 30.10) | 0.873 / 0.884 / 0.878 | 63.5% / 39 |
+
+Better on each of the 9 episodes. The median filter DiariZen applies to its segmentation (11 frames,
+`"median_filter": false` drops it) changed nothing (F1 0.843 / 0.856, S51 62.1% / 61.4%). The Viterbi
+without the change bonus removed as many real changes as it added (a one-word "yep" sounds like its
+neighbour in a 1 s window); a bonus for keeping the diarizer's own label of a word (0.15) costs recall
+(S20 F1 0.873). The sweep and its scores: `output/exp_boundary/` (`run.sh`, `sweep_words.py`, `score.py`).
 
 Benchmarked and dropped (summary below): Parakeet v2/v3/Unified/TDT 1.1B, Canary 1B v2/180M/Qwen
 2.5B, Granite Speech 4.1 (+plus), Voxtral Mini 3B/Realtime 4B, Kyutai STT 2.6B, Moonshine v2,

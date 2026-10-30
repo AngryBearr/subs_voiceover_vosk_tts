@@ -5,6 +5,40 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan agreed 30.10.2026: speaker changes without a pause
+
+The user's biggest complaint: at a turn change without a pause one speaker gets the other's words,
+and no diarizer fixed it. Where the errors sat (S51E01-E05, 886 SDH-labelled lines, 338 wrong): 22%
+the neighbouring cue's speaker (a boundary off by a word or two), 68% a short line (median 1.4 s,
+56% under 1.5 s) whose person's cluster is nowhere near: a shout the diarizer merged into a long
+turn (70 of 231 went to Jeff Probst's cluster at challenges). S51E01: 63% of the speaker changes
+have a pause of 0.2 s or less, 16% overlap. The S20 runs of 27.10 (pyannote) found 62% of the
+captions' turn changes. The steps, in the order agreed with the user:
+
+1. **DiariZen's exclusive layer and its median filter** (`"diarizer_options"`) - done 30.10: the
+   exclusive layer (one speaker per frame by the soft segmentation) +0.015 F1 on S20 (0.841 ->
+   0.856), neutral on S51; the median filter off: nothing. On by default. Costs a second pass of the
+   segmentation model (+80 s per episode); a single pass is a follow-up.
+2. **Word-level relabelling** (`stt.boundaries`, `"word_speakers"`) - done 30.10: a Viterbi pass over
+   1 s word embeddings (ResNet293) with a switch penalty and a bonus for the diarizer's own changes:
+   S20 F1 0.856 -> 0.878 (recall 0.828 -> 0.873), S51 lines 61.7% -> 63.5%, people merged 41 -> 39;
+   better on 9 of 9 test episodes (`docs/stt_local.md`, Models). On by default (switch 0.3, change
+   bonus 0.15, no label prior). Side effect fixed on the way: the cue `overlap` flag now means two
+   diarized speakers at once, not a label disagreement (the dub dropped relabelled shouts as
+   "interjection over another speaker"); S51E01-E05 365 -> 205 flagged cues.
+3. **Text as the second signal at the boundary** - to do: a text LLM through the subscription says
+   whether a cue holding two sentences ("You want to do it? I will do it.") is an exchange of two
+   people; where it is, the cue splits and the acoustics (step 2's centroids) decide who.
+4. Candidates after that, measured the same way: DiCoW / SE-DiCoW (Whisper conditioned on a speaker
+   mask, only on windows around speaker changes), DOVER-Lap voting of pyannote + DiariZen + a third
+   diarizer on windows (Sortformer v2.1, Nemotron-3-Diarization), the exclusive layer from one
+   segmentation pass, DiariZen's AHC threshold 0.4 (the night plan, diarization only: S51 64.5% vs
+   63.4%, the S10 check not done, not yet tried with this chain). Not for now: more audio LLMs on the
+   joined places (step 3 of the night plan: none beat the pipeline).
+   The settings of steps 1-2 were picked on the same 9 episodes they are scored on; S10 is unchecked,
+   and S51's +1.5 points are close to the noise of a few lines (S20's recall gain is not).
+5. The user listens to an episode voiced with the new chain before S20 / S29 are re-voiced.
+
 ## Plan agreed 29.10.2026 (night): people merged, joined lines, audio LLMs
 
 1. **DiariZen's AHC threshold** (0.5 now): lower / higher, scored like step 2 below (S51E01-E05,
