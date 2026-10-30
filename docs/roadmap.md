@@ -25,7 +25,10 @@ captions' turn changes. The steps, in the order agreed with the user:
    better on 9 of 9 test episodes (`docs/stt_local.md`, Models). On by default (switch 0.3, change
    bonus 0.15, no label prior). Side effect fixed on the way: the cue `overlap` flag now means two
    diarized speakers at once, not a label disagreement (the dub dropped relabelled shouts as
-   "interjection over another speaker"); S51E01-E05 365 -> 205 flagged cues.
+   "interjection over another speaker"); S51E01-E05 365 -> 205 flagged cues. Where the gain comes from
+   (bench of 30.10, same episodes): only giving a voice to the words the diarizer left without a label
+   (849 of 1006 words on S51) reaches S51 62.9%, S20 F1 0.863; moving labelled words adds the rest. So on
+   S51 two thirds of the gain is the filling, on S20 two thirds is the moving.
 3. **Text as the second signal at the boundary** - measured 30.10, not plugged in: gpt-6.1-sol through
    the subscription read S20 E01/E05/E10/E14 (~100 s per episode) and judged the 2180 sentence
    boundaries we give to one speaker, of which 12.5% are caption turns. Its claims are right 65-74%,
@@ -34,10 +37,9 @@ captions' turn changes. The steps, in the order agreed with the user:
 4. **DiCoW / SE-DiCoW** - tried 30.10, dropped (`docs/experiments.md`): they do not judge who speaks,
    they follow the mask they are given.
 5. Candidates after that, measured the same way, cheapest first:
-   - DiariZen's AHC threshold 0.4 with this chain (the night plan, diarization only: S51 64.5% vs
-     63.4%, the S10 check not done; ~10 min per season of test episodes);
-   - season voice bank prints as extra states of the word-level Viterbi: it only knows this episode's
-     clusters, so a merged person (39 of 103 on S51) has no centroid of their own to win a word;
+   - DiariZen's AHC threshold 0.4 with this chain - measured 30.10, not taken: S51 64.6% vs 63.5%, S20
+     F1 0.868 vs 0.878 (`docs/experiments.md`); the option stays, `"ahc_threshold"`, 0.5 by default;
+   - season voice bank people as extra Viterbi states - measured 30.10, dropped (`docs/experiments.md`);
    - DOVER-Lap voting of pyannote + DiariZen + a third diarizer on windows (Sortformer v2.1,
      Nemotron-3-Diarization); the exclusive layer from one segmentation pass (speed only);
    - last, a two-voice separator (ClearerVoice MossFormer2) on overlapped stretches, each stream then
@@ -46,7 +48,12 @@ captions' turn changes. The steps, in the order agreed with the user:
    on the joined places (step 3 of the night plan: none beat the pipeline).
    The settings of steps 1-2 were picked on the same 9 episodes they are scored on; S10 is unchecked,
    and S51's +1.5 points are close to the noise of a few lines (S20's recall gain is not).
-6. The user listens to an episode voiced with the new chain before S20 / S29 are re-voiced.
+6. The user listens to an episode voiced with the new chain before S20 / S29 are re-voiced. S51E01 was
+   voiced 30.10 with all three engines (`STT_Season_51_speakers_v2/`, the old one stays in `STT_Season_51/`;
+   list of the 283 of 1395 lines that changed person: `output/revoice_v2/listen_guide.md`). Waiting for the
+   user's ear. Known side effect: the mixed cluster, voiced with generic voices, grew to 162 lines (12%)
+   from 108 (8%), ordinary phrases among the shouts; SDH on this episode 65.3% -> 64.9%. If it bothers the
+   ear, the fallback is the filling alone (`"prior"` 9: S51 62.9%, S20 F1 0.863). The cause is not confirmed.
 
 ## Plan agreed 29.10.2026 (night): people merged, joined lines, audio LLMs
 

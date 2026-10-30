@@ -240,9 +240,7 @@ def transcribe(args: argparse.Namespace) -> Path:
 
         params = RelabelParams(model=args.word_speakers_model, window_s=args.word_window,
                                switch_penalty=args.word_switch_penalty, prior=args.word_prior,
-                               change_prior=args.word_change_prior, passes=args.word_passes,
-                               bank_margin=args.word_bank_margin, bank_represented=args.word_bank_represented,
-                               bank_min_s=args.word_bank_min_s)
+                               change_prior=args.word_change_prior, passes=args.word_passes)
 
         class _LazyEmbedder:  # the model is loaded once, and only when some embeddings are not cached
             model: Any = None
@@ -252,23 +250,14 @@ def transcribe(args: argparse.Namespace) -> Path:
                     self.model = make_embedder(params.model, args.device)
                 return self.model.batch(windows)
 
-        embedder = _LazyEmbedder()
-        bank = None
-        if args.word_bank:
-            from stt.boundaries import cached_bank_centroids
-
-            bank = cached_bank_centroids(Path(args.word_bank), embedder, params.window_s,
-                                         out / f"bank.{params.model}.npz")
-        words, relabel_stats = relabel_words(words, read_wav(out / "audio.wav"), embedder, params,
-                                             cache=out / f"words.emb.{params.model}.npz", bank=bank)
+        words, relabel_stats = relabel_words(words, read_wav(out / "audio.wav"), _LazyEmbedder(), params,
+                                             cache=out / f"words.emb.{params.model}.npz")
         log.info("[word-speakers] %s", relabel_stats)
     if args.word_smooth == "full":
         words = smooth_speakers(words, options)
     elif args.word_smooth == "snap":
         words = snap_speaker_boundaries(words, options.snap_words)
     hints = on_screen_hints(ocr_data, words, diarization) if ocr_data else {}
-    for label in {w.speaker for w in words if w.speaker and w.speaker.startswith("bank:")}:
-        hints.setdefault(label, []).append(f"voice bank clip: {label.removeprefix('bank:')}")
     cues = build_cues(words, options)
     mark_overlaps(cues, diarization)
     ids = speaker_ids(cues)
@@ -367,15 +356,6 @@ def main(argv: list[str] | None = None) -> None:
                         help="Bonus for a speaker change where the diarizer has one")
     parser.add_argument("--word-window", type=float, default=1.0, help="Audio window per word, seconds")
     parser.add_argument("--word-passes", type=int, default=1, help="Passes re-estimating centroids")
-    parser.add_argument("--word-bank", default=None,
-                        help="Voice bank references folder (references.json): people missing from the "
-                             "clusters become extra states of --word-speakers (off by default)")
-    parser.add_argument("--word-bank-margin", type=float, default=0.05,
-                        help="Subtracted from a bank state's score, so it must beat a cluster clearly")
-    parser.add_argument("--word-bank-represented", type=float, default=0.5,
-                        help="Cosine from which a cluster counts as the voice of its closest bank person")
-    parser.add_argument("--word-bank-min-s", type=float, default=0.0,
-                        help="A bank label run shorter than this (s) goes back to the words' own labels")
     parser.add_argument("--word-smooth", default="full", choices=["full", "snap", "none"],
                         help="Sentence-level speaker smoothing after the word labels: majority + snapping "
                              "(default), snapping to sentence ends only, or none")

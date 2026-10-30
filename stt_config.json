@@ -8,7 +8,7 @@
   "diarizer": "diarizen-v2",
   "diarizer_options": {"median_filter": true, "exclusive": true, "ahc_threshold": 0.5},
   "speaker_refine": {"model": "resnet293", "margin": 0.1},
-  "word_speakers": {"enabled": true, "model": "resnet293", "switch_penalty": 0.3, "prior": 0.0, "change_prior": 0.15, "window_s": 1.0, "passes": 1, "bank": false},
+  "word_speakers": {"enabled": true, "model": "resnet293", "switch_penalty": 0.3, "prior": 0.0, "change_prior": 0.15, "window_s": 1.0, "passes": 1},
   "ocr": {"enabled": true, "fps": 2.0},
   "llm": {
     "model": "openai/gpt-6-luna",
