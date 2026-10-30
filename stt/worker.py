@@ -273,6 +273,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="DiariZen: keep the raw segmentation (no 11-frame median filter)")
     p_diar.add_argument("--exclusive", action="store_true",
                         help="DiariZen: also return exclusive (one speaker per frame) turns")
+    p_diar.add_argument("--ahc-threshold", type=float, default=0.5,
+                        help="DiariZen: AHC threshold before VBx (lower: more clusters)")
 
     p_voice = sub.add_parser("voice")
     p_voice.add_argument("--audio", required=True)
@@ -324,7 +326,8 @@ def main(argv: list[str] | None = None) -> None:
             "max_speakers": args.max_speakers,
         }
         run_diarize([Path(p) for p in args.audio], args.model, [Path(p) for p in args.out], args.device, speakers,
-                    {"median_filter": args.median_filter, "exclusive": args.exclusive})
+                    {"median_filter": args.median_filter, "exclusive": args.exclusive,
+                     "ahc_threshold": args.ahc_threshold})
     elif args.command == "ocr":
         run_ocr(Path(args.media), Path(args.out), args.device, args.start, args.duration, args.fps)
     elif args.command == "align":

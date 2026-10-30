@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from stt.diarize import Diarization, Turn, exclusive_turns, non_default_options
+from stt.diarize import Diarization, Turn, create_diarizer, exclusive_turns, non_default_options
 
 STEP = 0.02
 
@@ -61,3 +61,12 @@ def test_diarization_options_round_trip() -> None:
     again = Diarization.from_dict(diar.to_dict())
     assert again == diar
     assert again.to_dict()["options"] == {"exclusive": True}
+
+
+def test_ahc_threshold_option() -> None:
+    assert non_default_options({"ahc_threshold": 0.5}) == {}
+    assert non_default_options({"median_filter": True, "ahc_threshold": 0.4}) == {"ahc_threshold": 0.4}
+    default = create_diarizer("diarizen-v2", device="cpu")
+    assert default.options["ahc_threshold"] == 0.5
+    tuned = create_diarizer("diarizen-v2", device="cpu", options={"ahc_threshold": 0.4})
+    assert tuned.options["ahc_threshold"] == 0.4 and tuned.options["exclusive"] is False

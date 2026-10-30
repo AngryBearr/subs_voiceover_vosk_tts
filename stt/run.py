@@ -226,6 +226,8 @@ class Episode:
             argv.append("--diar-no-median-filter")
         if diar_options.get("exclusive", False):
             argv.append("--diar-exclusive")
+        if diar_options.get("ahc_threshold", 0.5) != 0.5:
+            argv += ["--diar-ahc-threshold", str(diar_options["ahc_threshold"])]
         ocr = self.config.get("ocr", {})
         argv += ["--ocr-fps", str(ocr.get("fps", 2.0))] if ocr.get("enabled", True) else ["--no-ocr"]
         refine = self.config.get("speaker_refine") or {}
@@ -239,6 +241,11 @@ class Episode:
                      "--word-change-prior", str(word_speakers.get("change_prior", 0.15)),
                      "--word-window", str(word_speakers.get("window_s", 1.0)),
                      "--word-passes", str(word_speakers.get("passes", 1))]
+            if word_speakers.get("bank", False) and (self.references / "references.json").exists():
+                argv += ["--word-bank", str(self.references),
+                         "--word-bank-margin", str(word_speakers.get("bank_margin", 0.05)),
+                         "--word-bank-represented", str(word_speakers.get("bank_represented", 0.5)),
+                         "--word-bank-min-s", str(word_speakers.get("bank_min_s", 0.0))]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
         if self.args.duration:
