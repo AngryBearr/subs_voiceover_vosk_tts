@@ -17,8 +17,9 @@ captions' turn changes. The steps, in the order agreed with the user:
 
 1. **DiariZen's exclusive layer and its median filter** (`"diarizer_options"`) - done 30.10: the
    exclusive layer (one speaker per frame by the soft segmentation) +0.015 F1 on S20 (0.841 ->
-   0.856), neutral on S51; the median filter off: nothing. On by default. Costs a second pass of the
-   segmentation model (+80 s per episode); a single pass is a follow-up.
+   0.856), neutral on S51; the median filter off: nothing. On by default. Since 30.10 one pass of the
+   segmentation model gives both the hard and the soft output: same turns as two passes, bit for bit on
+   S51E01, 253 -> 170 s, nothing added to DiariZen's time.
 2. **Word-level relabelling** (`stt.boundaries`, `"word_speakers"`) - done 30.10: a Viterbi pass over
    1 s word embeddings (ResNet293) with a switch penalty and a bonus for the diarizer's own changes:
    S20 F1 0.856 -> 0.878 (recall 0.828 -> 0.873), S51 lines 61.7% -> 63.5%, people merged 41 -> 39;
@@ -40,20 +41,26 @@ captions' turn changes. The steps, in the order agreed with the user:
    - DiariZen's AHC threshold 0.4 with this chain - measured 30.10, not taken: S51 64.6% vs 63.5%, S20
      F1 0.868 vs 0.878 (`docs/experiments.md`); the option stays, `"ahc_threshold"`, 0.5 by default;
    - season voice bank people as extra Viterbi states - measured 30.10, dropped (`docs/experiments.md`);
-   - DOVER-Lap voting of pyannote + DiariZen + a third diarizer on windows (Sortformer v2.1,
-     Nemotron-3-Diarization); the exclusive layer from one segmentation pass (speed only);
-   - last, a two-voice separator (ClearerVoice MossFormer2) on overlapped stretches, each stream then
-     embedded: the only untested way to take down a background voice, 16% of S51E01's changes overlap.
+   - voting with other diarizers (pyannote, Sortformer v2.1, Nemotron-3-Diarization on windows) - measured
+     30.10, dropped, no DOVER-Lap run (`docs/experiments.md`): each is far below our chain, and a change
+     all three agree on and we lack is right only 34% of the time;
+   - a two-voice separator (ClearerVoice MossFormer2) on overlapped stretches - measured 30.10, not taken
+     (`docs/experiments.md`): within the noise, +60-200 s per episode and one more environment.
    Not worth trying: loudness levelling and the centre channel (`docs/experiments.md`), more audio LLMs
    on the joined places (step 3 of the night plan: none beat the pipeline).
-   The settings of steps 1-2 were picked on the same 9 episodes they are scored on; S10 is unchecked,
-   and S51's +1.5 points are close to the noise of a few lines (S20's recall gain is not).
-6. The user listens to an episode voiced with the new chain before S20 / S29 are re-voiced. S51E01 was
+   The settings of steps 1-2 were picked on the same 9 episodes they are scored on. Checked 30.10 on
+   S29E01/E03/E07, not used for tuning: F1 0.824 -> 0.840 -> 0.861 (before, exclusive layer, Viterbi),
+   every step better on each episode. S51's +1.8 points are close to the noise of a few lines.
+   The acoustic candidates of this list are now used up; what is left is the text signal of step 3.
+6. The user listened 30.10: speakers split a little better by ear, the mixed voice is heard more often.
+   The chain stays the default; S20 / S29 are re-voiced only when the user says so. S51E01 was
    voiced 30.10 with all three engines (`STT_Season_51_speakers_v2/`, the old one stays in `STT_Season_51/`;
    list of the 283 of 1395 lines that changed person: `output/revoice_v2/listen_guide.md`). Waiting for the
    user's ear. Known side effect: the mixed cluster, voiced with generic voices, grew to 162 lines (12%)
    from 108 (8%), ordinary phrases among the shouts; SDH on this episode 65.3% -> 64.9%. If it bothers the
-   ear, the fallback is the filling alone (`"prior"` 9: S51 62.9%, S20 F1 0.863). The cause is not confirmed.
+   ear, the fallback is the filling alone (`"prior"` 9: S51 62.9%, S20 F1 0.863; that cluster on S51E01: 96
+   cues instead of 162). Sending such lines back is no fix: of 13 SDH-labelled lines the Viterbi moved into it,
+   the diarizer's label was the person's main cluster for 3. The others had a wrong named voice before.
 
 ## Plan agreed 29.10.2026 (night): people merged, joined lines, audio LLMs
 

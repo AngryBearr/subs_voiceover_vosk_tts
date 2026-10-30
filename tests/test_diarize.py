@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
+import pytest
 
 from stt.diarize import Diarization, Turn, create_diarizer, exclusive_turns, non_default_options
 
@@ -70,3 +73,38 @@ def test_ahc_threshold_option() -> None:
     assert default.options["ahc_threshold"] == 0.5
     tuned = create_diarizer("diarizen-v2", device="cpu", options={"ahc_threshold": 0.4})
     assert tuned.options["ahc_threshold"] == 0.4 and tuned.options["exclusive"] is False
+
+
+def test_one_segmentation_pass_gives_hard_and_soft() -> None:
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("pyannote.core")
+    from pyannote.core import SlidingWindow, SlidingWindowFeature
+
+    from stt.diarize import _segment_hard_and_soft
+
+    logits = torch.log_softmax(torch.tensor([[[3.0, 1.0], [0.0, 2.0]]]), dim=-1)
+
+    class Conversion(torch.nn.Module):  # stands for Powerset: class 1 means speaker 1 speaks
+        def forward(self, output: Any, soft: bool = False) -> Any:
+            return output.exp()[..., 1:] if soft else (output.argmax(-1, keepdim=True) == 1).float()
+
+    class Inference:
+        device = "cpu"
+        conversion: Any = Conversion()
+
+    class Pipeline:
+        _segmentation = Inference()
+        calls = 0
+
+        def get_segmentations(self, file: dict[str, Any], soft: bool = False) -> SlidingWindowFeature:
+            self.calls += 1
+            output = self._segmentation.conversion(logits, soft=soft)
+            return SlidingWindowFeature(output.numpy(), SlidingWindow(start=0.0, duration=8.0, step=0.8))
+
+    pipeline = Pipeline()
+    conversion = Inference.conversion
+    hard, soft = _segment_hard_and_soft(pipeline, {})
+    assert pipeline.calls == 1 and pipeline._segmentation.conversion is conversion
+    np.testing.assert_array_equal(hard.data, conversion(logits, soft=False).numpy())
+    np.testing.assert_allclose(soft.data, conversion(logits, soft=True).numpy())
+    assert hard.sliding_window.step == soft.sliding_window.step == 0.8

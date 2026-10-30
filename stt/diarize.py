@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import math
-import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -198,6 +197,34 @@ class PyannoteDiarizer(Diarizer):
         )
 
 
+def _segment_hard_and_soft(pipeline: Any, file: dict[str, Any]) -> tuple[Any, Any]:
+    """One pass of the segmentation model, returning what ``get_segmentations`` gives with soft=False and soft=True.
+
+    The model's output is kept raw (powerset classes) and converted both ways afterwards.
+    """
+    import torch
+    from pyannote.core import SlidingWindowFeature
+
+    class Raw(torch.nn.Module):
+        def forward(self, output: Any, soft: bool = False) -> Any:
+            return output
+
+    inference = pipeline._segmentation
+    conversion = inference.conversion
+    inference.conversion = Raw()
+    try:
+        raw = pipeline.get_segmentations(file)
+    finally:
+        inference.conversion = conversion
+
+    def convert(soft: bool) -> SlidingWindowFeature:
+        parts = [conversion(torch.from_numpy(raw.data[i:i + 1024]).to(inference.device), soft=soft).cpu().numpy()
+                 for i in range(0, len(raw.data), 1024)]
+        return SlidingWindowFeature(np.vstack(parts), raw.sliding_window)
+
+    return convert(False), convert(True)
+
+
 class DiarizenDiarizer(Diarizer):
     """DiariZen (pyannote 3.1 fork): WavLM-Conformer segmentation + WeSpeaker ResNet34 + VBx clustering."""
 
@@ -236,7 +263,7 @@ class DiarizenDiarizer(Diarizer):
 
         pipeline = self._pipeline
         file = {"waveform": torch.from_numpy(audio)[None], "sample_rate": SAMPLE_RATE}
-        segmentations = pipeline.get_segmentations(file, soft=False)
+        segmentations, soft = _segment_hard_and_soft(pipeline, file)
         if self.options["median_filter"]:
             segmentations.data = median_filter(segmentations.data, size=(1, 11, 1), mode="reflect")
         count = pipeline.speaker_count(
@@ -255,9 +282,7 @@ class DiarizenDiarizer(Diarizer):
         if not self.options["exclusive"]:
             return turns, []
 
-        t0 = time.perf_counter()
-        soft = pipeline.get_segmentations(file, soft=True)  # probabilities, no median filter
-        _, soft_act = pipeline.reconstruct(soft, hard_clusters, count)
+        _, soft_act = pipeline.reconstruct(soft, hard_clusters, count)  # probabilities, no median filter
         scores = np.asarray(soft_act.data, dtype=np.float64)
         active = discrete.data > 0
         if scores.shape != active.shape:
@@ -270,7 +295,7 @@ class DiarizenDiarizer(Diarizer):
         frames = discrete.sliding_window
         exclusive = exclusive_turns(scores, active, float(frames.start), float(frames.step),
                                     float(frames.duration))
-        log.info("Exclusive turns: %d (soft pass %.1fs)", len(exclusive), time.perf_counter() - t0)
+        log.info("Exclusive turns: %d", len(exclusive))
         return turns, exclusive
 
 

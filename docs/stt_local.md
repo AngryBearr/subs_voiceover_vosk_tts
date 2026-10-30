@@ -521,12 +521,15 @@ marks (`stt.turn_eval`) and on the S51E01-E05 SDH speaker labels (`stt.sdh_eval 
 | + only filling the words with no diarizer label (`--word-prior 9`) | 0.828 / 0.900 / 0.863 | 62.9% / 41 |
 | + word-level Viterbi (the default since 30.10) | 0.873 / 0.884 / 0.878 | 63.5% / 39 |
 
-Better on each of the 9 episodes. The median filter DiariZen applies to its segmentation (11 frames,
+Better on each of the 9 episodes; on S29E01/E03/E07, not used for tuning, F1 0.824 -> 0.840 -> 0.861.
+The exclusive layer adds no time (one segmentation pass gives the hard and the soft output), the word
+embeddings 30-45 s per episode. The median filter DiariZen applies to its segmentation (11 frames,
 `"median_filter": false` drops it) changed nothing (F1 0.843 / 0.856, S51 62.1% / 61.4%). The Viterbi
 without the change bonus removed as many real changes as it added (a one-word "yep" sounds like its
 neighbour in a 1 s window); a bonus for keeping the diarizer's own label of a word (0.15) costs recall
 (S20 F1 0.873, S51 63.1%). DiariZen's AHC threshold 0.4 (S20 F1 0.868, S51 64.6%) and voice bank people
-as Viterbi states (no change) were not taken: `docs/experiments.md`. The sweep's scripts and logs (not in git, its data was deleted): `output/exp_boundary/` (`prepare.py`,
+as Viterbi states (no change), voting with other diarizers and a two-voice separator were not taken:
+`docs/experiments.md`. The sweep's scripts and logs (not in git, its data was deleted): `output/exp_boundary/` (`prepare.py`,
 `run.sh`, `sweep_words.py`, `score.py`).
 
 Benchmarked and dropped (summary below): Parakeet v2/v3/Unified/TDT 1.1B, Canary 1B v2/180M/Qwen
