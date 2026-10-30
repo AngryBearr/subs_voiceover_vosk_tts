@@ -828,10 +828,11 @@ class DiarizenTest(unittest.TestCase):
 
         from stt.diarize import DIARIZERS, DiarizenDiarizer
 
-        segment = mock.Mock(start=1.0, end=2.5)
-        annotation = mock.Mock(itertracks=lambda yield_label: [(segment, None, 0)])
+        from stt.diarize import Turn
+
         diarizer = DiarizenDiarizer(DIARIZERS["diarizen-v2"])
-        diarizer._pipeline = mock.Mock(return_value=annotation)
+        diarizer._pipeline = mock.Mock()
+        diarizer._run = mock.Mock(return_value=([Turn(1.0, 2.5, "0")], []))  # the pipeline steps need models
         result = diarizer.diarize(np.zeros(16_000, dtype=np.float32), max_speakers=25)
         self.assertEqual([(t.start, t.end, t.speaker) for t in result.turns], [(1.0, 2.5, "0")])
         self.assertEqual((result.exclusive, result.embeddings, diarizer._pipeline.max_speakers), ([], {}, 25))

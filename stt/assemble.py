@@ -401,15 +401,31 @@ def build_cues(words: list[Word], options: CueOptions) -> list[Cue]:
 
 
 def mark_overlaps(cues: list[Cue], diarization: Diarization, min_share: float = 0.3) -> None:
-    """Flag cues where another speaker talks over at least `min_share` of the cue."""
+    """Flag cues where two or more diarized speakers talk at the same time for at least `min_share` of the cue.
+
+    Counted on the turns' timeline, not against the cue's label: a cue the word-level relabelling moved
+    to another speaker sits inside the diarizer's turn of the old one, and that is a disagreement about
+    who talks, not a second voice.
+    """
     index = _TurnIndex(diarization.turns)
     for cue in cues:
         span = cue.end - cue.start
         if span <= 0:
             continue
-        others = [t for t in index.overlapping(cue.start, cue.end) if t.speaker != cue.speaker]
-        covered = sum(min(cue.end, t.end) - max(cue.start, t.start) for t in others)
-        cue.overlap = covered / span >= min_share
+        events: list[tuple[float, int, str]] = []  # (time, +1 / -1, speaker)
+        for t in index.overlapping(cue.start, cue.end):
+            events.append((max(t.start, cue.start), 1, t.speaker))
+            events.append((min(t.end, cue.end), -1, t.speaker))
+        events.sort(key=lambda e: (e[0], e[1]))  # an end before a start at the same time
+        active: Counter[str] = Counter()
+        shared = 0.0
+        last = cue.start
+        for time, delta, speaker in events:
+            if sum(1 for n in active.values() if n > 0) >= 2:
+                shared += time - last
+            active[speaker] += delta
+            last = time
+        cue.overlap = shared / span >= min_share
 
 
 def speaker_ids(cues: list[Cue]) -> dict[str, str]:

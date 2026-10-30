@@ -221,11 +221,24 @@ class Episode:
             argv += ["--fuse", ",".join(mode["fuse"]), "--fuse-model", self.llm("fuse")]
             if (self.season.with_suffix(".txt")).exists():
                 argv += ["--glossary", str(self.season.with_suffix(".txt"))]
+        diar_options = self.config.get("diarizer_options") or {}
+        if not diar_options.get("median_filter", True):
+            argv.append("--diar-no-median-filter")
+        if diar_options.get("exclusive", False):
+            argv.append("--diar-exclusive")
         ocr = self.config.get("ocr", {})
         argv += ["--ocr-fps", str(ocr.get("fps", 2.0))] if ocr.get("enabled", True) else ["--no-ocr"]
         refine = self.config.get("speaker_refine") or {}
         if refine.get("model", "none") != "none":
             argv += ["--refine-speakers", refine["model"], "--refine-margin", str(refine.get("margin", 0.1))]
+        word_speakers = self.config.get("word_speakers") or {}
+        if word_speakers.get("enabled", False):
+            argv += ["--word-speakers", "viterbi", "--word-speakers-model", word_speakers.get("model", "resnet293"),
+                     "--word-switch-penalty", str(word_speakers.get("switch_penalty", 0.3)),
+                     "--word-prior", str(word_speakers.get("prior", 0.0)),
+                     "--word-change-prior", str(word_speakers.get("change_prior", 0.15)),
+                     "--word-window", str(word_speakers.get("window_s", 1.0)),
+                     "--word-passes", str(word_speakers.get("passes", 1))]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
         if self.args.duration:

@@ -76,13 +76,14 @@ def run_diarize(
     outs: list[Path],
     device: str,
     speakers: dict[str, int | None],
+    options: dict[str, Any] | None = None,
 ) -> None:
     """Load a diarizer once and process each audio file into its own JSON."""
     from stt.audio import read_wav
     from stt.diarize import create_diarizer
     from stt.gpu import VramPeak
 
-    diarizer = create_diarizer(model, device=device)
+    diarizer = create_diarizer(model, device=device, options=options)
     with VramPeak() as vram:
         t0 = time.perf_counter()
         diarizer.load()
@@ -268,6 +269,10 @@ def main(argv: list[str] | None = None) -> None:
     p_diar.add_argument("--num-speakers", type=int, default=None)
     p_diar.add_argument("--min-speakers", type=int, default=None)
     p_diar.add_argument("--max-speakers", type=int, default=None)
+    p_diar.add_argument("--no-median-filter", dest="median_filter", action="store_false",
+                        help="DiariZen: keep the raw segmentation (no 11-frame median filter)")
+    p_diar.add_argument("--exclusive", action="store_true",
+                        help="DiariZen: also return exclusive (one speaker per frame) turns")
 
     p_voice = sub.add_parser("voice")
     p_voice.add_argument("--audio", required=True)
@@ -318,7 +323,8 @@ def main(argv: list[str] | None = None) -> None:
             "min_speakers": args.min_speakers,
             "max_speakers": args.max_speakers,
         }
-        run_diarize([Path(p) for p in args.audio], args.model, [Path(p) for p in args.out], args.device, speakers)
+        run_diarize([Path(p) for p in args.audio], args.model, [Path(p) for p in args.out], args.device, speakers,
+                    {"median_filter": args.median_filter, "exclusive": args.exclusive})
     elif args.command == "ocr":
         run_ocr(Path(args.media), Path(args.out), args.device, args.start, args.duration, args.fps)
     elif args.command == "align":

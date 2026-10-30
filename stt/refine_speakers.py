@@ -71,6 +71,10 @@ class WespeakerTorch:
             vector = self.model(wav)[0].float().cpu().numpy()
         return vector / (np.linalg.norm(vector) + 1e-9)
 
+    def batch(self, wavs: np.ndarray, size: int = 64) -> np.ndarray:
+        """Unit embeddings (n, d) of equal-length windows (n, L)."""
+        return _embed_batches(self, np.asarray(wavs, dtype=np.float32)[:, None], size)
+
 
 class ReDimNet2Torch:
     """ReDimNet2 from torch.hub: 16 kHz audio -> unit embedding (192 values)."""
@@ -88,6 +92,22 @@ class ReDimNet2Torch:
         with self._torch.inference_mode():
             vector = self.model(wav)[0].float().cpu().numpy()
         return vector / (np.linalg.norm(vector) + 1e-9)
+
+    def batch(self, wavs: np.ndarray, size: int = 64) -> np.ndarray:
+        """Unit embeddings (n, d) of equal-length windows (n, L)."""
+        return _embed_batches(self, np.asarray(wavs, dtype=np.float32), size)
+
+
+def _embed_batches(embedder: Any, wavs: np.ndarray, size: int) -> np.ndarray:
+    """Run ``embedder.model`` over ``wavs`` in chunks of ``size``; rows are L2-normalised."""
+    torch = embedder._torch
+    chunks = []
+    with torch.inference_mode():
+        for i in range(0, len(wavs), size):
+            x = torch.from_numpy(np.ascontiguousarray(wavs[i:i + size])).to(embedder.device)
+            chunks.append(embedder.model(x).float().cpu().numpy())
+    vectors = np.concatenate(chunks) if chunks else np.zeros((0, 0), dtype=np.float32)
+    return vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
 
 
 def make_embedder(name: str, device: str = "cuda") -> Embed:

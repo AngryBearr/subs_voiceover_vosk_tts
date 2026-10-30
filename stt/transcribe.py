@@ -99,10 +99,11 @@ def transcribe(args: argparse.Namespace) -> Path:
         merge_captions,
         on_screen_hints,
         smooth_speakers,
+        snap_speaker_boundaries,
         speaker_ids,
         subtitle_records,
     )
-    from stt.diarize import DIARIZERS, Diarization
+    from stt.diarize import DIARIZERS, Diarization, non_default_options
     from stt.textfix import collapse_repeats
     from stt.types import Segment
 
@@ -130,8 +131,17 @@ def transcribe(args: argparse.Namespace) -> Path:
                         ("--max-speakers", args.max_speakers)):
         if value:
             diar_args += [flag, str(value)]
-    diar_data = run_stage("diarize", DIARIZERS[args.diarizer].env, diar_args, diar_path, logs,
-                          all_forced or "diarize" in stages)
+    wanted = {"median_filter": not args.diar_no_median_filter, "exclusive": args.diar_exclusive}
+    if args.diar_no_median_filter:
+        diar_args.append("--no-median-filter")
+    if args.diar_exclusive:
+        diar_args.append("--exclusive")
+    options_changed = diar_path.exists() and (
+        load_json(diar_path).get("options") or {}) != non_default_options(wanted)
+    if options_changed:
+        log.info("[diarize] options differ from the cached ones; re-running with %s", non_default_options(wanted))
+    diar_forced = all_forced or "diarize" in stages or options_changed
+    diar_data = run_stage("diarize", DIARIZERS[args.diarizer].env, diar_args, diar_path, logs, diar_forced)
     if diar_data["turns"] and not diar_data.get("embeddings"):  # DiariZen: prints for speakers.json / the bank
         prints_args = ["prints", "--audio", audio, "--diarization", str(diar_path), "--out", str(diar_path),
                        "--device", args.device]
@@ -144,7 +154,7 @@ def transcribe(args: argparse.Namespace) -> Path:
             load_json(refined_path).get("refined", {}).get("margin") != args.refine_margin
             or refined_path.stat().st_mtime < diar_path.stat().st_mtime)
         diar_data = run_stage("refine", "subs_env", refine_args, refined_path, logs,
-                              all_forced or "diarize" in stages or "refine" in stages or stale)
+                              diar_forced or "refine" in stages or stale)
         log.info("[refine] %s", diar_data.get("refined"))
 
     hotwords = None
@@ -205,7 +215,7 @@ def transcribe(args: argparse.Namespace) -> Path:
     voice_args = ["voice", "--audio", audio, "--diarization", str(diar_path), "--out", str(voice_path),
                   "--device", args.device, "--threshold", str(args.gender_threshold)]
     voice_data = run_stage("voice", "subs_env", voice_args, voice_path, logs,
-                           all_forced or "voice" in stages or "diarize" in stages)
+                           all_forced or "voice" in stages or diar_forced)
 
     # ---- assemble
     diarization = Diarization.from_dict(diar_data)
@@ -220,7 +230,26 @@ def transcribe(args: argparse.Namespace) -> Path:
         words, ocr_stats = merge_captions(words, ocr_data["captions"])
         log.info("On-screen captions: %s", ocr_stats)
     words = assign_speakers(words, diarization, options)
-    words = smooth_speakers(words, options)
+    if args.word_speakers == "viterbi":
+        from stt.audio import read_wav
+        from stt.boundaries import RelabelParams, relabel_words
+        from stt.refine_speakers import make_embedder
+
+        params = RelabelParams(model=args.word_speakers_model, window_s=args.word_window,
+                               switch_penalty=args.word_switch_penalty, prior=args.word_prior,
+                               change_prior=args.word_change_prior, passes=args.word_passes)
+
+        class _LazyEmbedder:  # the model is loaded only when the embeddings are not cached
+            def batch(self, windows: Any) -> Any:
+                return make_embedder(params.model, args.device).batch(windows)
+
+        words, relabel_stats = relabel_words(words, read_wav(out / "audio.wav"), _LazyEmbedder(), params,
+                                             cache=out / f"words.emb.{params.model}.npz")
+        log.info("[word-speakers] %s", relabel_stats)
+    if args.word_smooth == "full":
+        words = smooth_speakers(words, options)
+    elif args.word_smooth == "snap":
+        words = snap_speaker_boundaries(words, options.snap_words)
     hints = on_screen_hints(ocr_data, words, diarization) if ocr_data else {}
     cues = build_cues(words, options)
     mark_overlaps(cues, diarization)
@@ -292,6 +321,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", required=True, help="Output directory (stage results are cached here)")
     parser.add_argument("--asr", default="whisper-large-v3", help="ASR model (see stt/asr.py ASR_MODELS)")
     parser.add_argument("--diarizer", default="pyannote-community-1", help="Diarizer (see stt/diarize.py DIARIZERS)")
+    parser.add_argument("--diar-no-median-filter", action="store_true",
+                        help="DiariZen: no median filter on the segmentation (sharper speaker boundaries)")
+    parser.add_argument("--diar-exclusive", action="store_true",
+                        help="DiariZen: also derive exclusive (one speaker per frame) turns")
     parser.add_argument("--start", type=float, default=0.0, help="Process from this time, seconds")
     parser.add_argument("--duration", type=float, default=None, help="Process this many seconds")
     parser.add_argument("--num-speakers", type=int, default=None, help="Exact number of speakers, if known")
@@ -303,6 +336,20 @@ def main(argv: list[str] | None = None) -> None:
                         help="Re-assign diarized turns that sound clearly like another speaker (stt.refine_speakers)")
     parser.add_argument("--refine-margin", type=float, default=0.1,
                         help="How much closer to the other speaker a turn must sound to move")
+    parser.add_argument("--word-speakers", default="none", choices=["none", "viterbi"],
+                        help="Relabel words by a Viterbi pass over per-word speaker embeddings (stt.boundaries)")
+    parser.add_argument("--word-speakers-model", default="resnet293",
+                        choices=["pyannote", *WESPEAKER, *REDIMNET2], help="Embedding model for --word-speakers")
+    parser.add_argument("--word-switch-penalty", type=float, default=0.3,
+                        help="Cost of a different speaker on consecutive words")
+    parser.add_argument("--word-prior", type=float, default=0.0, help="Bonus for the diarizer's own label")
+    parser.add_argument("--word-change-prior", type=float, default=0.15,
+                        help="Bonus for a speaker change where the diarizer has one")
+    parser.add_argument("--word-window", type=float, default=1.0, help="Audio window per word, seconds")
+    parser.add_argument("--word-passes", type=int, default=1, help="Passes re-estimating centroids")
+    parser.add_argument("--word-smooth", default="full", choices=["full", "snap", "none"],
+                        help="Sentence-level speaker smoothing after the word labels: majority + snapping "
+                             "(default), snapping to sentence ends only, or none")
     parser.add_argument("--hotwords-file", default=None,
                         help="Names/terms for ASR biasing (e.g. hotwords.txt from stt.glossary)")
     parser.add_argument("--fuse", default=None,
