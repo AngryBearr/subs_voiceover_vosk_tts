@@ -506,7 +506,7 @@ Since 30.10 DiariZen also returns an exclusive layer (`"diarizer_options": {"exc
 speaker per 20 ms frame, the strongest of the simultaneously active ones by the segmentation model's
 soft scores, which the words are labelled by (pyannote's pipeline gives such a layer itself). Then
 the words get a second look (`stt.boundaries`, `"word_speakers"` in `stt_config.json`): every word an
-embedding of a 1 s window around it (ResNet293 in batches, ~80 s per episode, cached in
+embedding of a 1 s window around it (ResNet293 in batches, 30-45 s per episode, cached in
 `words.emb.<model>.npz`), every speaker a centroid of its words far from any speaker change, and a
 Viterbi pass picks the label sequence: cosine to the centroids, a penalty of 0.3 for changing speaker
 between consecutive words (fading with the pause between them) and a bonus of 0.15 for a change where
