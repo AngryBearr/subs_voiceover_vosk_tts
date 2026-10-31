@@ -29,7 +29,7 @@ words, `output/exp_shout/`, `output/exp_cards/`), neither taken:
    nothing as Viterbi states. As extra states next to the clusters: +0.5 points of word accuracy, +0.9
    with the locality; replacing the cluster centroids: worse.
 
-**Training data (31.10, evening, the user's go-ahead):** the only speaker labels on this machine are the
+**Training data (31.10, evening, the user's go-ahead; since 1.11 on the external drive, `/media/angrybear/new_large_storage/Survivor/training_data_sdh/` with a README, `output/subs_train` and `output/exp_finetune` are symlinks to it; the trained weights were deleted):** the only speaker labels on this machine are the
 SDH subtitle streams inside the Amazon WEB-DL files of seasons 46 (3 episodes), 48, 49, 50 and 51
 (`output/subs_train/`: `inventory.py` lists the streams of every video file, `extract_subs.py` pulls the
 English SDH streams to `<season>/<code>.sdh.srt`, `counts.json` has the labels per episode): 47 episodes,
