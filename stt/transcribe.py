@@ -103,7 +103,7 @@ def transcribe(args: argparse.Namespace) -> Path:
         speaker_ids,
         subtitle_records,
     )
-    from stt.diarize import DIARIZER_OPTION_DEFAULTS, DIARIZERS, Diarization, non_default_options
+    from stt.diarize import DIARIZER_OPTION_DEFAULTS, DIARIZERS, Diarization, local_model_dir, non_default_options
     from stt.textfix import collapse_repeats
     from stt.types import Segment
 
@@ -133,6 +133,9 @@ def transcribe(args: argparse.Namespace) -> Path:
             diar_args += [flag, str(value)]
     wanted = {"median_filter": not args.diar_no_median_filter, "exclusive": args.diar_exclusive,
               "ahc_threshold": args.diar_ahc_threshold}
+    local_dir = local_model_dir(DIARIZERS[args.diarizer])
+    if local_dir:  # a different checkpoint must not reuse the cached turns
+        wanted["model_dir"] = local_dir
     if args.diar_ahc_threshold != DIARIZER_OPTION_DEFAULTS["ahc_threshold"]:
         diar_args += ["--ahc-threshold", str(args.diar_ahc_threshold)]
     if args.diar_no_median_filter:

@@ -5,6 +5,51 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan agreed 31.10.2026: shouts, name cards, and where the ceiling is
+
+The user picked two of the ideas of 30.10 (`docs/experiments.md`, 31.10 rows): a shout compensation of
+the word embeddings and name-card conflicts as a sign of merged clusters; pyannote Precision-3 was
+skipped (a new paid account, nothing on OpenRouter). Both measured on S51E01-E05 (4094 SDH-labelled
+words, `output/exp_shout/`, `output/exp_cards/`), neither taken:
+
+1. **Shouts** are not the cause: the wrong words are not louder or higher than the right ones, the
+   "shout direction" of the embeddings holds 1% of the variance, and compensating it, clipping the
+   windows at pauses or two centroids per cluster change nothing or lose. Measured on the way: a word
+   may take only a speaker heard within 30 s (`locality_s`, off): S51 lines 63.5% -> 63.9%, S29 F1
+   0.861 -> 0.852, S20 F1 0.878 -> 0.868. Not taken (code removed): it removes the far-away shouts the
+   Viterbi finds.
+2. **Name cards** catch 1 of the 50 merged pairs: the merged person's interviews sit in their own
+   cluster, only their field speech lands in another's. Kept from it: a card shown in a pause now goes to
+   the speaker of the next 10 s (`on_screen_hints`; 4 of 191 cards, all right).
+3. **Where the ceiling is**: centroids from a person's own labelled words classify 79.8% of the words,
+   the diarizer's clusters 61.9%; 30 clusters hold three or more people and 63% of the wrong words;
+   re-clustering the turns with ResNet293 does not beat DiariZen. Centroids from the interview turns
+   under the name cards reach 67.0% on the card persons (clusters 58.5%): interview speech is far from
+   field speech (cosine 0.335 vs 0.428 to the own centroid), which is also why the voice bank gave
+   nothing as Viterbi states. As extra states next to the clusters: +0.5 points of word accuracy, +0.9
+   with the locality; replacing the cluster centroids: worse.
+
+**Training data (31.10, evening, the user's go-ahead):** the only speaker labels on this machine are the
+SDH subtitle streams inside the Amazon WEB-DL files of seasons 46 (3 episodes), 48, 49, 50 and 51
+(`output/subs_train/`: `inventory.py` lists the streams of every video file, `extract_subs.py` pulls the
+English SDH streams to `<season>/<code>.sdh.srt`, `counts.json` has the labels per episode): 47 episodes,
+57.8 h, 9865 labelled lines ("NAME:"), no `>>` marks. The RePack seasons 1-26, S45/S46 (RUS SUB) and The
+Amazing Race have no subtitle streams; opensubtitles.org and subdl are behind Cloudflare for this machine,
+subtitlecat shows the Amazon captions of S17-S33 as page text but without speaker labels. Training set: S46,
+S48, S49, S50, S51E06 (~51 h, ~8.3k labelled lines); held out: S51E01-E05, S20, S29, Australian S10
+(24 episodes with SDH, `/media/angrybear/large_storage/Survivor/Australia S10 1080p`, the `.srt` next to the
+video; the `_synced.srt` files are ASS inside). `build_audio.py` decodes the audio and runs DiariZen (exclusive
+layer) + the ResNet293 refinement per episode without ASR (~4 min each); `embed_labelled.py` embeds 1 s
+windows inside the labelled lines for the embedding-side experiments (`output/exp_proj/`).
+
+**Fine-tuning tried the same evening (two runs, `docs/experiments.md`):** no gain through the pipeline (S51 63.5% -> 63.8-64.0%, S20 F1 0.878 -> 0.866-0.870, S29 0.861 -> 0.859-0.860) and no movement on the corrected regions of the validation set; the user's reading, agreed: with the open models and this labelling, the hard off-screen lines stay at about 64%. Not pursued further. Status file of long jobs: `output/STATUS.md`, written every minute by `subs_env/bin/python -I scripts/status.py --loop 60` (start it with nohup when a long job runs).
+
+Next, if the user wants more here: (a) the card persons as extra Viterbi states (about one point, a
+day: the bank-state code of commit 4cfd261 is the template, the seeds come from `ocr.json` and the
+refined turns); (b) the big lever stays domain adaptation of the segmentation model on Survivor audio
+with the SDH / `>>` subtitles as weak labels (the clusters are the limit, not the embeddings;
+`docs/experiments.md`, 30.10 ideas), 2-3 days of work and hours of GPU per variant.
+
 ## Plan agreed 30.10.2026: speaker changes without a pause
 
 The user's biggest complaint: at a turn change without a pause one speaker gets the other's words,

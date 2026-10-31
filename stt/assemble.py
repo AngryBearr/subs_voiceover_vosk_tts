@@ -294,11 +294,13 @@ def merge_captions(
 
 
 def on_screen_hints(ocr: dict[str, Any], words: list[Word], diarization: Diarization,
-                    max_hints: int = 8) -> dict[str, list[str]]:
+                    max_hints: int = 8, after_s: float = 10.0) -> dict[str, list[str]]:
     """Per diarizer speaker: names shown on screen while they talked and caption labels of their lines.
 
-    Repeated hints are counted ("title: SHAUN x3"); OCR spacing variants count as one; the
-    `max_hints` most frequent are kept.
+    A card goes to the speaker talking most while it is shown; a card shown in a pause (no diarized
+    speech under it) goes to the speaker of most of the words in the `after_s` seconds after it
+    (on S51E01-E02 the four such cards all belonged to that speaker). Repeated hints are counted
+    ("title: SHAUN x3"); OCR spacing variants count as one; the `max_hints` most frequent are kept.
     """
     index = _TurnIndex(diarization.exclusive or diarization.turns)
     found: dict[str, list[str]] = {}
@@ -306,6 +308,10 @@ def on_screen_hints(ocr: dict[str, Any], words: list[Word], diarization: Diariza
         talk: dict[str, float] = {}
         for t in index.overlapping(card["start"], card["end"]):
             talk[t.speaker] = talk.get(t.speaker, 0.0) + min(card["end"], t.end) - max(card["start"], t.start)
+        if not talk:
+            after = [w.speaker for w in words
+                     if w.speaker and card["start"] <= (w.start + w.end) / 2 <= card["end"] + after_s]
+            talk = {s: float(n) for s, n in Counter(after).items()}
         if talk:
             label = card["text"] + (f" ({card['descriptor']})" if card.get("descriptor") else "")
             found.setdefault(max(talk, key=talk.__getitem__), []).append(f"{card['kind']}: {label}")

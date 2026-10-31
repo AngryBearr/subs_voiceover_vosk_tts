@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -42,6 +44,7 @@ class DiarSpec:
     model_id: str
     env: str = "subs_env"
     note: str = ""
+    model_env: str = ""  # environment variable holding a local model directory (overrides model_id)
 
 
 DIARIZERS: dict[str, DiarSpec] = {
@@ -56,7 +59,36 @@ DIARIZERS: dict[str, DiarSpec] = {
         env="diarizen_env",
         note="DiariZen v2, CC-BY-NC-4.0 weights, own venv: bash scripts/setup_envs.sh diarizen",
     ),
+    "diarizen-local": DiarSpec(
+        "diarizen",
+        "",
+        env="diarizen_env",
+        note="DiariZen checkpoint from the directory in $DIARIZEN_LOCAL_DIR (config.toml, pytorch_model.bin, plda/)",
+        model_env="DIARIZEN_LOCAL_DIR",
+    ),
 }
+
+DIARIZEN_REQUIRED = ("config.toml", "pytorch_model.bin", "plda")
+
+
+def local_model_dir(spec: DiarSpec) -> str | None:
+    """The absolute local model directory of `spec` (from its environment variable, or a model_id that
+    is an existing directory), validated; None for a hub model id."""
+    if spec.model_env:
+        value = os.environ.get(spec.model_env, "")
+        if not value:
+            raise RuntimeError(f"Set ${spec.model_env} to the local DiariZen checkpoint directory")
+    elif Path(spec.model_id).is_dir():
+        value = spec.model_id
+    else:
+        return None
+    path = Path(value).expanduser().absolute()
+    if not path.is_dir():
+        raise RuntimeError(f"DiariZen checkpoint directory not found: {path}")
+    missing = [name for name in DIARIZEN_REQUIRED if not (path / name).exists()]
+    if missing:
+        raise RuntimeError(f"DiariZen checkpoint {path} lacks {', '.join(missing)}")
+    return str(path)
 
 
 @dataclass
@@ -228,12 +260,21 @@ def _segment_hard_and_soft(pipeline: Any, file: dict[str, Any]) -> tuple[Any, An
 class DiarizenDiarizer(Diarizer):
     """DiariZen (pyannote 3.1 fork): WavLM-Conformer segmentation + WeSpeaker ResNet34 + VBx clustering."""
 
+    _local_dir: str | None = None
     batch_size = 8  # segmentation and embedding batches: ~4.5 GB VRAM (32 by default: ~13 GB)
 
     def load(self) -> None:
         from diarizen.pipelines.inference import DiariZenPipeline
 
-        self._pipeline = DiariZenPipeline.from_pretrained(self.spec.model_id)
+        self._local_dir = local_model_dir(self.spec)
+        if self._local_dir:  # same construction as from_pretrained, with the checkpoint taken from disk
+            from huggingface_hub import hf_hub_download
+
+            embedding_model = hf_hub_download(
+                repo_id="pyannote/wespeaker-voxceleb-resnet34-LM", filename="pytorch_model.bin")
+            self._pipeline = DiariZenPipeline(diarizen_hub=Path(self._local_dir), embedding_model=embedding_model)
+        else:
+            self._pipeline = DiariZenPipeline.from_pretrained(self.spec.model_id)
         self._pipeline.segmentation_batch_size = self.batch_size
         self._pipeline.embedding_batch_size = self.batch_size
         # AHC threshold before VBx (0.6 in the model's config): 0.5 kept Wes and Alec apart in S29E05 and
@@ -252,7 +293,8 @@ class DiarizenDiarizer(Diarizer):
         self._pipeline.min_speakers = num_speakers or min_speakers or 1
         self._pipeline.max_speakers = num_speakers or max_speakers or 20
         turns, exclusive = self._run(np.ascontiguousarray(audio, dtype=np.float32))
-        return Diarization(turns=turns, exclusive=exclusive, options=non_default_options(self.options))
+        options = {**self.options, **({"model_dir": self._local_dir} if self._local_dir else {})}
+        return Diarization(turns=turns, exclusive=exclusive, options=non_default_options(options))
 
     def _run(self, audio: np.ndarray) -> tuple[list[Turn], list[Turn]]:
         """DiariZenPipeline.__call__ re-implemented step by step, to switch the median filter off

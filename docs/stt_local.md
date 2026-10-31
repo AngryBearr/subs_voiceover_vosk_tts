@@ -226,7 +226,9 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   and stays only in the original audio. The cues are then translated and voiced as usual.
   S10E01: 61 captions — 32 already right in ASR, 17 replaced, 11 added, 1 under other speech.
 - Name cards, titles and caption labels ("Shonee: …") become `on_screen` evidence for the
-  speaker that talks most while they are shown; the speaker-naming LLM sees it.
+  speaker that talks most while they are shown (a card shown in a pause goes to the speaker of most
+  words in the next 10 s, since 31.10); the speaker-naming LLM sees it. On S51E01-E05 this rule put
+  140 of 191 cards with an SDH-known person on that person's main speaker, the best of four rules tried.
 - `--no-ocr` (or `"ocr": {"enabled": false}`) skips the stage; `--force ocr` rescans.
 
 ## Timing of the Russian lines
@@ -502,7 +504,7 @@ fixes per episode but changed nothing on the SDH-labelled lines, and the line's 
 closer to the new speaker in only 26 of 62 fixes it could judge: not used. Gender/age: `audeering/wav2vec2-large-robust-24-ft-age-gender`
 (CC-BY-NC-SA-4.0, abstains below 0.7).
 
-Since 30.10 DiariZen also returns an exclusive layer (`"diarizer_options": {"exclusive": true}`): one
+`"diarizer": "diarizen-local"` runs a DiariZen checkpoint from the directory in `$DIARIZEN_LOCAL_DIR` (the layout of the v2 snapshot: `config.toml`, `pytorch_model.bin`, `plda/`; since 31.10, for fine-tuned models; a different directory invalidates the cached turns). Since 30.10 DiariZen also returns an exclusive layer (`"diarizer_options": {"exclusive": true}`): one
 speaker per 20 ms frame, the strongest of the simultaneously active ones by the segmentation model's
 soft scores, which the words are labelled by (pyannote's pipeline gives such a layer itself). Then
 the words get a second look (`stt.boundaries`, `"word_speakers"` in `stt_config.json`): every word an

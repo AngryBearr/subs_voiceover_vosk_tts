@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from stt.align import attach_times
 from stt.assemble import (
@@ -193,6 +194,13 @@ class OcrTest(unittest.TestCase):
                "captions": [{"start": 6.0, "end": 7.0, "text": "Hi there.", "label": "Stevie"}]}
         self.assertEqual(on_screen_hints(ocr, words, diarization),
                          {"A": ["name_card: GEORGE (VILLAINS)"], "B": ["caption label: Stevie"]})
+
+    def test_on_screen_hints_card_in_a_pause_goes_to_the_next_words(self) -> None:
+        diarization = Diarization(turns=[Turn(0.0, 5.0, "A"), Turn(12.0, 20.0, "B")])
+        words = [Word(12.0 + i, 12.5 + i, "w", speaker="B") for i in range(3)]
+        ocr = {"cards": [{"start": 10.0, "end": 11.0, "kind": "name_card", "text": "BRADY"},
+                         {"start": 40.0, "end": 41.0, "kind": "name_card", "text": "NOBODY"}]}
+        self.assertEqual(on_screen_hints(ocr, words, diarization), {"B": ["name_card: BRADY"]})
 
 
 class RunTest(unittest.TestCase):
@@ -954,3 +962,24 @@ class StressStageTest(unittest.TestCase):
             episode.args.force = "stress"
             (episode.out / "dub.ru.vosk.json").write_text(json.dumps(lines), encoding="utf-8")
             self.assertTrue(episode.needed("stress", [episode.out / "stress.json"], "dub"))
+
+
+def test_diarizen_local_spec_and_validation(tmp_path, monkeypatch):
+    from stt.diarize import DIARIZERS, local_model_dir
+
+    spec = DIARIZERS["diarizen-local"]
+    assert spec.kind == "diarizen" and spec.env == "diarizen_env"
+    assert local_model_dir(DIARIZERS["diarizen-v2"]) is None  # a hub id stays a hub id
+    monkeypatch.delenv("DIARIZEN_LOCAL_DIR", raising=False)
+    with pytest.raises(RuntimeError, match="DIARIZEN_LOCAL_DIR"):
+        local_model_dir(spec)
+    monkeypatch.setenv("DIARIZEN_LOCAL_DIR", str(tmp_path / "nope"))
+    with pytest.raises(RuntimeError, match="not found"):
+        local_model_dir(spec)
+    monkeypatch.setenv("DIARIZEN_LOCAL_DIR", str(tmp_path))
+    (tmp_path / "config.toml").write_text("")
+    with pytest.raises(RuntimeError, match="pytorch_model.bin, plda"):
+        local_model_dir(spec)
+    (tmp_path / "pytorch_model.bin").write_bytes(b"")
+    (tmp_path / "plda").mkdir()
+    assert local_model_dir(spec) == str(tmp_path)
