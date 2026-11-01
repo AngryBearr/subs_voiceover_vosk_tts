@@ -5,7 +5,7 @@
 
 Jobs it knows: DiariZen fine-tuning runs (output/exp_finetune/run*/train.log), the training-data build
 (output/subs_train/build_audio.log), the subtitle extraction (output/subs_train/extract.log), the experiment
-harness runs (output/exp_boundary/run_*.log). A job is "running" while its log changed in the last 3 minutes.
+harness runs (output/exp_boundary/run_*.log, output/exp_tse/run_*.log). A job is "running" while its log changed in the last 3 minutes.
 """
 from __future__ import annotations
 
@@ -121,6 +121,9 @@ def collect() -> list[dict]:
         rows.append(row)
     for log in sorted(HERE.glob("exp_boundary/run_*.log")):
         if (row := line_counter(log, f"harness {log.stem}", r"^=== ", None, "stt.transcribe per episode / variant")):
+            rows.append(row)
+    for log in sorted(HERE.glob("exp_tse/run_*.log")):
+        if (row := line_counter(log, f"voice sample {log.stem}", r"^=== ", None, "per line or episode")):
             rows.append(row)
     return rows
 

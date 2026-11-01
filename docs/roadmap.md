@@ -18,10 +18,20 @@ tables: `output/exp_tse/` and `output/exp_tsvad/` (`report_test.md`, `report_nea
 2. **USEF-TSE, extracting a voice by its sample** - done, dropped: on real scenes the output hardly depends on the sample.
 3. **TS-VAD (AED-TSVAD), the activity of a given voice** - done, not taken: the sample does steer it, but it is below
    the plain voice comparison made with the same samples and useless without a list of who is in the scene.
-4. **What the tests showed instead**: knowing who is in the scene is worth far more than the method. With the scene's
-   people from the SDH labels a plain ResNet293 comparison gets 78-81% of the hard lines against the pipeline's 53-54%; with
-   the people the pipeline itself names nearby it gets 58-59% against 56%, and the real speaker is among those people on
-   only 69% of the hard lines. A better list of candidates is what could help now, not another separator.
+4. **What the tests showed instead**: with the scene's people from the SDH labels (an oracle, the real speaker is always
+   among them) a plain ResNet293 comparison gets 78-81% of the hard lines against the pipeline's 53-54%; with the people the
+   pipeline itself names nearby it gets 58-59% against 56%.
+5. **Who is in the scene, without the labels of the moment** - done 1.11, nothing to build (`output/exp_tse/scene_people.py`,
+   `cue_prior.py`, `phrase_prior.py`, `unnamed_sweep.py`, `unnamed_precision.py`; numbers in `docs/experiments.md`). Wider
+   lists hold the real speaker more often (65% within 8 s, 79% within 60 s, E02/E04/E05), but the comparison gets no
+   better (58-60%). A soft bonus for the pipeline's own name first looked strong on exact SDH lines (58.3% -> 65.6%), but
+   nearly all of that came from lines without a name, which the metric cannot count as broken. On lines that already have
+   a name the rule gains +1.6 / -0.4 points; on the pipeline's own cues and phrases +1-2 points on E02/E04/E05, a loss of
+   about 1 point on E01/E03, and S29 F1 goes down. Moves of unnamed cues reach the right person only 20-54% of the time.
+   So the mixed cluster stays with its generic voices: a wrong named voice is no better.
+
+The acoustic and scene-list ideas of this plan are used up. Not measured yet: taking the speaker straight from the SDH label
+for the lines that have one, on the seasons with such subtitles (S46, S48-S51, Australian S10; not S20).
 
 ## Plan agreed 31.10.2026: shouts, name cards, and where the ceiling is
 
