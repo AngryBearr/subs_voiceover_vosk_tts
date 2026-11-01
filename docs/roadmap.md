@@ -5,6 +5,24 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan of 31.10.2026: who speaks, told by a sample of the voice
+
+The question changes from "which cluster is this piece like" to "is this person's voice here". Scripts, logs and
+tables: `output/exp_tse/` and `output/exp_tsvad/` (`report_test.md`, `report_nearby.md`). The numbers are in
+`docs/experiments.md`. Nothing went into the pipeline.
+
+1. **A common test set** - done: S51E01-E05, 1048 SDH-labelled lines selected without looking at whether the pipeline was
+   right (exchanges inside one cue, short interjections, ordinary lines as the control). Samples at least 120 s from the
+   tested line: SDH lines from conversations ("field"), voice bank stretches, mostly confessionals ("interview"). Settings
+   were picked on E01/E03, the verdict comes from E02/E04/E05.
+2. **USEF-TSE, extracting a voice by its sample** - done, dropped: on real scenes the output hardly depends on the sample.
+3. **TS-VAD (AED-TSVAD), the activity of a given voice** - done, not taken: the sample does steer it, but it is below
+   the plain voice comparison made with the same samples and useless without a list of who is in the scene.
+4. **What the tests showed instead**: knowing who is in the scene is worth far more than the method. With the scene's
+   people from the SDH labels a plain ResNet293 comparison gets 78-81% of the hard lines against the pipeline's 53-54%; with
+   the people the pipeline itself names nearby it gets 58-59% against 56%, and the real speaker is among those people on
+   only 69% of the hard lines. A better list of candidates is what could help now, not another separator.
+
 ## Plan agreed 31.10.2026: shouts, name cards, and where the ceiling is
 
 The user picked two of the ideas of 30.10 (`docs/experiments.md`, 31.10 rows): a shout compensation of
