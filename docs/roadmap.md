@@ -5,7 +5,7 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
-## Plan of 31.10.2026: who speaks, told by a sample of the voice
+## Plan of 31.10.2026: who speaks, told by a sample of the voice (closed by the user 1.11.2026)
 
 The question changes from "which cluster is this piece like" to "is this person's voice here". Scripts, logs and
 tables: `output/exp_tse/` and `output/exp_tsvad/` (`report_test.md`, `report_nearby.md`). The numbers are in
@@ -30,8 +30,9 @@ tables: `output/exp_tse/` and `output/exp_tsvad/` (`report_test.md`, `report_nea
    about 1 point on E01/E03, and S29 F1 goes down. Moves of unnamed cues reach the right person only 20-54% of the time.
    So the mixed cluster stays with its generic voices: a wrong named voice is no better.
 
-The acoustic and scene-list ideas of this plan are used up. Not measured yet: taking the speaker straight from the SDH label
-for the lines that have one, on the seasons with such subtitles (S46, S48-S51, Australian S10; not S20).
+Closed: the user took these directions as finished on 1.11.2026, nothing went into the pipeline. An idea left unmeasured
+when it closed: taking the speaker straight from the SDH label for the lines that have one, on the seasons with such
+subtitles (S46, S48-S51, Australian S10; not S20).
 
 ## Plan agreed 31.10.2026: shouts, name cards, and where the ceiling is
 
