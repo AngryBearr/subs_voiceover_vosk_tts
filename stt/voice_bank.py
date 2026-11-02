@@ -376,10 +376,12 @@ def other_voice_seconds(episode_dir: Path, speaker: str, start: float, end: floa
     speakers_path = episode_dir / "speakers.json"
     if not found or not speakers_path.exists():
         return 0.0
-    labels = {s["id"]: s.get("diarizer_label") for s in json.loads(speakers_path.read_text(encoding="utf-8"))}
-    own = labels.get(speaker)
+    # a person made of several clusters (stt.season_voices) lists them in "diarizer_labels"
+    labels = {s["id"]: {*(s.get("diarizer_labels") or []), s.get("diarizer_label")}
+              for s in json.loads(speakers_path.read_text(encoding="utf-8"))}
+    own = labels.get(speaker, {None})
     turns = json.loads(found[0].read_text(encoding="utf-8"))["turns"]
-    return sum(max(0.0, min(end, t["end"]) - max(start, t["start"])) for t in turns if t["speaker"] != own)
+    return sum(max(0.0, min(end, t["end"]) - max(start, t["start"])) for t in turns if t["speaker"] not in own)
 
 
 def _window_scores(embed: "SegmentEmbedder", audio: np.ndarray, rate: int, prints: list[np.ndarray],

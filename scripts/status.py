@@ -4,8 +4,9 @@
     subs_env/bin/python -I scripts/status.py --loop 60  # rewrite output/STATUS.md every 60 s (run with nohup)
 
 Jobs it knows: DiariZen fine-tuning runs (output/exp_finetune/run*/train.log), the training-data build
-(output/subs_train/build_audio.log), the subtitle extraction (output/subs_train/extract.log), the experiment
-harness runs (output/exp_boundary/run_*.log, output/exp_tse/run_*.log). A job is "running" while its log changed in the last 3 minutes.
+(output/subs_train/build_audio.log), the word times (output/subs_train/build_words.log), the subtitle extraction
+(output/subs_train/extract.log), the speaker model runs (output/exp_spk/*/train.log, output/exp_spk/run_*.log), the
+experiment harness runs (output/exp_boundary/run_*.log, output/exp_tse/run_*.log). A job is "running" while its log changed in the last 3 minutes.
 """
 from __future__ import annotations
 
@@ -86,7 +87,7 @@ def line_counter(log: Path, job: str, done_pattern: str, total: int | None, stag
         return None
     text = log.read_text(encoding="utf-8", errors="replace")
     done = len(re.findall(done_pattern, text, re.M))
-    finished = bool(re.search(r"BUILD DONE|ALL DONE|LOC DONE|EMBED DONE", text)) or (
+    finished = bool(re.search(r"BUILD DONE|ALL DONE|LOC DONE|EMBED DONE|WORDS DONE|TRAIN DONE|LISTEN DONE", text)) or (
         job == "subtitle extraction" and (HERE / "subs_train/counts.json").exists()
         and (HERE / "subs_train/counts.json").stat().st_mtime >= log.stat().st_mtime)
     t0 = started_at(log, text)
@@ -96,6 +97,25 @@ def line_counter(log: Path, job: str, done_pattern: str, total: int | None, stag
     return {"job": job, "stage": "finished" if finished else stage, "percent": round(100 * frac, 1) if frac is not None else None,
             "elapsed": _fmt(elapsed), "remaining": "0" if finished else _fmt(remaining),
             "note": f"{done}" + (f" of {total}" if total else "") + " done", "running": _alive(log) and not finished,
+            "started": datetime.fromtimestamp(t0).strftime("%H:%M")}
+
+
+def spk_training(log: Path) -> dict | None:
+    """Speaker model run: lines "epoch E/N step S/M loss L ..." and "val epoch E ..." (output/exp_spk/train.py)."""
+    text = log.read_text(encoding="utf-8", errors="replace")
+    bars = re.findall(r"epoch (\d+)/(\d+) step (\d+)/(\d+)", text)
+    if not bars:
+        return None
+    epoch, epochs, step, steps = (int(x) for x in bars[-1])
+    frac = ((epoch - 1) + step / max(steps, 1)) / max(epochs, 1)
+    finished = "TRAIN DONE" in text
+    t0 = started_at(log, text)
+    elapsed = (log.stat().st_mtime if finished else time.time()) - t0
+    vals = re.findall(r"val (epoch .*)$", text, re.M)
+    return {"job": f"speaker model {log.parent.name}", "stage": "finished" if finished else f"epoch {epoch}/{epochs}, step {step}/{steps}",
+            "percent": round(100 * frac, 1), "elapsed": _fmt(elapsed),
+            "remaining": "0" if finished else _fmt(elapsed / frac - elapsed if frac > 0.01 else None),
+            "note": vals[-1][:90] if vals else "no validation yet", "running": _alive(log) and not finished,
             "started": datetime.fromtimestamp(t0).strftime("%H:%M")}
 
 
@@ -119,6 +139,21 @@ def collect() -> list[dict]:
         rows.append(row)
     if (row := line_counter(HERE / "subs_train/extract.log", "subtitle extraction", r"^S\d\d/", None, "ffmpeg per file")):
         rows.append(row)
+    if (row := line_counter(HERE / "subs_train/build_words.log", "training data: word times (Whisper)",
+                            r"^\[\d+/\d+\] ", 35, "Whisper large-v3 per episode")):
+        rows.append(row)
+    for log in sorted(HERE.glob("subs_train/build_words_*.log")):
+        if (row := line_counter(log, f"training data: {log.stem}", r"^\[\d+/\d+\] ", None, "decode + Whisper per episode")):
+            rows.append(row)
+    for log in sorted(HERE.glob("exp_spk/*/train.log")):
+        if (row := spk_training(log)):
+            rows.append(row)
+    for log in sorted(HERE.glob("exp_spk/run_*.log")):
+        if (row := line_counter(log, f"speaker model {log.stem}", r"^=== |^\{'code'", None, "per episode or step")):
+            rows.append(row)
+    for log in sorted(HERE.glob("stt_listen/run_*.log")):
+        if (row := line_counter(log, f"voice-over {log.stem}", r"\] [a-z]+(?: \(\w+\))? \.\.\.$", 19, "stages of stt.run (3 engines)")):
+            rows.append(row)
     for log in sorted(HERE.glob("exp_boundary/run_*.log")):
         if (row := line_counter(log, f"harness {log.stem}", r"^=== ", None, "stt.transcribe per episode / variant")):
             rows.append(row)

@@ -856,7 +856,9 @@ class DiarizerFallbackTest(unittest.TestCase):
             episode = mock.Mock(media=Path("ep.mkv"), out=Path(tmp), season=Path(tmp) / "s.glossary.json",
                                 args=mock.Mock(mode="fast", start=None, duration=None),
                                 config={"diarizer": "diarizen-v2", "modes": {"fast": {"asr": "whisper-large-v3"}},
-                                        "ocr": {"enabled": False}})
+                                        "ocr": {"enabled": False}},
+                                subtitle_source=mock.Mock(return_value=None), subtitle_key=mock.Mock(return_value="none"),
+                                subtitle_stamp=Path(tmp) / ".stages" / "transcribe.subtitles")
             with mock.patch.object(run, "REPO_ROOT", Path(tmp)), mock.patch.object(transcribe, "main") as main, \
                     self.assertLogs("stt.run", "WARNING"):
                 run.Episode.transcribe(episode)

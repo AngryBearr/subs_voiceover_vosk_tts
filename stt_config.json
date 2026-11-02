@@ -1,4 +1,17 @@
 {
+  "presets": {
+    "main": {"label": "Основной: лучшее качество, три озвучки", "settings": {}},
+    "upload": {"label": "Для облака: как основной, серия около 2 ГБ",
+               "settings": {"mix": {"video": {"compress": true, "target_gb": 2.0}}}},
+    "fast": {"label": "Быстрый: только Whisper и Vosk, без проверок",
+             "settings": {"mode": "fast", "season_voices": {"enabled": false}, "subtitles": {"online": false},
+                          "voiceover": {"engine": "vosk", "stress_check": false, "listen_stress": false, "speech_check": false},
+                          "ui": {"engines": ["vosk"]}}},
+    "previous": {"label": "Прежний: без голосов сезона и субтитров, старая громкость",
+                 "settings": {"season_voices": {"enabled": false}, "subtitles": {"enabled": false},
+                              "mix": {"rest_duck_db": 3.0, "voice_gain_db": 0.0, "loudness_lufs": null}}}
+  },
+  "ui": {"engines": ["vosk", "teratts", "f5"]},
   "paths": {"work": "output/stt", "season": null, "finished": null, "finished_folder": "STT_{season}"},
   "mode": "accurate",
   "modes": {
@@ -9,7 +22,9 @@
   "diarizer_options": {"median_filter": true, "exclusive": true, "ahc_threshold": 0.5},
   "speaker_refine": {"model": "resnet293", "margin": 0.1},
   "word_speakers": {"enabled": true, "model": "resnet293", "switch_penalty": 0.3, "prior": 0.0, "change_prior": 0.15, "window_s": 1.0, "passes": 1},
+  "season_voices": {"enabled": true, "model": "resnet293-ft", "min_words": 20},
   "ocr": {"enabled": true, "fps": 2.0},
+  "subtitles": {"enabled": true, "online": true, "imdb": {"amazing race": "tt0285335", "australia": null, "survivor": "tt0239195"}, "archive": null, "turn_bonus": 0.3},
   "llm": {
     "model": "openai/gpt-6-luna",
     "router": "openrouter",
@@ -32,7 +47,7 @@
   },
   "voiceover": {
     "config": "voiceover_config.json",
-    "engine": "vosk",
+    "engine": "f5,teratts,vosk",
     "parallel_cpu": true,
     "host_voice": "eng_m3+eng_m4",
     "engines": {
@@ -53,14 +68,17 @@
   "mix": {
     "duck_db": 12.0,
     "duck": "voices",
-    "rest_duck_db": 3.0,
+    "rest_duck_db": 6.0,
+    "voice_gain_db": 3.0,
+    "loudness_lufs": -16.0,
     "subtitles": true,
     "mux": true,
     "tracks": "combined",
     "track_order": ["f5", "teratts", "vosk"],
     "track_titles": {"f5": "Многоголосый закадровый (голоса участников, ESpeech)",
                      "teratts": "Двухголосый закадровый (TeraTTS)", "vosk": "Двухголосый закадровый (Vosk)"},
-    "keep_wav": false
+    "keep_wav": false,
+    "video": {"compress": false, "target_gb": 2.0, "codec": "hevc_nvenc", "original_audio_kbps": 160}
   },
   "crowd": {"enabled": false, "voices": 3, "gain_db": -4.0}
 }

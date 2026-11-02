@@ -360,6 +360,9 @@ class VoskEngine:
                     from voiceover.normalize import keep_yo_spelling
                     text = keep_yo_spelling(expanded[index]["_normalized_text"], text,  # type: ignore[index]
                                             self._accentizer.yo_homographs, self._accentizer.accents)
+                if self.normalization.get("unstress_function_words", True):
+                    from utils.text_normalizer import unstress_function_words
+                    text = unstress_function_words(text)
                 if self.normalization.get("fill_stress", True):
                     from utils.text_normalizer import fill_dictionary_stress
                     text = fill_dictionary_stress(text, self._accentizer.accents, self._accentizer.omographs)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from utils.text_normalizer import accent_cue, fill_dictionary_stress, ruaccent_pass
+from utils.text_normalizer import unstress_function_words, accent_cue, fill_dictionary_stress, ruaccent_pass
 
 
 class _Accentizer:
@@ -58,3 +58,11 @@ def test_user_stress_marks_win_and_leave_the_display() -> None:
     # number expansion adds words: the marked one is still found in order
     assert keep_user_stress("В дв+е т+ысячи гор+оде зам+ок", "В 2000 город+е з+амок") == "В дв+е т+ысячи город+е з+амок"
     assert keep_user_stress("+Это всё", "Это всё") == "+Это всё"
+
+
+def test_unstress_function_words() -> None:
+    assert unstress_function_words("Он+и б+ыли н+а моём плот+у.") == "Он+и б+ыли на моём плот+у."
+    assert unstress_function_words("Н+е хоч+у д+о конц+а, н+о б+ез неё.") == "Не хоч+у до конц+а, но без неё."
+    assert unstress_function_words("н+е было, н+а берег, н+и за что, н+е за что") == "н+е было, н+а берег, н+и за что, н+е за что"
+    assert unstress_function_words("Д+а, з+амок на д+ому") == "Д+а, з+амок на д+ому"  # other words stay
+    assert unstress_function_words("Н+а") == "На"  # nothing after it

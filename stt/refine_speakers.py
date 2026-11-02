@@ -34,6 +34,8 @@ RATE = 16_000
 # WeSpeaker checkpoints loaded into pyannote's PyTorch port of the same architecture
 WESPEAKER: dict[str, tuple[str, str]] = {
     "resnet293": ("Wespeaker/wespeaker-voxceleb-resnet293-LM", "WeSpeakerResNet293"),
+    # fine-tuned on Survivor speech (docs/experiments.md); the weights live under models/, not in git
+    "resnet293-ft": ("local:models/speaker/resnet293-ft/avg_model.pt", "WeSpeakerResNet293"),
 }
 
 # ReDimNet2 (PalabraAI, MIT, torch.hub, pinned commit; weights of the v1.0.0 release): B6 0.29 / 0.52 / 0.99% EER on
@@ -47,6 +49,12 @@ REDIMNET2: dict[str, dict[str, str]] = {
 Embed = Callable[[np.ndarray], np.ndarray]
 
 
+def model_available(name: str) -> bool:
+    """False only for a model whose weights live in this repository's ``models`` and are missing (they are not in git)."""
+    repo = WESPEAKER.get(name, ("", ""))[0]
+    return not repo.startswith("local:") or (Path(__file__).resolve().parents[1] / repo.removeprefix("local:")).exists()
+
+
 class WespeakerTorch:
     """A WeSpeaker model in pyannote's PyTorch port: 16 kHz audio -> unit embedding (~35 ms per turn).
 
@@ -58,7 +66,13 @@ class WespeakerTorch:
         from huggingface_hub import hf_hub_download
 
         repo, klass = WESPEAKER[name]
-        state = torch.load(hf_hub_download(repo, "avg_model.pt"), map_location="cpu")
+        if repo.startswith("local:"):
+            path = Path(__file__).resolve().parents[1] / repo.removeprefix("local:")
+            if not path.exists():
+                raise FileNotFoundError(f"Speaker model {name}: {path} is missing (train it, see docs/experiments.md)")
+        else:
+            path = hf_hub_download(repo, "avg_model.pt")
+        state = torch.load(path, map_location="cpu")
         model = getattr(wespeaker, klass)()
         model.resnet.load_state_dict({k: v for k, v in state.items() if not k.startswith("projection")})
         self.model = model.to(device).eval()

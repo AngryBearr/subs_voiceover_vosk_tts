@@ -15,6 +15,7 @@ import logging
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -79,10 +80,71 @@ def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: f
     out = out + (voice * 10 ** (voice_gain_db / 20))[:, None]
     for layer, gain_db in extra or []:
         out += (np.pad(layer, (0, length - len(layer))) * 10 ** (gain_db / 20))[:, None]
-    peak = float(np.max(np.abs(out))) if len(out) else 0.0
-    if peak > 0.99:  # simple safety scaling instead of hard clipping
-        out *= 0.99 / peak
-    return out.astype(np.float32)
+    return out.astype(np.float32)  # peaks above 1.0 are handled by ``limit_peaks`` (never by scaling the whole track)
+
+
+def limit_peaks(audio: np.ndarray, sample_rate: int, ceiling: float = 0.97, lookahead_s: float = 0.005) -> np.ndarray:
+    """Look-ahead peak limiter: samples never exceed ``ceiling``, everything else stays as it is.
+
+    The gain is ``min(1, ceiling / |peak over channels|)``, lowered ``lookahead_s`` before and after each
+    peak (minimum filter) and smoothed (moving average no wider than that), so it reaches the reduced
+    value before the peak arrives. Audio that never exceeds the ceiling is returned unchanged.
+    """
+    if audio.size == 0:
+        return audio
+    peak = np.abs(audio).max(axis=1) if audio.ndim == 2 else np.abs(audio)
+    if float(peak.max()) <= ceiling:
+        return audio
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+
+    gain = np.minimum(1.0, ceiling / np.maximum(peak, 1e-9)).astype(np.float32)
+    del peak
+    reach = max(1, int(lookahead_s * sample_rate))
+    gain = minimum_filter1d(gain, 2 * reach + 1, mode="nearest")
+    gain = uniform_filter1d(gain, reach + 1, mode="nearest")
+    gain = np.minimum(gain, 1.0)
+    return (audio * (gain[:, None] if audio.ndim == 2 else gain)).astype(np.float32)
+
+
+def integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
+    """Integrated loudness in LUFS (EBU R128) of (samples, channels) float audio, measured by ffmpeg's
+    ``ebur128`` filter fed through a pipe; ``-inf`` for silence."""
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    cmd = [ffmpeg_exe(), "-hide_banner", "-nostats", "-f", "f32le", "-ar", str(sample_rate),
+           "-ac", str(audio.shape[1]), "-i", "-", "-af", "ebur128=peak=none", "-f", "null", "-"]
+    data = np.ascontiguousarray(audio, dtype=np.float32)
+    with tempfile.TemporaryFile() as err:  # ebur128 logs a line every 100 ms: a pipe could fill up and stall
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err)
+        assert proc.stdin is not None
+        step = sample_rate * 30
+        try:
+            for start in range(0, len(data), step):
+                proc.stdin.write(data[start:start + step].tobytes())
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        code = proc.wait()
+        err.seek(0)
+        text = err.read().decode("utf-8", errors="replace")
+    found = re.findall(r"^\s+I:\s+(-?inf|-?[\d.]+) LUFS", text, flags=re.MULTILINE)
+    if code != 0 or not found:
+        raise RuntimeError(f"ffmpeg ebur128 failed (code {code}): {text[-300:]}")
+    return float(found[-1])
+
+
+def finish_mix(audio: np.ndarray, sample_rate: int, loudness_lufs: float | None,
+               ceiling: float = 0.97) -> tuple[np.ndarray, float | None, float]:
+    """The last step of a mix: a static gain to ``loudness_lufs`` (None: none), then the peak limiter.
+    Returns ``(audio, loudness before, gain applied in dB)``."""
+    measured: float | None = None
+    gain_db = 0.0
+    if loudness_lufs is not None:
+        measured = integrated_loudness(audio, sample_rate)
+        if np.isfinite(measured):
+            gain_db = loudness_lufs - measured
+            audio = (audio * np.float32(10 ** (gain_db / 20))).astype(np.float32)
+    return limit_peaks(audio, sample_rate, ceiling), measured, gain_db
 
 
 def encode_track(wav: Path, out: Path, bitrate: str = "192k") -> None:
@@ -95,20 +157,28 @@ def encode_track(wav: Path, out: Path, bitrate: str = "192k") -> None:
 
 
 def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path | None, start: float = 0.0,
-               duration: float | None = None, srt_title: str = "Русские (озвученный текст)") -> None:
+               duration: float | None = None, srt_title: str = "Русские (озвученный текст)",
+               video_source: Path | None = None, original_audio_kbps: int | None = None) -> None:
     """Video copy with voice-over mixes as audio tracks (``(file, title)``, the first is the default),
     the original audio after them and optional Russian subtitles. WAV tracks are encoded to AAC,
     others copied; a test piece (``start``) is cut and its video re-encoded. The file appears only
-    when complete."""
+    when complete. ``video_source`` (a file with a smaller video, same timeline; not for a test piece) replaces the
+    video stream, copied as it is; ``original_audio_kbps`` re-encodes the original audio to stereo AAC at that rate."""
     piece = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}"] if start and duration else []
-    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *piece, "-i", str(video)]
+    # A separate video file keeps its own start time: without -copyts ffmpeg moves each input to zero on its own
+    keep_times = ["-copyts"] if video_source and not piece else []
+    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *keep_times, *piece, "-i", str(video)]
     for path, _ in tracks:
         cmd += ["-i", str(path)]
     if srt and not piece:  # subtitle times are on the episode timeline
         cmd += ["-i", str(srt)]
     else:
         srt = None
-    cmd += ["-map", "0:v:0"]
+    video_input = 0
+    if video_source and not piece:
+        video_input = len(tracks) + (2 if srt else 1)
+        cmd += ["-i", str(video_source)]
+    cmd += ["-map", f"{video_input}:v:0"]
     for n in range(len(tracks)):
         cmd += ["-map", f"{n + 1}:a:0"]
     cmd += ["-map", "0:a:0"]
@@ -121,7 +191,11 @@ def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path
                 f"-metadata:s:a:{n}", "language=rus", f"-metadata:s:a:{n}", f"title={title}",
                 f"-disposition:a:{n}", "default" if n == 0 else "0"]
     original = len(tracks)
-    cmd += [f"-c:a:{original}", "aac" if piece else "copy", f"-metadata:s:a:{original}", "title=Original",
+    if original_audio_kbps and not piece:
+        cmd += [f"-c:a:{original}", "aac", f"-b:a:{original}", f"{original_audio_kbps}k", f"-ac:a:{original}", "2"]
+    else:
+        cmd += [f"-c:a:{original}", "aac" if piece else "copy"]
+    cmd += [f"-metadata:s:a:{original}", "title=Original",
             f"-disposition:a:{original}", "0"]
     partial = out.with_name(out.stem + ".partial" + out.suffix)
     subprocess.run([*cmd, str(partial)], check=True)
@@ -162,7 +236,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="Lower only the original voices (Hybrid Demucs), keep music and effects")
     parser.add_argument("--rest-duck-db", type=float, default=3.0,
                         help="With --duck-voices-only: how much music and effects go down under speech")
-    parser.add_argument("--voice-gain-db", type=float, default=0.0)
+    parser.add_argument("--voice-gain-db", type=float, default=0.0, help="Raise (or lower) the voice-over, dB")
+    parser.add_argument("--loudness-lufs", type=float, default=None,
+                        help="Bring the whole mix to this integrated loudness (default: leave the level as mixed)")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--mp3", action="store_true", help="Also write an MP3 next to the WAV")
     parser.add_argument("--mux", default=None, help="Write a video copy with the mix as the first audio track")
@@ -196,6 +272,10 @@ def main(argv: list[str] | None = None) -> None:
         log.info("Separated the original voices (%.1f min)", len(original) / args.sample_rate / 60)
     out = mix(original, voice, args.sample_rate, duck_db=args.duck_db, voice_gain_db=args.voice_gain_db,
               extra=layers, voices=voices, rest_duck_db=args.rest_duck_db)
+    out, measured, gain_db = finish_mix(out, args.sample_rate, args.loudness_lufs)
+    if measured is not None:
+        log.info("Loudness %.1f LUFS -> gain %+.1f dB to reach %.1f LUFS (peaks limited at 0.97)", measured, gain_db,
+                 args.loudness_lufs)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), out, args.sample_rate, subtype="PCM_16")

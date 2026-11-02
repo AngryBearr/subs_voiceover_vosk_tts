@@ -5,6 +5,28 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan of 1.11.2026: train the voice model, use existing subtitles, the season's voices
+
+Asked by the user after the voice-sample experiments closed. Scripts and logs: `output/exp_spk/`; data: `training_data_sdh/subs_train/` on
+the external drive; subtitles found: `/media/angrybear/new_large_storage/Survivor/subtitles_hunt/` (`report.md`). Numbers: `docs/experiments.md`.
+
+1. **Find subtitles** - done: every episode of S1-S51 has a timed English file (~4200 files): "NAME:" labels on S1, S2, S5, S6, S40-S47,
+   most of S7-S9, part of S11, S13, S35; ">>" marks on nearly all of S3-S39; The Amazing Race has labels on S1, S7 and a few others.
+2. **The rule in the pipeline** - done, on by default (`subtitles` in `stt_config.json`, `stt.subtitles`, `stt.subtitle_hints`): embedded -> next to
+   the video -> archive -> online; named lines fix their words to the person, turn marks make a switch cheaper. Transcripts made before the rule stay as they are.
+   Not yet run on real network or on a real mkv stream inside a full `stt.run`.
+3. **Fine-tune ResNet293** - done: `resnet293-ft` (`models/speaker/resnet293-ft/`, run r3: 334 people of 20 seasons). Same/other error on S51 25.0% -> 20.6%;
+   alone in the pipeline's cluster-based pass it is no better (66.2% -> 64.8%).
+4. **Per-season fine-tuning (the user's "listener" idea, the network variant)** - done, dropped: no gain over r3 once the Viterbi runs, harmful with few labels (Australian S10).
+5. **Season voices** - done, on by default since 2.11 (`stt.season_voices`, the user's idea, without training): words assigned over the people named in the whole season. Through the
+   real assembly, r3 model: S51 lines on their person 68.4% -> 71.6% (read by name), S20 F1 0.879 -> 0.897, S29 0.860 -> 0.871. No LLM; GPU only for r3's word embeddings.
+
+Listened to and approved by the user on 2.11.2026: this pipeline (season voices with `resnet293-ft`, existing subtitles, three voice-overs, the new voice level) became the default, with the presets `main`, `upload`, `fast`, `previous` (`stt.run --preset`, UI "Набор настроек"); README files added. Still not done: re-grouping the turns (below), a neutral voice when the program is unsure who speaks, and the remaining stress errors of other kinds (for example "+Избранный").
+State of the listening runs (config `output/exp_spk/listen/`, work `output/stt_listen/{s20,s51}`, videos `Survivor/STT_listen_2026-11-01/<season>/`, the earlier `STT_*` untouched):
+S20E01 and S51E01 (finished 2.11.2026 10:24: season voices on, three voice-over tracks, 168 of 1434 cues moved to another person) were listened to (see above). Places to listen to: `subs_env/bin/python -I output/exp_spk/listen/moved_lines.py output/stt_listen/s51/<episode> 14`. Nothing is committed yet.
+Added 2.11 at the user's request: tab "Звук и размер видео" (hear a piece with the voice level changed, `stt.mix_preview`; shrink a video to a size at the original resolution, `stt.video_compress`, off by default). A third listening run: Australian S10E01 (`output/exp_spk/listen/run_au10.sh`, voices from E01-E03), finished 2.11 with the new voice level and the stress rule; S20E01 and S51E01 keep the old ones until mixed or voiced again. Compression test: S51E01 7.07 -> 2.07 GB in 15 min on the graphics card, off by default.
+Not done: re-grouping the turns with a bonus for DiariZen's clusters (B-cubed on S51 0.569 -> 0.613, 24 groups per episode, `output/exp_spk/cluster_quality.py`, not run through the pipeline; thresholds picked on the scored episodes).
+
 ## Plan of 31.10.2026: who speaks, told by a sample of the voice (closed by the user 1.11.2026)
 
 The question changes from "which cluster is this piece like" to "is this person's voice here". Scripts, logs and

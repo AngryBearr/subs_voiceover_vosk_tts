@@ -34,6 +34,8 @@ class Setting:
 
 ENGINES = {"Vosk": "vosk", "TeraTTS": "teratts", "ESpeech (голоса героев)": "f5"}
 MODES = {"Точный: Cohere + Whisper + LLM": "accurate", "Быстрый: только Whisper": "fast"}
+VIDEO_CODECS = {"H.265 (меньше размер, новые плееры)": "hevc_nvenc",
+                "H.264 (играет везде, качество ниже при том же размере)": "h264_nvenc"}
 MODELS = {"luna: дешевле, качество хорошее": "openai/gpt-6-luna", "Sol: лучше перевод, дороже": "openai/gpt-6.1-sol"}
 
 
@@ -90,9 +92,16 @@ SETTINGS: list[Setting] = [
     Setting(("mix", "duck"), "Что приглушать под озвучкой", "choice", "Сведение",
             {"Только голоса (музыка остаётся)": "voices", "Весь звук": "all"}),
     Setting(("mix", "duck_db"), "Насколько приглушать, дБ", "number", "Сведение"),
+    Setting(("mix", "rest_duck_db"), "Насколько приглушать музыку и шум под голосом, дБ", "number", "Сведение"),
+    Setting(("mix", "voice_gain_db"), "Озвучка громче, дБ", "number", "Сведение"),
+    Setting(("mix", "loudness_lufs"), "Общая громкость серии, LUFS", "number", "Сведение",
+            info="Чем выше число (ближе к 0), тем громче; -16 обычно хватает"),
     Setting(("mix", "tracks"), "Готовые видео", "choice", "Сведение",
             {"Одно видео со всеми озвучками": "combined", "Отдельное видео на каждый движок": "separate"}),
     Setting(("mix", "keep_wav"), "Хранить несжатый звук (~0,5 ГБ на серию)", "bool", "Сведение"),
+    Setting(("mix", "video", "compress"), "Сжимать видео при сборке серии (разрешение остаётся)", "bool", "Сведение"),
+    Setting(("mix", "video", "target_gb"), "Размер серии, ГБ", "number", "Сведение"),
+    Setting(("mix", "video", "codec"), "Кодек сжатого видео", "choice", "Сведение", VIDEO_CODECS),
     Setting(("crowd", "enabled"), "Слой толпы: выкрики несколькими голосами (опыт)", "bool", "Сведение"),
     Setting(("review",), "Список подозрительных реплик для проверки", "bool", "Сведение"),
 ]
@@ -195,13 +204,15 @@ def form_values(config: dict[str, Any]) -> list[Any]:
     return [to_form(s, get(config, s.path)) for s in SETTINGS]
 
 
-def save(values: list[Any], defaults_path: Path = DEFAULTS, local_path: Path = LOCAL) -> tuple[int, list[str]]:
+def save(values: list[Any], defaults_path: Path = DEFAULTS, local_path: Path = LOCAL,
+         only: list[Setting] | None = None) -> tuple[int, list[str]]:
     """Write the form into the local file: (values that differ from the defaults, warnings).
 
+    ``values`` follow ``SETTINGS``, or ``only`` (a part of it: the other settings stay as they are).
     Raises ``SettingsError`` (nothing written) when a value is not valid."""
     defaults, local = read_json(defaults_path), read_json(local_path)
     parsed, problems = [], []
-    for setting, value in zip(SETTINGS, values):
+    for setting, value in zip(only or SETTINGS, values):
         try:
             parsed.append((setting, from_form(setting, value)))
         except ValueError as exc:

@@ -38,7 +38,7 @@ subs_env/bin/python -m stt.selftest             # GPU, models (downloads them), 
 
 # whole season, up to the Russian dubbing script (no TTS):
 subs_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --until dub
-# one episode end to end (voice-over, checks, mix); --engine teratts for TeraTTS voices:
+# one episode end to end (voice-over in all three engines by default, checks, mix); --engine teratts for one engine:
 subs_env/bin/python -m stt.run ep01.mkv
 ```
 
@@ -116,6 +116,19 @@ command: finished episodes and stages are skipped, the recognition keeps its fin
 (each ASR model, alignment, OCR, diarization), and the voice-over keeps every line already
 synthesised (Vosk, TeraTTS and ESpeech write each line to the cache as it is done). An LLM step
 that was cut off (glossary, naming, translation, stress check) starts over; they take minutes.
+
+## Presets
+
+`presets` in `stt_config.json` are named sets of settings laid over the config: `stt.run --preset <name>`, or the radio
+"Набор настроек" on the UI tab "Обработка" (it fills the form, which can still be edited). Order, last wins: `stt_config.json`
+< `stt_config.local.json` < preset < form / command-line flags. They cover `stt.run` only, not the classic pipeline.
+
+| Preset | What it is |
+|---|---|
+| `main` (default) | best quality: season voices, existing subtitles, three voice-overs, stress and speech checks |
+| `upload` | `main` plus `mix.video.compress` to about 2 GB per episode |
+| `fast` | `mode: fast` (Whisper only), Vosk only, no stress or speech checks, no season voices, no online subtitle search |
+| `previous` | no season voices, no subtitles, the old sound level (`rest_duck_db` 3, `voice_gain_db` 0, no loudness target) |
 
 ## What runs where
 
@@ -230,6 +243,44 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   words in the next 10 s, since 31.10); the speaker-naming LLM sees it. On S51E01-E05 this rule put
   140 of 191 cards with an SDH-known person on that person's main speaker, the best of four rules tried.
 - `--no-ocr` (or `"ocr": {"enabled": false}`) skips the stage; `--force ocr` rescans.
+
+## Existing subtitles as a hint for who speaks
+
+Many episodes already have English subtitles with speaker information: SDH files name the speaker
+("SANDRA: ...") and broadcast captions mark a new voice with ">>". `stt.run` looks for them before the
+transcription (`stt.subtitles.find_subtitles`, in this order):
+
+1. subtitle streams inside the video (English text codecs only; a hearing-impaired/SDH stream first),
+2. `.srt`/`.vtt` files next to the video and in its `subs/` folder, with the same episode code
+   (`S05E02`, `10x05`) or file name; Russian files and our own products (`_ru`, `translated`,
+   `whisperx`, `_edit`, `_synced`) are skipped,
+3. a local archive: `subtitles.archive` is a folder with a `manifest.jsonl` (season, episode, path, ...),
+4. online (`subtitles.online`, `subtitles.imdb`): the OpenSubtitles Stremio addon, then Gestdown
+   (`imdb` is one id, or a map `{"part of the path": id}`: the first part found in the video's path wins, `null` means no online search; the shared config maps Survivor and The Amazing Race, and Australian Survivor has `null`)
+   (a few requests per episode, text only, a network failure is a warning and means "none").
+
+The best file wins (named lines > turn marks > plain text; more named lines or marks first) and the
+search stops at the first source that has named lines. The answer is cached in
+`subs.source.json` (+ `subs.source.en.srt`) in the episode folder, "nothing found" included.
+
+What it changes (`stt.transcribe --subtitles`, `stt.subtitle_hints`): every subtitle line is pinned to the
+recognized words (the subtitles are ~0.3 s off, and a line the audio does not confirm is dropped).
+Named lines fix their words to the person: a person who alone holds 80% of a cluster keeps that cluster, one
+with at least 10 words that does not gets a speaker of their own (`P:NAME` in `diarizer_label`, gender
+"unknown" until the naming step decides), the rest take their main cluster. Smoothing does not undo them.
+Turn marks make a speaker change at the mark cheaper in the word-level pass (`subtitles.turn_bonus`).
+The person goes to the naming step as evidence ("caption label: SANDRA x7", the host as "host per subtitles");
+when the LLM leaves the name open, `speakers.json` gets the name from the subtitles. No extra LLM call.
+`subtitle_hints.json` reports what was used (lines pinned and not confirmed, fixed words, persons).
+
+Switching off: `"subtitles": {"enabled": false}` or `stt.run --no-subtitles`. Episodes without such subtitles
+run exactly as before; transcripts made before this rule stay untouched until the transcribe stage is forced; if the subtitle source of an episode changes later, only the speaker assignment is redone
+(cached models are not run again), and the stages after it follow as after any change of the transcript.
+
+Numbers (S51 E01-E05 for named lines, two folds: half of the lines are the hint, half is scored; S20 for ">>"):
+named lines are fixed directly (S51E01: 64.9% -> 84.2% of the labelled lines on their person's speaker, measured
+on the lines that were given), but they barely help the lines not given: hidden lines 59.7% -> 59.8%. Turn marks
+on hidden marks: recall 0.873 -> 0.894 at the bonus 0.3, precision the same.
 
 ## Timing of the Russian lines
 
@@ -410,6 +461,51 @@ and a list to check names against for seasons the LLM knows less well. Off with
 `"cast": {"enabled": false}`; a failed lookup only logs a warning. Run by hand:
 `subs_env/bin/python -m stt.cast output/stt/<episode> --cast output/stt/<folder>.cast.json`.
 
+## Season voices (on by default since 2.11.2026)
+
+A cluster of the diarizer is often a mix of people, and the word-level speaker pass compares each word only with the
+clusters of its own episode. This stage uses the people the pipeline has already named over the whole season instead.
+No subtitles required and no LLM. It works with the stock model and better with the fine-tuned `resnet293-ft` (weights in `models/speaker/`, not in git; `season_voices.model`); another model than the first pass needs its word embeddings once (GPU, 30-45 s per episode), the stock one needs no GPU.
+
+What it does, after every episode has its transcript and names (`speakers` stage):
+
+1. Per person (the speaker `name`; spellings of one name are one person, as in the voice bank) the embeddings of the
+   words under that name are summed over the season, OCR captions left out. Words of named subtitle lines
+   (`subs.source.en.srt`) count for the person too (matched to a name by first name). A person needs
+   `min_words` (20) words. The result is `<season>.season_voices.npz` beside the voice bank; it is reused while the
+   episodes' first-pass files stay the same.
+2. Every word of every episode is assigned again by the Viterbi pass of `stt.boundaries` over the season's people plus
+   the episode's clusters that carry no name. A cluster change of the diarizer is a cheap switch (switch penalty 0.3,
+   turn bonus 0.15); words of named subtitle lines stay with their person; on-screen captions keep their speaker.
+   Then the same smoothing as in the first pass.
+3. `words.json`, `subs.en.json`, `subs.en.srt`, `subs.en.speakers.srt` and `speakers.json` are rewritten with one
+   speaker per person (`diarizer_label` is `V:<name>`, `diarizer_labels` lists the clusters the person came from; gender,
+   role and Russian label come from the old card of that name, or from the card of another episode), and
+   `season_voices.json` records what moved. The first-pass files are kept once as `*.before_voices.json`; the stage always
+   starts from them, so a rerun (also with more episodes in the season) gives the same result as a first run.
+
+`speakers.llm.json` and the naming are not touched. The stage touches the `speakers` mark of an episode it changed, so the
+stages after it (translation, dubbing, ...) run again and the earlier ones do not. If `corrections.json` or
+`speakers.override.json` exists, the stage warns: line numbers and speaker ids of the first pass no longer apply.
+Lines of speakers whose gender stays unknown keep the gender `stt.line_gender` heard for the old line at that time.
+
+It is on in `stt_config.json` (`"season_voices": {"enabled": true, "model": "resnet293-ft", "min_words": 20}`); `--no-season-voices` or
+the presets `fast` and `previous` switch it off for a run. Without the `resnet293-ft` weights (not in git) the stage logs a warning and uses the plain `resnet293`.
+An episode that already has `subs.ru.json` is left alone, so a re-run never repeats the translation and the voice-over; `--force speakers` assigns it again. With several videos, `stt.run` first takes every episode up to `speakers`, applies the stage, then runs the
+other stages. With one video of a season it uses the voices of whatever episodes of that folder already have a first
+pass. Without named people nothing changes. By hand:
+
+```bash
+subs_env/bin/python -m stt.season_voices output/stt [--episodes "*S51E0[23]*"] [--dry-run]
+```
+
+Measured offline on the finished runs (no listening yet): S51E01-E05 words under SDH labels: the right person 63.7% ->
+69.0%, wrong name 29.5% -> 31.0%, no name 6.8% -> 0%; lines under 1.5 s 56.6% -> 64.3%. S20 E01/E05/E10/E14 against the CBS `>>`
+marks: F1 0.879 -> 0.889 (3 of 4 episodes better). Through the real assembly with `resnet293-ft`: S51 lines on their person
+68.4% -> 71.6% (stock 70.9%), S20 F1 0.879 -> 0.897 (stock 0.891), S29 E01/E03/E07 0.860 -> 0.871 (stock 0.860). It became the default on 2.11.2026 after the user listened to season-voiced episodes and approved them. Its limit: the stage gives words to named people who may not be in the episode at all (a wrong name instead of a
+neutral voice is worse than no name), and a cluster that was named after its main speaker feeds the others' voices into
+that person.
+
 ## Checking by ear and fixing lines
 
 After the speech check, `stt.review` lists voiced lines that may have the wrong voice: the
@@ -454,9 +550,28 @@ stage.
    −360/+500 ms, speeds them up to a comfort limit and asks for shorter text only when needed.
 5. The original track stays under the voice. By default (`"mix": {"duck": "voices"}`) Hybrid
    Demucs (`stt.separate`) splits it into voices and everything else, and only the voices go
-   12 dB down while the Russian voice speaks; music and effects only 3 dB (`rest_duck_db`), so
+   12 dB down while the Russian voice speaks; music and effects only 6 dB (`rest_duck_db`), so
    the scene keeps its sound (43-min episode: 40 s on the GPU). `"duck": "all"` lowers the whole
    original by 12 dB as before. `"subtitles": false` leaves the Russian subtitles out of the mkv.
+   **Voice level.** The voice-over is raised by `voice_gain_db` (3), and the finished mix gets one static gain to
+   `loudness_lufs` (-16 LUFS integrated, measured with ffmpeg `ebur128`; `null` = off), so seasons that differ in
+   loudness (S51 sat about 1 dB below S20) end up equal. Peaks are caught by a 5 ms look-ahead limiter at 0.97
+   (`stt.mix.limit_peaks`); the old scaling of the whole track by its highest peak is gone, so a louder voice no
+   longer makes the music quieter. The original audio track in the video is untouched. Hear a 45-second piece with
+   other levels before re-mixing: UI tab "Звук и размер видео" or
+   `subs_env/bin/python -m stt.mix_preview <episode folder> <video> --engine f5 --voice-gain-db 6 --out piece.wav`
+   (without `--start` it takes the place where speech meets the loudest original sound, `loudest_spot`). To apply new
+   levels to a finished episode without voicing again: `stt.run <video> --engine f5,teratts,vosk --force mix`
+   (stages before `mix` that finished earlier are skipped; only the mix and the video are rebuilt).
+   **Smaller video.** `"mix": {"video": {"compress": true, "target_gb": 2.0, "codec": "hevc_nvenc",
+   "original_audio_kbps": 160}}` (off by default) re-encodes the picture with the same resolution and the source
+   timestamps (PyAV; NVENC on the graphics card, libx265/libx264 if it fails to open) to the bitrate that makes the
+   finished file `target_gb` (1 GB = 10^9 bytes, all voice-over tracks at 192 kbps counted); the original audio becomes
+   stereo AAC. The video is made once per episode (`video.<codec>.<kbps>k.mkv` in the work folder) and shared by the
+   engines' videos; it is left as it is when the budget is not 15% under its own bitrate. An already finished video:
+   `subs_env/bin/python -m stt.video_compress <video.ru.mkv> --target-gb 2` writes `<stem>.small.mkv` next to it (all
+   audio and subtitle streams kept, AAC copied, others to stereo AAC 160k; the input is never changed);
+   `--sample-minute 10 --sample-seconds 60` writes a `.sample.mkv` piece to judge the quality.
 6. Experimental crowd layer (`"crowd": {"enabled": true}`, `stt.crowd`): skipped interjections of
    two or more speakers within 2 s, or chants ("Go, go, go!"), are said by three TTS voices at
    once with 70 ms offsets, 4 dB under the voice-over, and added to the mix without ducking the
@@ -575,7 +690,9 @@ episode: equal speaker purity, pyannote 2.5x faster. Full tables: `docs/stt_benc
   `<name>.ru.<engine>.m4a` (the engine's mix), `<name>.ru.mkv` (all voice-overs; in
   `paths.finished/<season folder>/` when set) or `<name>.ru.<engine>.mkv` (`"tracks": "separate"`).
 - `ocr.json` — captions, name cards and all text events with times and boxes.
+- `subs.source.en.srt`, `subs.source.json`, `subtitle_hints.json` — existing subtitles used for speakers (see above).
 - `words.json`, `diarization.*.json`, `asr.*.json`, `voice.*.json`, `timings.json`, `logs/`.
+- With the season voices stage: `season_voices.json`, `*.before_voices.json` (the first pass), and `<season>.season_voices.npz` beside the voice bank.
 
 Manual fixes: `speakers.override.json` (`{"S04": {"gender": "female", "label_ru": "Анна"}}`),
 then `stt.run ... --force speakers`; edit `glossary.txt` and use `--force translate`.

@@ -49,8 +49,10 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
 - **Видео → русская озвучка целиком**:
     `subs_env/bin/python -m stt.run <видео или маска>` — английские субтитры со спикерами,
     глоссарий, имена, перевод под тайминг, сценарий озвучки, voiceover, проверка речи, микс.
-    Настройки в `stt_config.json`, подробности в `docs/stt_local.md`.
-- **Спикеры**: DiariZen v2 с эксклюзивным слоем (`diarizer_options`) → уточнение отрезков ResNet293
+    Настройки в `stt_config.json`, подробности в `docs/stt_local.md`. Наборы настроек (`presets`:
+    `main`, `upload`, `fast`, `previous`): `--preset <имя>` или выбор в интерфейсе. Общее описание —
+    `README.md` (по-русски `README.ru.md`).
+- **Спикеры**: голоса сезона (`stt/season_voices.py`, модель `resnet293-ft`) включены по умолчанию; DiariZen v2 с эксклюзивным слоем (`diarizer_options`) → уточнение отрезков ResNet293
     (`speaker_refine`) → пословная перемаркировка Витерби (`stt/boundaries.py`, `word_speakers`;
     эмбеддинги слов кэшируются в `words.emb.<model>.npz`). Метрики: `stt.turn_eval` (метки `>>`
     субтитров CBS, S20) и `stt.sdh_eval --cues` (SDH-метки, S51); скрипты замеров в `output/exp_boundary/`.

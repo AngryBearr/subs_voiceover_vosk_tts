@@ -15,6 +15,7 @@ Outputs in --out:
     subs.en.json / subs.en.srt    cues in the project subtitle schema (+ speaker, overlap)
     subs.en.speakers.srt          the same cues prefixed with speaker IDs, for review
     speakers.json                 speaker cards: ID, talk time, gender, age, embedding
+    subtitle_hints.json           with --subtitles: what existing subtitles told about who speaks (stt.subtitle_hints)
 """
 
 from __future__ import annotations
@@ -24,12 +25,18 @@ import logging
 import re
 import sys
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from stt.refine_speakers import REDIMNET2, WESPEAKER
 from stt.runner import load_json, save_json
+
+if TYPE_CHECKING:
+    from stt.assemble import Cue, CueOptions
+    from stt.diarize import Diarization
+    from stt.types import Word
 
 log = logging.getLogger("stt.transcribe")
 
@@ -49,6 +56,36 @@ def write_srt(path: Path, records: list[dict[str, Any]], *, with_speaker: bool) 
             text = f"[{r['speaker'] or '??'}{'*' if r.get('overlap') else ''}] {text}"
         blocks.append(f"{r['index']}\n{_srt_time(r['start'])} --> {_srt_time(r['end'])}\n{text}\n")
     path.write_text("\n".join(blocks), encoding="utf-8")
+
+
+def assemble_cues(words: list[Word], diarization: Diarization, options: CueOptions, *, offset: float,
+                  gender_of: Callable[[str], str], extra_labels: Iterable[str] = ()
+                  ) -> tuple[list[Cue], dict[str, str], list[dict[str, Any]]]:
+    """Cues, speaker ids (S01.. by first appearance, then ``extra_labels``) and subtitle records of labelled words.
+
+    Shared by the transcription and by ``stt.season_voices``, which assigns the speakers again."""
+    from stt.assemble import build_cues, mark_overlaps, speaker_ids, subtitle_records
+
+    cues = build_cues(words, options)
+    mark_overlaps(cues, diarization)
+    ids = speaker_ids(cues)
+    for label in extra_labels:
+        ids.setdefault(label, f"S{len(ids) + 1:02d}")
+    genders = {ids[label]: gender_of(label) for label in ids}
+    return cues, ids, subtitle_records(cues, ids, genders, offset_s=offset)
+
+
+def write_transcript(out: Path, records: list[dict[str, Any]], words: list[Word], ids: dict[str, str],
+                     offset: float) -> None:
+    """``subs.en.json``, ``subs.en.srt``, ``subs.en.speakers.srt`` and ``words.json`` (times shifted by ``offset``)."""
+    save_json(out / "subs.en.json", records)
+    write_srt(out / "subs.en.srt", records, with_speaker=False)
+    write_srt(out / "subs.en.speakers.srt", records, with_speaker=True)
+    save_json(
+        out / "words.json",
+        [{**asdict(w), "start": round(w.start + offset, 3), "end": round(w.end + offset, 3),
+          "speaker": ids.get(w.speaker) if w.speaker else None} for w in words],
+    )
 
 
 def prepare_audio(media: Path, out: Path, start: float, duration: float | None, force: bool) -> tuple[float, bool]:
@@ -93,15 +130,11 @@ def transcribe(args: argparse.Namespace) -> Path:
     from stt.assemble import (
         CueOptions,
         assign_speakers,
-        build_cues,
         collect_words,
-        mark_overlaps,
         merge_captions,
         on_screen_hints,
         smooth_speakers,
         snap_speaker_boundaries,
-        speaker_ids,
-        subtitle_records,
     )
     from stt.diarize import DIARIZER_OPTION_DEFAULTS, DIARIZERS, Diarization, local_model_dir, non_default_options
     from stt.textfix import collapse_repeats
@@ -236,6 +269,16 @@ def transcribe(args: argparse.Namespace) -> Path:
         words, ocr_stats = merge_captions(words, ocr_data["captions"])
         log.info("On-screen captions: %s", ocr_stats)
     words = assign_speakers(words, diarization, options)
+    own_labels = [w.speaker for w in words]
+    word_hints: Any = None  # existing subtitles (--subtitles): who speaks, pinned to the words
+    sub_info: Any = None
+    hints_path = out / "subtitle_hints.json"
+    if args.subtitles:
+        from stt.subtitle_hints import build_hints
+
+        word_hints, sub_info = build_hints(Path(args.subtitles), words, args.start)
+    elif hints_path.exists():
+        hints_path.unlink()  # left over from a run with subtitles
     if args.word_speakers == "viterbi":
         from stt.audio import read_wav
         from stt.boundaries import RelabelParams, relabel_words
@@ -243,7 +286,8 @@ def transcribe(args: argparse.Namespace) -> Path:
 
         params = RelabelParams(model=args.word_speakers_model, window_s=args.word_window,
                                switch_penalty=args.word_switch_penalty, prior=args.word_prior,
-                               change_prior=args.word_change_prior, passes=args.word_passes)
+                               change_prior=args.word_change_prior, passes=args.word_passes,
+                               turn_bonus=args.subtitle_turn_bonus)
 
         class _LazyEmbedder:  # the model is loaded once, and only when some embeddings are not cached
             model: Any = None
@@ -254,31 +298,36 @@ def transcribe(args: argparse.Namespace) -> Path:
                 return self.model.batch(windows)
 
         words, relabel_stats = relabel_words(words, read_wav(out / "audio.wav"), _LazyEmbedder(), params,
-                                             cache=out / f"words.emb.{params.model}.npz")
+                                             cache=out / f"words.emb.{params.model}.npz", hints=word_hints)
         log.info("[word-speakers] %s", relabel_stats)
+    elif word_hints is not None and word_hints.persons:  # no Viterbi: named lines still take their person's state
+        from stt.boundaries import plan_states, restore_fixed
+
+        plan_states(words, own_labels, word_hints, {s for s in own_labels if s is not None})
+        words = restore_fixed(words, word_hints.fixed)
     if args.word_smooth == "full":
         words = smooth_speakers(words, options)
     elif args.word_smooth == "snap":
         words = snap_speaker_boundaries(words, options.snap_words)
-    hints = on_screen_hints(ocr_data, words, diarization) if ocr_data else {}
-    cues = build_cues(words, options)
-    mark_overlaps(cues, diarization)
-    ids = speaker_ids(cues)
-    for label in diarization.speakers:  # speakers without recognized words go last
-        ids.setdefault(label, f"S{len(ids) + 1:02d}")
-    voices = {v["speaker"]: v for v in voice_data["speakers"]}
-    genders = {ids[label]: voices.get(label, {}).get("gender", "unknown") for label in ids}
-    offset = args.start
-    records = subtitle_records(cues, ids, genders, offset_s=offset)
+    if word_hints is not None and word_hints.fixed:
+        from stt.boundaries import restore_fixed
 
-    save_json(out / "subs.en.json", records)
-    write_srt(out / "subs.en.srt", records, with_speaker=False)
-    write_srt(out / "subs.en.speakers.srt", records, with_speaker=True)
-    save_json(
-        out / "words.json",
-        [{**asdict(w), "start": round(w.start + offset, 3), "end": round(w.end + offset, 3),
-          "speaker": ids.get(w.speaker) if w.speaker else None} for w in words],
-    )
+        words = restore_fixed(words, word_hints.fixed)  # smoothing must not undo a named line
+    hints = on_screen_hints(ocr_data, words, diarization) if ocr_data else {}
+    named_by_subtitles: dict[str, str] = {}
+    if word_hints is not None and sub_info is not None:
+        from stt.subtitle_hints import evidence, report, subtitle_persons
+
+        for state, items in evidence(word_hints, sub_info).items():
+            hints[state] = items + hints.get(state, [])
+        named_by_subtitles = subtitle_persons(word_hints, sub_info)
+        save_json(hints_path, report(word_hints, sub_info, words, own_labels))
+    voices = {v["speaker"]: v for v in voice_data["speakers"]}
+    offset = args.start
+    cues, ids, records = assemble_cues(words, diarization, options, offset=offset,
+                                       gender_of=lambda label: voices.get(label, {}).get("gender", "unknown"),
+                                       extra_labels=diarization.speakers)  # speakers without recognized words go last
+    write_transcript(out, records, words, ids, offset)
 
     speakers = []
     for label, sid in sorted(ids.items(), key=lambda kv: kv[1]):
@@ -301,6 +350,7 @@ def transcribe(args: argparse.Namespace) -> Path:
                 "first_seen": round(own[0].start + offset, 3) if own else None,
                 "sample": own[0].text[:120] if own else None,
                 "on_screen": hints.get(label, []),
+                **({"subtitle_person": named_by_subtitles[label]} if label in named_by_subtitles else {}),
                 "embedding": diarization.embeddings.get(label),
             }
         )
@@ -362,6 +412,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--word-smooth", default="full", choices=["full", "snap", "none"],
                         help="Sentence-level speaker smoothing after the word labels: majority + snapping "
                              "(default), snapping to sentence ends only, or none")
+    parser.add_argument("--subtitles", default=None,
+                        help="Existing English subtitles of the episode (stt.subtitles.find_subtitles): named lines "
+                             "(\"NAME:\") fix who speaks, \">>\" marks reward a speaker change there")
+    parser.add_argument("--subtitle-turn-bonus", type=float, default=0.3,
+                        help="Bonus for a speaker change where the subtitles open another voice (>> marks)")
     parser.add_argument("--hotwords-file", default=None,
                         help="Names/terms for ASR biasing (e.g. hotwords.txt from stt.glossary)")
     parser.add_argument("--fuse", default=None,

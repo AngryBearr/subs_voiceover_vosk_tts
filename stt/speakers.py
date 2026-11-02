@@ -126,6 +126,16 @@ def apply_cards(speakers: list[dict[str, Any]], cards: list[dict[str, Any]]) -> 
         )
 
 
+def apply_subtitle_names(speakers: list[dict[str, Any]]) -> None:
+    """A speaker whose lines the subtitles mostly name ("SANDRA:", ``subtitle_person`` from stt.transcribe) gets that name
+    when the LLM left it open. No LLM call: the card's own name, a voice-bank name or an override win."""
+    for speaker in speakers:
+        person = speaker.get("subtitle_person")
+        if person and not speaker.get("name"):
+            speaker.update({"name": person.title(), "name_source": "subtitles",
+                            "name_evidence": f"the subtitles name this voice: {person}"})
+
+
 def apply_overrides(speakers: list[dict[str, Any]], overrides: dict[str, dict[str, Any]]) -> None:
     for speaker in speakers:
         override = overrides.get(speaker["id"])
@@ -165,6 +175,7 @@ def name_speakers(
         save_json(folder / "speakers.llm.json", {"model": model, "usage": client.usage.to_dict(), "cards": cards})
         apply_cards(speakers, cards)
         log.info("LLM naming: %s", client.usage.to_dict())
+    apply_subtitle_names(speakers)
     if bank is not None:
         for note in voice_bank.resolve(speakers):
             log.info("voice bank: %s", note)

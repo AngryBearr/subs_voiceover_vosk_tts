@@ -16,6 +16,9 @@ each, edits of text / speaker (with a voice sample) / gender / "not voiced" into
 (``stt.subtitle_edit``) with a length check, the Subtitle Edit round trip (ASS / SRT out and back
 in), and re-voicing only the changed lines.
 
+Tab "Звук и размер видео": hear a 45-second piece of an episode with other voice levels (``stt.mix_preview``),
+save the mix levels, mix the episode again without voicing it, shrink a finished video (``stt.video_compress``).
+
 Tab "Справка": what the program does and how to work with it (``ui/help.md``).
 
 Tab "Настройки": the defaults people change (folders, recognition, models, voices, checks, mix),
@@ -39,7 +42,7 @@ from typing import Any
 
 import gradio as gr  # type: ignore
 
-from stt.run import STAGES, SUBSCRIPTION_DOWN, finished_folder, load_config
+from stt.run import STAGES, SUBSCRIPTION_DOWN, apply_preset, finished_folder, load_config
 from ui import settings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -85,9 +88,9 @@ def base_config() -> dict[str, Any]:
 
 
 def job_config(mode: str, model: str, subtitles: bool, duck_voices: bool, stress: bool, refine: bool,
-               f5_fast: bool = False, transport: str | None = None) -> dict[str, Any]:
-    """stt_config.json (+ local settings) with the options of the form."""
-    config = base_config()
+               f5_fast: bool = False, transport: str | None = None, preset: str | None = None) -> dict[str, Any]:
+    """stt_config.json (+ local settings), the chosen set of settings on top, then the options of the form."""
+    config = apply_preset(base_config(), preset)
     config["mode"] = MODES.get(mode, mode)
     config.setdefault("llm", {})["model"] = MODELS.get(model, model)
     if TRANSPORTS.get(transport or "") == "openrouter":  # pay per request instead of the subscription
@@ -120,7 +123,8 @@ def _run(job: Job) -> None:
 
 def start_job(folder: str, names: list[str], out_root: str, engines: list[str], mode: str, model: str,
               subtitles: bool, duck_voices: bool, stress: bool, refine: bool, preview: bool,
-              preview_from: float, preview_minutes: float, f5_fast: bool = False, transport: str | None = None) -> str:
+              preview_from: float, preview_minutes: float, f5_fast: bool = False, transport: str | None = None,
+              stt_args: list[str] | None = None, preset: str | None = None) -> str:
     global JOB
     with LOCK:
         if JOB and JOB.state == "идёт":
@@ -132,11 +136,11 @@ def start_job(folder: str, names: list[str], out_root: str, engines: list[str], 
         root = Path(out_root).expanduser()
         if not root.is_absolute():
             root = REPO_ROOT / root
-        extra: list[str] = []
-        config = job_config(mode, model, subtitles, duck_voices, stress, refine, f5_fast, transport)
+        extra: list[str] = list(stt_args or [])
+        config = job_config(mode, model, subtitles, duck_voices, stress, refine, f5_fast, transport, preset)
         if preview:  # a short piece in its own folder, so it never mixes with full episodes
             root = root / "_проба"
-            extra = ["--start", str(preview_from * 60), "--duration", str(preview_minutes * 60)]
+            extra += ["--start", str(preview_from * 60), "--duration", str(preview_minutes * 60)]
             config["paths"] = {**(config.get("paths") or {}), "season": None, "finished": None}
         ui_dir = root / ".ui"
         ui_dir.mkdir(parents=True, exist_ok=True)
@@ -560,10 +564,26 @@ def default_model() -> str:
     return next((label for label, value in MODELS.items() if value == model), list(MODELS)[0])
 
 
-def form_defaults() -> list[Any]:
+def preset_choices() -> list[tuple[str, str]]:
+    """(label, name) of the sets of settings in the config."""
+    return [(str(p.get("label") or name), name) for name, p in (base_config().get("presets") or {}).items()]
+
+
+def preset_form(preset: str | None) -> list[Any]:
+    """What the "Обработка" form shows for a set of settings: engines, mode, subtitles, duck voices, stress, refine, fast ESpeech."""
+    values = form_defaults(apply_preset(base_config(), preset))
+    return [values[0], values[1], *values[4:]]
+
+
+def start_with_preset(*values: Any) -> str:
+    """``start_job`` from the form; the last value is the chosen set of settings."""
+    return start_job(*values[:-1], preset=values[-1])
+
+
+def form_defaults(config: dict[str, Any] | None = None) -> list[Any]:
     """Starting values of the "Обработка" form from the settings: engines, mode, model, out root and the
     subtitles / duck voices / stress / refine / fast ESpeech boxes."""
-    config = base_config()
+    config = base_config() if config is None else config
     chosen = (config.get("ui") or {}).get("engines") or ["vosk"]
     f5 = ((config.get("voiceover") or {}).get("engines") or {}).get("f5") or {}
     return [[label for label, value in ENGINES.items() if value in chosen],
@@ -609,6 +629,146 @@ def tts_cache(delete: bool) -> str:
     return text
 
 
+# ---------------------------------------------------------------- sound and video size tab
+
+MIX_SECONDS = 45.0
+MIX_SETTINGS = [next(s for s in settings.SETTINGS if s.path == path) for path in (
+    ("mix", "voice_gain_db"), ("mix", "rest_duck_db"), ("mix", "duck_db"), ("mix", "loudness_lufs"),
+    ("mix", "video", "compress"), ("mix", "video", "target_gb"), ("mix", "video", "codec"))]
+COMPRESS: dict[str, Any] = {"process": None, "out": None, "log": None}  # the running "Сжать готовое видео"
+
+
+def mix_form_defaults() -> list[Any]:
+    """Values of the "Звук и размер видео" form from the settings (same order as ``MIX_SETTINGS``)."""
+    config = base_config()
+    return [settings.to_form(s, settings.get(config, s.path)) for s in MIX_SETTINGS]
+
+
+def episode_media(out_root: str, episode: str) -> Path:
+    """The original video of a work folder (``source.json``)."""
+    return Path(json.loads((_episode(out_root, episode) / "source.json").read_text(encoding="utf-8"))["media"])
+
+
+def voiced_engines(out_root: str, episode: str) -> list[str]:
+    """Labels of the engines that have a voice-over track in the episode."""
+    folder = _episode(out_root, episode)
+    return [label for label, value in ENGINES.items() if (folder / f"voiceover.{value}" / "export" / "track.wav").exists()]
+
+
+def mix_episodes(out_root: str) -> Any:
+    found = [p.parents[2].name for p in _root(out_root).glob("*/voiceover.*/export/track.wav")]
+    return gr.update(choices=sorted(set(found)))
+
+
+def find_spot(out_root: str, episode: str | None, engine: str) -> tuple[Any, str]:
+    """(minute, message) of the place where the voice-over has the hardest time against the music."""
+    if not episode:
+        return gr.update(), "Выберите серию."
+    from stt import mix_preview
+
+    try:
+        spot = mix_preview.loudest_spot(_episode(out_root, episode), episode_media(out_root, episode),
+                                        ENGINES[engine], MIX_SECONDS)
+    except (OSError, KeyError, ValueError) as error:
+        return gr.update(), f"Не получилось найти место: {error}"
+    return round(spot / 60, 2), f"Самое громкое место: с {int(spot // 60)}:{int(spot % 60):02d}."
+
+
+def listen_mix(out_root: str, episode: str | None, engine: str, minute: float, gain: float, rest: float,
+               duck_db: float, lufs: float) -> tuple[Any, Any, str]:
+    """(new mix, the mix now in the episode, message) of a 45-second piece from ``minute``."""
+    if not episode:
+        return None, None, "Выберите серию."
+    from stt import mix_preview
+
+    folder, label = _episode(out_root, episode), engine
+    start = max(0.0, float(minute or 0.0) * 60)
+    out_dir = REPO_ROOT / "output" / "mix_preview"
+    try:
+        new = mix_preview.render_preview(folder, episode_media(out_root, episode), ENGINES[label], start, MIX_SECONDS,
+                                        float(gain), float(duck_db), float(rest), float(lufs), out_dir / "new.wav",
+                                        duck=base_config().get("mix", {}).get("duck"))
+    except Exception as error:  # noqa: BLE001 - shown to the person, not a crash of the page
+        return None, None, f"Не получилось собрать отрывок: {error}"
+    track = folder / f"{episode}.ru.{ENGINES[label]}.m4a"
+    now = None
+    if track.exists():
+        now = str(mix_preview.existing_piece(track, start, MIX_SECONDS, out_dir / "now.wav"))
+    return str(new), now, ("Слева: с новыми настройками; справа: как сейчас в серии." if now else
+                           "Серия ещё не собрана: сравнивать не с чем.")
+
+
+def save_mix_settings(*values: Any) -> str:
+    try:
+        own, warnings = settings.save(list(values), only=MIX_SETTINGS)
+    except settings.SettingsError as exc:
+        return "Не сохранено:\n\n" + "\n".join(f"- {p}" for p in exc.problems)
+    return f"Сохранено (своих значений в настройках: {own}). Действует со следующего сведения серии."
+
+
+def remix(out_root: str, episode: str | None) -> str:
+    """Mix the episode again (all its voice-overs) with the saved settings; nothing is voiced again."""
+    if not episode:
+        return "Выберите серию."
+    engines = voiced_engines(out_root, episode)
+    if not engines:
+        return "У серии нет готовой озвучки."
+    media = episode_media(out_root, episode)
+    config = base_config()
+    return start_job(str(media.parent), [media.name], str(_root(out_root)), engines, list(MODES)[0], default_model(),
+                     bool((config.get("mix") or {}).get("subtitles", True)), (config.get("mix") or {}).get("duck") == "voices",
+                     True, True, False, 0, 0, stt_args=["--force", "mix"])
+
+
+def finished_videos(out_root: str) -> Any:
+    """Finished videos (``*.ru.mkv``) of the finished-videos folder and of the work folder."""
+    config = base_config()
+    found: list[Path] = []
+    finished = (config.get("paths") or {}).get("finished")
+    if finished:
+        found += Path(finished).expanduser().glob("*/*.ru.mkv")
+    found += _root(out_root).glob("*/*.ru.mkv")
+    return gr.update(choices=sorted(str(p) for p in dict.fromkeys(found)))
+
+
+def start_compress(path: str | None, sample: bool, target_gb: float, codec: str) -> str:
+    """Run ``stt.video_compress`` on a finished video in the background (the video itself is never changed)."""
+    process = COMPRESS["process"]
+    if process is not None and process.poll() is None:
+        return "Сжатие уже идёт: дождитесь его."
+    src = Path(path or "").expanduser()
+    if not src.is_file():
+        return "Выберите готовое видео или впишите путь к файлу."
+    out = src.with_name(f"{src.stem}.{'sample' if sample else 'small'}.mkv")
+    log_path = REPO_ROOT / "output" / "mix_preview" / "compress.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, "-m", "stt.video_compress", str(src), "--target-gb", str(target_gb),
+           "--codec", settings.VIDEO_CODECS[codec]]
+    if sample:
+        cmd += ["--sample-minute", "10", "--sample-seconds", "60"]
+    with log_path.open("wb") as log_file:
+        COMPRESS.update(process=subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT,
+                                                 start_new_session=True), out=out, log=log_path)
+    return f"Запущено. Результат: {out}"
+
+
+def compress_status() -> str:
+    process, out, log_path = COMPRESS["process"], COMPRESS["out"], COMPRESS["log"]
+    if process is None:
+        return ""
+    lines = [line for line in Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines() if " INFO " in line
+             or "Error" in line or "Traceback" in line]
+    last = lines[-1].split(": ", 1)[-1] if lines else ""
+    code = process.poll()
+    if code is None:
+        return f"⏳ Сжимаю… {last}"
+    if code != 0:
+        return f"Ошибка (код {code}): смотрите {log_path}. {last}"
+    if Path(out).exists():
+        return f"✅ Готово: {out} ({Path(out).stat().st_size / 1e9:.2f} ГБ)"
+    return f"Ничего не записано: {last}"
+
+
 def _setting_field(setting: settings.Setting, value: Any) -> Any:
     if setting.kind == "bool":
         return gr.Checkbox(label=setting.label, value=value, info=setting.info or None)
@@ -641,6 +801,7 @@ def build() -> gr.Blocks:
                 select_all = gr.Button("Выбрать все", size="sm")
                 select_none = gr.Button("Снять выбор", size="sm")
             out_root = gr.Textbox(label="Рабочая папка (готовые видео: вкладка «Настройки»)", value=start_values[3])
+            preset = gr.Radio(label="Набор настроек (ниже можно поправить отдельные пункты)", choices=preset_choices(), value="main")
             with gr.Row():
                 engines = gr.CheckboxGroup(label="Озвучка", choices=list(ENGINES), value=start_values[0])
                 mode = gr.Radio(label="Распознавание", choices=list(MODES), value=start_values[1])
@@ -671,8 +832,9 @@ def build() -> gr.Blocks:
             show.click(lambda f: gr.update(choices=list_videos(f), value=[]), folder, episodes)
             select_all.click(lambda f: gr.update(value=list_videos(f)), folder, episodes)
             select_none.click(lambda: gr.update(value=[]), None, episodes)
-            start.click(start_job, [folder, episodes, out_root, engines, mode, model, subtitles, duck_voices, stress,
-                                    refine, preview, preview_from, preview_minutes, f5_fast, transport], message)
+            preset.change(preset_form, preset, [engines, mode, subtitles, duck_voices, stress, refine, f5_fast])
+            start.click(start_with_preset, [folder, episodes, out_root, engines, mode, model, subtitles, duck_voices, stress,
+                                            refine, preview, preview_from, preview_minutes, f5_fast, transport, preset], message)
             stop.click(stop_job, None, message)
             gr.Timer(2.0).tick(refresh, None, [status, progress, log, results])
 
@@ -833,6 +995,62 @@ def build() -> gr.Blocks:
                                 [*listing, import_file], [edit_message, edit_table])
             revoice_button.click(revoice, [edit_root, edit_episode, review_engines], edit_message)
 
+        with gr.Tab("Звук и размер видео"):
+            mix_start = mix_form_defaults()
+            gr.Markdown("### Громкость голосов\nСоберите короткий отрывок (45 секунд) с вашими настройками и "
+                        "сравните с тем, что сейчас в серии. Остальную серию программа не трогает. Серии берутся из рабочей папки на вкладке «Обработка».")
+            with gr.Row():
+                mix_episode = gr.Dropdown(label="Серия (с готовой озвучкой)", choices=[], scale=3)
+                mix_refresh = gr.Button("Обновить список", scale=1)
+                mix_engine = gr.Radio(label="Озвучка", choices=list(ENGINES), value=list(ENGINES)[-1], scale=3)
+            with gr.Row():
+                mix_minute = gr.Number(label="С минуты", value=10)
+                mix_spot = gr.Button("Найти самое громкое место")
+            with gr.Row():
+                mix_gain = gr.Slider(-3, 12, step=1, value=mix_start[0], label="Голоса громче, дБ")
+                mix_rest = gr.Slider(0, 15, step=1, value=mix_start[1], label="Музыка и шум под голосом тише, дБ")
+            with gr.Row():
+                mix_duck = gr.Slider(6, 24, step=1, value=mix_start[2], label="Голоса оригинала под озвучкой тише, дБ")
+                mix_lufs = gr.Slider(-23, -12, step=1, value=mix_start[3], label="Общая громкость, LUFS")
+            mix_listen = gr.Button("Послушать", variant="primary")
+            with gr.Row():
+                mix_new = gr.Audio(label="С этими настройками", type="filepath")
+                mix_now = gr.Audio(label="Как сейчас в серии", type="filepath")
+            mix_message = gr.Markdown()
+            gr.Markdown("### Сжатие видео\nРазрешение остаётся исходным; видео кодирует видеокарта.")
+            with gr.Row():
+                vid_compress = gr.Checkbox(label="Сжимать видео при сборке серии", value=mix_start[4])
+                vid_gb = gr.Slider(0.8, 6, step=0.1, value=mix_start[5], label="Размер серии, ГБ")
+                vid_codec = gr.Radio(label="Кодек", choices=list(settings.VIDEO_CODECS), value=mix_start[6])
+            with gr.Row():
+                mix_save = gr.Button("Сохранить настройки")
+                mix_redo = gr.Button("Пересвести эту серию")
+            mix_saved = gr.Markdown()
+            gr.Markdown("«Пересвести» собирает серию заново с сохранёнными настройками; озвучка не повторяется. "
+                        "Ход виден во вкладке «Обработка».")
+            gr.Markdown("### Сжать готовое видео\nИсходный файл не меняется: рядом появится файл `.small.mkv` "
+                        "(или `.sample.mkv` для пробного куска: 60 секунд с 10-й минуты).")
+            with gr.Row():
+                vid_path = gr.Dropdown(label="Готовое видео (можно вписать путь)", choices=[], allow_custom_value=True,
+                                       scale=4)
+                vid_refresh = gr.Button("Обновить список", scale=1)
+            with gr.Row():
+                vid_go = gr.Button("Сжать", variant="primary")
+                vid_sample = gr.Button("Пробный кусок 60 с")
+            vid_message = gr.Markdown()
+            vid_status = gr.Markdown()
+            mix_inputs = [mix_gain, mix_rest, mix_duck, mix_lufs, vid_compress, vid_gb, vid_codec]
+            mix_refresh.click(mix_episodes, out_root, mix_episode)
+            mix_spot.click(find_spot, [out_root, mix_episode, mix_engine], [mix_minute, mix_message])
+            mix_listen.click(listen_mix, [out_root, mix_episode, mix_engine, mix_minute, mix_gain, mix_rest, mix_duck,
+                                          mix_lufs], [mix_new, mix_now, mix_message])
+            save_event = mix_save.click(save_mix_settings, mix_inputs, mix_saved)
+            mix_redo.click(remix, [out_root, mix_episode], mix_saved)
+            vid_refresh.click(finished_videos, out_root, vid_path)
+            vid_go.click(lambda p, g, c: start_compress(p, False, g, c), [vid_path, vid_gb, vid_codec], vid_message)
+            vid_sample.click(lambda p, g, c: start_compress(p, True, g, c), [vid_path, vid_gb, vid_codec], vid_message)
+            gr.Timer(3.0).tick(compress_status, None, vid_status)
+
         with gr.Tab("Настройки"):
             gr.Markdown("Значения по умолчанию для новых запусков. Сохраняются в `stt_config.local.json` "
                         "(только отличия от `stt_config.json`; прежняя версия файла: `.bak`).")
@@ -857,11 +1075,19 @@ def build() -> gr.Blocks:
             cache_check.click(lambda: tts_cache(False), None, cache_message)
             cache_clean.click(lambda: tts_cache(True), None, cache_message)
             form = [engines, mode, model, out_root, subtitles, duck_voices, stress, refine, f5_fast]
-            save_button.click(save_settings, fields, [settings_message, *form])
-            reset_button.click(reset_settings, None, [settings_message, *fields, *form])
+            save_button_event = save_button.click(save_settings, fields, [settings_message, *form])
+            reset_button_event = reset_button.click(reset_settings, None, [settings_message, *fields, *form])
 
         with gr.Tab("Справка"):
             gr.Markdown(HELP.read_text(encoding="utf-8") if HELP.exists() else "Справка не найдена.")
+        # The sound fields live in two tabs: saving in one must show in the other, or its next save brings the old values back
+        save_event.then(lambda: settings.form_values(base_config()), None, fields)
+        save_button_event.then(mix_form_defaults, None, mix_inputs)
+        reset_button_event.then(mix_form_defaults, None, mix_inputs)
+        out_root.change(mix_episodes, out_root, mix_episode)
+        app.load(mix_form_defaults, None, mix_inputs)
+        app.load(mix_episodes, out_root, mix_episode)
+        app.load(finished_videos, out_root, vid_path)
         app.load(lambda: [*settings.form_values(base_config()), *form_defaults()], None, [*fields, *form])
     return app
 

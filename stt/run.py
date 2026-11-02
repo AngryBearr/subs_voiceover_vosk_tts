@@ -4,6 +4,7 @@
 
 Per episode, in `<out-root>/<video name>/`:
     transcribe  English subtitles with speakers (stt.transcribe)       subs.en.json
+                (+ existing subtitles that name speakers, if found)    subs.source.en.srt, subtitle_hints.json
     glossary    season glossary: names/terms + Russian renderings     glossary.json
     speakers    names, Russian labels, final gender (LLM + voice bank) speakers.llm.json
     translate   timing-aware EN -> RU translation (LLM)               subs.ru.json
@@ -25,6 +26,10 @@ overrides it), `season` the season's files (glossary, cast, voice bank and voice
 `work`), `finished` the finished videos in a sub-folder per season (default: each episode's folder).
 `mix.tracks`: "combined" puts every voice-over finished so far into one video as its own audio
 track (`mix.track_order` first, the first is the default track), "separate" writes a video per engine.
+
+Optional `season_voices` (config, off by default; `--no-season-voices`): once every episode has its transcript and
+names (`speakers`), the words of each episode are assigned again over the people named in the whole season
+(`stt.season_voices`, no LLM, no GPU); the later stages then run on the changed transcript.
 
 Several engines (`--engine f5,teratts,vosk`) run episode by episode; with `voiceover.parallel_cpu`
 (default) Vosk, which synthesises on the CPU, runs in a second lane next to the GPU engines: it
@@ -77,6 +82,16 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def apply_preset(config: dict[str, Any], name: str | None) -> dict[str, Any]:
+    """The config with a named set of settings (``presets`` in the config) on top; no name: as it is."""
+    if not name:
+        return config
+    presets = config.get("presets") or {}
+    if name not in presets:
+        raise SystemExit(f"Unknown preset {name!r}; the config has: {', '.join(presets) or 'none'}")
+    return deep_merge(config, presets[name].get("settings") or {})
+
+
 def dotenv(path: Path = REPO_ROOT / ".env") -> dict[str, str]:
     """KEY=VALUE lines of the repo .env (parsed as data, never executed)."""
     values: dict[str, str] = {}
@@ -118,8 +133,38 @@ class Episode:
         self.season_stress = self.season.with_name(self.season.name.replace(".glossary.json", "") + ".stress.json")
         self.forced_from: int | None = STAGES.index(args.force) if args.force else None
         vo = config.get("voiceover", {})
-        self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk"))
+        self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk")).split(",")[0].strip()
         self.vo_dir = self.out / f"voiceover.{self.engine}"
+        self._subtitles: dict[str, Any] | None | bool = False  # False: not looked up yet
+
+    def subtitle_source(self) -> dict[str, Any] | None:
+        """Existing English subtitles of the episode that tell who speaks ("labels" or "turns"), else None.
+        Looked up once (embedded, next to the video, archive, online; cached in ``subs.source.json``)."""
+        cfg = self.config.get("subtitles") or {}
+        if self._subtitles is False:
+            self._subtitles = None
+            if cfg.get("enabled", False) and not getattr(self.args, "no_subtitles", False):
+                from stt.subtitles import find_subtitles
+
+                try:
+                    found = find_subtitles(self.media, self.out, cfg)
+                except Exception as error:  # noqa: BLE001 - subtitles are a bonus, never a reason to stop
+                    log.warning("[%s] subtitle search failed: %s", self.media.stem, error)
+                    found = None
+                self._subtitles = found if found and found.get("kind") in ("labels", "turns") else None
+        return self._subtitles if isinstance(self._subtitles, dict) else None
+
+    def subtitle_key(self) -> str:
+        """What the speaker assignment of the transcript uses from existing subtitles; "none" without them."""
+        found = self.subtitle_source()
+        if not found:
+            return "none"
+        bonus = (self.config.get("subtitles") or {}).get("turn_bonus", 0.3)
+        return f"{found['kind']}:{found.get('sha1', '')}:{bonus}"
+
+    @property
+    def subtitle_stamp(self) -> Path:
+        return self.out / ".stages" / "transcribe.subtitles"
 
     def llm(self, stage: str) -> Any:
         """Model of an LLM step: llm.stages.<stage>, else llm.model (one model for everything).
@@ -167,6 +212,14 @@ class Episode:
             return True
         if not all(p.exists() for p in outputs):
             return True
+        # Other subtitles than the last assembly used: assemble again (cached stages stay). A transcript made before this
+        # rule has no stamp and stays as it is: re-assembling would rerun every later stage, LLM steps included.
+        if stage == "transcribe" and self.subtitle_stamp.exists():
+            used = self.subtitle_stamp.read_text(encoding="utf-8").strip()
+            if self.subtitle_key() != used:
+                log.info("[%s] subtitles changed (%s -> %s): speakers are assigned again", self.media.stem, used,
+                         self.subtitle_key())
+                return True
         mark = self.stamp(stage)
         if mark.exists() and any(p.exists() and p.stat().st_mtime > mark.stat().st_mtime for p in inputs or []):
             return True
@@ -241,11 +294,22 @@ class Episode:
                      "--word-change-prior", str(word_speakers.get("change_prior", 0.15)),
                      "--word-window", str(word_speakers.get("window_s", 1.0)),
                      "--word-passes", str(word_speakers.get("passes", 1))]
+        subtitles = self.subtitle_source()
+        if subtitles:
+            argv += ["--subtitles", str(self.out / "subs.source.en.srt"), "--subtitle-turn-bonus",
+                     str((self.config.get("subtitles") or {}).get("turn_bonus", 0.3))]
         if self.args.start:
             argv += ["--start", str(self.args.start)]
         if self.args.duration:
             argv += ["--duration", str(self.args.duration)]
         transcribe.main(argv)
+        self.subtitle_stamp.parent.mkdir(parents=True, exist_ok=True)
+        self.subtitle_stamp.write_text(self.subtitle_key() + "\n", encoding="utf-8")
+
+    @property
+    def season_voices(self) -> Path:
+        """The season's voices (stt.season_voices), beside the voice bank."""
+        return self.voice_bank.with_name(self.voice_bank.name.replace(".voices.json", ".season_voices.npz"))
 
     @property
     def cast(self) -> Path:
@@ -537,8 +601,43 @@ class Episode:
             srt = voiced if voiced.exists() else self.out / "subs.ru.srt"
         out = self.finished_video()
         out.parent.mkdir(parents=True, exist_ok=True)
-        mix.mux_tracks(self.media, tracks, out, srt, self.args.start or 0.0, self.args.duration)
+        video_cfg = cfg.get("video") or {}
+        compress = bool(video_cfg.get("compress")) and not (self.args.start or self.args.duration)
+        video_source = self.small_video(video_cfg, len(self.planned_tracks(engines))) if compress else None
+        mix.mux_tracks(self.media, tracks, out, srt, self.args.start or 0.0, self.args.duration,
+                       video_source=video_source,
+                       original_audio_kbps=int(video_cfg.get("original_audio_kbps", 160)) if video_source else None)
         log.info("[%s] %s: %s", self.media.stem, out, ", ".join(engines))
+        if video_source:
+            log.info("[%s] finished video %.2f GB", self.media.stem, out.stat().st_size / 1e9)
+
+    def planned_tracks(self, engines: list[str]) -> list[str]:
+        """Voice-over tracks the finished video will have: those in it now and the engines of this run."""
+        if (self.config["mix"].get("tracks", "combined") != "combined"):
+            return engines
+        return list(dict.fromkeys([*engines, *getattr(self.args, "planned_engines", [])]))
+
+    def small_video(self, video_cfg: dict[str, Any], tracks: int) -> Path | None:
+        """The episode's video with a smaller picture for ``mix.video.target_gb`` (made once, shared by the engines'
+        videos); None when the picture is already small enough or the encoding failed (the video is copied then)."""
+        from stt import video_compress
+
+        codec = str(video_cfg.get("codec", "hevc_nvenc"))
+        original_kbps = int(video_cfg.get("original_audio_kbps", 160))
+        info = video_compress.probe(self.media)
+        bitrate = video_compress.video_bitrate(info["duration"], float(video_cfg.get("target_gb", 2.0)),
+                                               tracks * 192 + original_kbps, info["video_kbps"])
+        if bitrate is None:
+            log.info("[%s] the video is already close to the target size: copied as it is", self.media.stem)
+            return None
+        small = self.out / f"video.{codec}.{bitrate}k.mkv"
+        if not small.exists():
+            try:
+                video_compress.encode_video(self.media, small, bitrate, codec)
+            except Exception as error:  # noqa: BLE001 - a big video is better than no video
+                log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
+                return None
+        return small
 
     def mix(self) -> None:
         from stt import mix
@@ -548,7 +647,10 @@ class Episode:
         argv = [str(self.media), str(self.vo_dir / "export" / "track.wav"), "--out", str(out_wav),
                 "--duck-db", str(cfg["duck_db"])]
         if cfg.get("duck") == "voices":  # lower only the original voices, keep music and effects
-            argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 3.0))]
+            argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 6.0))]
+        argv += ["--voice-gain-db", str(cfg.get("voice_gain_db", 3.0))]
+        if cfg.get("loudness_lufs") is not None:  # the whole mix to this level, peaks limited (null: leave as mixed)
+            argv += ["--loudness-lufs", str(cfg["loudness_lufs"])]
         if self.args.start:  # a test piece: the voice-over is on the episode timeline from 0
             argv += ["--start", str(self.args.start), "--voice-from-zero"]
         crowd = self.config.get("crowd", {})
@@ -630,6 +732,68 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
         raise errors[0]
 
 
+VIDEO_SUFFIXES = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts"}
+
+
+def season_voices_enabled(config: dict[str, Any], args: argparse.Namespace) -> bool:
+    return bool((config.get("season_voices") or {}).get("enabled", False)) and not getattr(args, "no_season_voices", False)
+
+
+def season_voices_model(config: dict[str, Any]) -> str:
+    """The word embedding model of the season's voices; the plain one when the trained weights are not on this computer."""
+    from stt.refine_speakers import model_available
+
+    plain = str((config.get("word_speakers") or {}).get("model", "resnet293"))
+    model = str((config.get("season_voices") or {}).get("model") or plain)
+    if model_available(model):
+        return model
+    log.warning("season voices: the weights of %s are not here, using %s (slightly less accurate; docs/stt_local.md)", model, plain)
+    return plain
+
+
+def run_season_voices(files: list[Path], out_root: Path, args: argparse.Namespace, config: dict[str, Any],
+                      engines: list[str]) -> None:
+    """Every episode up to ``speakers`` first, then the words of each are assigned again over the people named in its whole
+    season (the videos in the same folder that have a transcript: ``stt.season_voices``). A changed transcript gets a new
+    ``speakers`` mark, so the stages after it run again and the earlier ones do not."""
+    from stt import season_voices
+
+    if STAGES.index(args.until) < STAGES.index("speakers"):
+        return
+    forced = args.force in STAGES[: STAGES.index("speakers") + 1]
+    first = argparse.Namespace(**{**vars(args), "engine": engines[0], "until": "speakers"})
+    episodes = {media: Episode(media, out_root, first, config) for media in files}
+    for episode in episodes.values():
+        episode.run()
+    if forced:
+        args.force = None  # done above; the marks make the later stages follow
+    cfg = config.get("season_voices") or {}
+    model = season_voices_model(config)
+    seasons: dict[Path, list[Path]] = {}
+    for media in files:
+        seasons.setdefault(media.parent, []).append(media)
+    for folder, medias in seasons.items():
+        every = [out_root / p.stem for p in sorted(folder.iterdir()) if p.suffix.lower() in VIDEO_SUFFIXES]
+        every = [f for f in every if (f / "speakers.json").exists()]
+        # A translated episode stays: a new transcript would mean a new translation and voice-over, LLM costs included
+        fresh = [m for m in medias if forced or not (episodes[m].out / "subs.ru.json").exists()]
+        for media in medias:
+            if media not in fresh:
+                log.info("[%s] season voices: already translated, stays as it is (--force speakers assigns it again)", media.stem)
+        if not fresh:
+            continue
+        targets = [episodes[m].out for m in fresh]
+        results = season_voices.apply_season(every, targets, episodes[fresh[0]].season_voices, model=model,
+                                             min_words=int(cfg.get("min_words", season_voices.MIN_WORDS)))
+        for media in fresh:
+            episode = episodes[media]
+            result = results[episode.out.name]
+            log.info("[%s] season voices: %s", media.stem, season_voices.summary(episode.out.name, result))
+            if result.changed:
+                episode.stamp("speakers").parent.mkdir(parents=True, exist_ok=True)
+                episode.stamp("speakers").touch()
+
+
 SUBSCRIPTION_DOWN = "The ChatGPT subscription login of OpenCode does not work (run `opencode auth login`)"
 
 
@@ -674,6 +838,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out-root", default=None,
                         help="One sub-folder per episode (default: paths.work in the config, else output/stt)")
     parser.add_argument("--config", default=str(REPO_ROOT / "stt_config.json"))
+    parser.add_argument("--preset", default=None, help="A named set of settings (presets in the config): main, upload, fast, previous")
     parser.add_argument("--mode", choices=["fast", "accurate"], default=None, help="Default from the config")
     parser.add_argument("--until", choices=STAGES, default="mix", help="Last stage to run")
     parser.add_argument("--force", choices=STAGES, default=None, help="Recompute this stage and the ones after it")
@@ -682,10 +847,14 @@ def main(argv: list[str] | None = None) -> None:
                         help="TTS engine(s) (voiceover.engines in the config): vosk | teratts | f5, or several: f5,teratts,vosk")
     parser.add_argument("--start", type=float, default=None, help="Process from this time (tests), seconds")
     parser.add_argument("--duration", type=float, default=None, help="Process this many seconds (tests)")
+    parser.add_argument("--no-subtitles", action="store_true",
+                        help="Do not look for existing subtitles that name speakers (config: subtitles)")
+    parser.add_argument("--no-season-voices", action="store_true",
+                        help="Do not assign the words again over the season's named people (config: season_voices)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
-    config = load_config(Path(args.config))
+    config = apply_preset(load_config(Path(args.config)), args.preset)
     args.mode = args.mode or config["mode"]
     files: list[Path] = []
     for pattern in args.media:
@@ -698,6 +867,9 @@ def main(argv: list[str] | None = None) -> None:
     check_subscription(config)
     engines = [e.strip() for e in (args.engine or (config.get("voiceover") or {}).get("engine", "vosk")).split(",")
                if e.strip()]
+    args.planned_engines = engines  # the finished video's size budget counts these voice-over tracks
+    if season_voices_enabled(config, args):
+        run_season_voices(files, out_root, args, config, engines)
     run_lanes(files, out_root, args, config, engines)
 
 

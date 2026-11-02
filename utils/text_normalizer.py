@@ -230,6 +230,40 @@ def fill_dictionary_stress(text: str, accents: Dict[str, str], omographs: Dict[s
     return "".join(out)
 
 
+# Short words that take no stress of their own. RUAccent's dictionary marks them ("н+а", "н+е"), and the marked ones it keeps are
+# heard: "н+а моём плот+у". The pairs below really move the stress onto the short word, so they stay.
+UNSTRESSED_WORDS = frozenset("на не по за до из от об обо ни но же ли бы во со ко под над без для про при".split())
+MOVED_STRESS = {
+    "не": frozenset("был было были дан дано дал дали жил жили пил пили взял брал отдал начал за на о с у к".split()),
+    "ни": frozenset("за на с у к о при в".split()),
+    "на": frozenset("берег пол ночь день год дом руку руки голову спину ногу ноги воду гору зиму сторону".split()),
+    "за": frozenset("город ногу ноги руку руки голову волосы зиму душу".split()),
+    "по": frozenset("полю морю лесу городу миру двое трое".split()),
+    "под": frozenset("гору ноги руку руки вечер".split()),
+    "без": frozenset("вести толку году".split()),
+    "до": frozenset("смерти ночи дому".split()),
+    "из": frozenset("дому лесу виду".split()),
+}
+
+
+def unstress_function_words(text: str) -> str:
+    """Stress marks off the short words that take none ("н+а моём" -> "на моём"), unless the stress really moved
+    onto them ("н+е было", "н+а берег"). Run before ``fill_dictionary_stress``, which then marks the next word."""
+    matches = list(_WORD_RE.finditer(text))
+    out: List[str] = []
+    last = 0
+    for i, match in enumerate(matches):
+        word = match.group()
+        plain = word.replace("+", "").lower()
+        following = matches[i + 1].group().replace("+", "").lower() if i + 1 < len(matches) else ""
+        out.append(text[last:match.start()])
+        last = match.end()
+        out.append(word.replace("+", "") if "+" in word and plain in UNSTRESSED_WORDS
+                   and following not in MOVED_STRESS.get(plain, frozenset()) else word)
+    out.append(text[last:])
+    return "".join(out)
+
+
 USER_STRESS_RE = re.compile(r"(?<=[А-Яа-яЁё])\+(?=[аеёиоуыэюяАЕЁИОУЫЭЮЯ])|(?<![\w+])\+(?=[аеёиоуыэюяАЕЁИОУЫЭЮЯ])")
 
 

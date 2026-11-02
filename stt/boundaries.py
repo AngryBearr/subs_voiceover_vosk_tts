@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, replace
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,71 @@ class RelabelParams:
     clean_margin_s: float = 1.0  # words closer than this to a diarizer speaker change do not feed centroids
     min_clean_words: int = 3  # clean words a speaker needs to get a centroid
     passes: int = 1  # extra passes re-estimate the centroids from the new labels
+    turn_bonus: float = 0.3  # bonus for a speaker change where the subtitles open another voice
+
+
+@dataclass
+class WordHints:
+    """What existing subtitles say about the words (``stt.subtitle_hints``). ``persons``: person -> indices of the words
+    the subtitles give to that person; ``turns``: indices of words where the subtitles open another voice.
+    ``state_of`` and ``fixed`` are filled by ``plan_states``."""
+
+    persons: dict[str, list[int]] = field(default_factory=dict)
+    turns: set[int] = field(default_factory=set)
+    min_words: int = 10  # hinted words a person needs for a state of their own
+    purity: float = 0.8  # share of a cluster's hinted seconds one person needs to keep that cluster
+    state_of: dict[str, str] = field(default_factory=dict)  # person -> cluster label, or "P:<NAME>"
+    fixed: dict[int, str] = field(default_factory=dict)  # word index -> state its hinted person has
+
+
+OWN_STATE = "P:"  # label prefix of a person with a state of their own (not a cluster of the diarizer)
+
+
+def plan_states(words: list[Word], own: list[str | None], hints: WordHints, available: set[str],
+                emb: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    """Decide the state of every hinted person and fill ``hints.state_of`` / ``hints.fixed``. Returns the centroids of the
+    new own states (empty without ``emb``).
+
+    A person alone holding at least ``purity`` of a cluster's hinted seconds keeps that cluster. Otherwise, with at least
+    ``min_words`` hinted words, the person gets a state "P:<NAME>" (centroid from the hinted words); else the cluster
+    where they have most hinted seconds. Only clusters in ``available`` (those with a centroid) can be kept.
+    """
+    seconds: dict[str, Counter[str]] = defaultdict(Counter)  # cluster -> person -> hinted seconds
+    of_person: dict[str, Counter[str]] = defaultdict(Counter)
+    usable = {person: [i for i in idx if words[i].source != "ocr"] for person, idx in hints.persons.items()}
+    for person, idx in usable.items():
+        for i in idx:
+            if own[i] is not None:
+                seconds[str(own[i])][person] += words[i].end - words[i].start
+                of_person[person][str(own[i])] += words[i].end - words[i].start
+    owner = {cluster: votes.most_common(1)[0][0] for cluster, votes in seconds.items()}
+    extra: dict[str, np.ndarray] = {}
+    hints.state_of, hints.fixed = {}, {}
+    for person in sorted(usable):
+        if person not in of_person:
+            continue
+        cluster = of_person[person].most_common(1)[0][0]
+        clean = owner.get(cluster) == person and seconds[cluster][person] / sum(seconds[cluster].values()) >= hints.purity
+        if clean and cluster in available:
+            hints.state_of[person] = cluster
+        elif len(usable[person]) >= hints.min_words:
+            state = OWN_STATE + person
+            hints.state_of[person] = state
+            if emb is not None:
+                mean = emb[usable[person]].sum(axis=0)
+                extra[state] = mean / (np.linalg.norm(mean) + 1e-9)
+        elif cluster in available:
+            hints.state_of[person] = cluster
+    hints.fixed = {i: hints.state_of[person] for person, idx in usable.items() if person in hints.state_of for i in idx}
+    return extra
+
+
+def restore_fixed(words: list[Word], fixed: dict[int, str]) -> list[Word]:
+    """Copies of ``words`` where the hinted words have their person's state again (smoothing must not undo a named line)."""
+    out = list(words)
+    for i, state in fixed.items():
+        out[i] = replace(out[i], speaker=state)
+    return out
 
 
 def word_windows(words: list[Word], audio: np.ndarray, window_s: float) -> np.ndarray:
@@ -103,7 +169,9 @@ def _centroids(words: list[Word], labels: list[str | None], emb: np.ndarray,
 
 
 def _viterbi(words: list[Word], own: list[str | None], emb: np.ndarray, centroids: dict[str, np.ndarray],
-             params: RelabelParams) -> list[str | None]:
+             params: RelabelParams, fixed: dict[int, str] | None = None, turns: set[int] | None = None) -> list[str | None]:
+    """The best speaker per word. ``fixed``: word index -> state it must take (a subtitle names the speaker).
+    ``turns``: words where the subtitles open another voice; a switch there is rewarded like a diarizer change."""
     # states: labels with a centroid, then the other labels seen (they only keep their own words)
     states: list[str | None] = sorted(centroids)
     states += [s for s in dict.fromkeys(own) if s not in centroids and s is not None]
@@ -122,11 +190,16 @@ def _viterbi(words: list[Word], own: list[str | None], emb: np.ndarray, centroid
         emis[i, :len(cent)] = sims[i]
         if own[i] is not None:
             emis[i, index[own[i]]] += params.prior
+    for i, state in (fixed or {}).items():
+        emis[i, :] = _FORBIDDEN
+        emis[i, index[state]] = 0.0
     dp = emis[0].copy()
     back = np.zeros((n, k), dtype=np.int64)
     for i in range(1, n):
         gap = max(words[i].start - words[i - 1].end, 0.0)
-        if own[i] != own[i - 1] and own[i] is not None and own[i - 1] is not None:
+        if turns is not None and i in turns:
+            penalty = -params.turn_bonus
+        elif own[i] != own[i - 1] and own[i] is not None and own[i - 1] is not None:
             penalty = -params.change_prior  # the diarizer changes speaker here: a switch is rewarded
         else:
             penalty = params.switch_penalty * np.exp(-gap / params.gap_relief_s)
@@ -154,8 +227,9 @@ def _changes(labels: list[str | None]) -> int:
 
 
 def relabel_words(words: list[Word], audio: np.ndarray, embedder: Any, params: RelabelParams,
-                  cache: Path | None = None) -> tuple[list[Word], dict[str, Any]]:
-    """Copies of ``words`` with Viterbi-refined speakers, and statistics."""
+                  cache: Path | None = None, hints: WordHints | None = None) -> tuple[list[Word], dict[str, Any]]:
+    """Copies of ``words`` with Viterbi-refined speakers, and statistics. ``hints`` (subtitles): hinted words take their
+    person's state (``plan_states``; ``hints.fixed`` is filled) and a switch at a turn mark is rewarded."""
     stats: dict[str, Any] = {"words": len(words), "relabelled": 0, "changes_before": 0, "changes_after": 0,
                              "speakers_with_centroid": 0, "embed_s": 0.0}
     own = [w.speaker for w in words]
@@ -174,12 +248,19 @@ def relabel_words(words: list[Word], audio: np.ndarray, embedder: Any, params: R
                      emb=emb.astype(np.float32), window_s=np.float64(params.window_s))
     labels = list(own)
     centroids: dict[str, np.ndarray] = {}
-    for _ in range(max(params.passes, 1)):
+    extra: dict[str, np.ndarray] = {}
+    for turn in range(max(params.passes, 1)):
         centroids = _centroids(words, labels, emb, params)
         stats["speakers_with_centroid"] = len(centroids)
         if not centroids:
             break
-        new = _viterbi(words, own, emb, centroids, params)
+        if hints is not None:
+            if turn == 0:
+                extra = plan_states(words, own, hints, set(centroids), emb)
+                stats["own_states"] = len(extra)
+            centroids = {**centroids, **extra}
+        new = _viterbi(words, own, emb, centroids, params, fixed=hints.fixed if hints else None,
+                       turns=(hints.turns or None) if hints else None)
         if new == labels:
             break
         labels = new
