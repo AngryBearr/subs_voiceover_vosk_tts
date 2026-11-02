@@ -1,6 +1,6 @@
 # Russian voice-over for English video
 
-[Читать по-русски: README.ru.md](README.ru.md)
+**English** | [Русский](docs/readme.md)
 
 This repository turns an English TV episode (it was built and tested on reality shows such as
 Survivor and The Amazing Race) into a video with a Russian voice-over. You give it a video file
