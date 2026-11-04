@@ -56,6 +56,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from stt import progress
 from stt.runner import REPO_ROOT, load_json, save_json
 from utils.llm_route import split_route, with_route
 
@@ -248,11 +249,19 @@ class Episode:
                 if not self.needed(stage, outputs, STAGES[position - 1] if position else None, *inputs):
                     log.info("[%s] %s: done earlier", self.media.stem, stage)
                     continue
-                label = f"{stage} ({self.engine})" if stage in ENGINE_STAGES else stage
-                log.info("[%s] %s ...", self.media.stem, label)
-                func()
-                self.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
-                self.stamp(stage).touch()
+                engine = self.engine if stage in ENGINE_STAGES else None
+                log.info("[%s] %s ...", self.media.stem, f"{stage} ({engine})" if engine else stage)
+                started = time.monotonic()
+                with progress.track(self.out, stage, engine):  # .progress/<stage>[.<engine>].json for the UI
+                    func()
+                    progress.clear_partial(self.out, stage, engine)  # paid answers kept for a restart are not needed now
+                    self.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
+                    self.stamp(stage).touch()
+                seconds = round(time.monotonic() - started)
+                if engine:
+                    log.info("[%s] %s (%s): finished in %d s", self.media.stem, stage, engine, seconds)
+                else:
+                    log.info("[%s] %s: finished in %d s", self.media.stem, stage, seconds)
             if self.forced_from is None or position < self.forced_from:
                 self.forced_from = position + 1  # later stages depend on fresh output
 
@@ -466,12 +475,19 @@ class Episode:
         from stt.worker import gpu_out_of_memory
 
         env = {**os.environ, **dotenv(), "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+        tracker = progress.current()
+        if tracker is not None:  # the module's progress ticks go to this stage's progress file
+            env.update(tracker.environ())
         log_path = self.out / "logs" / f"{name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         for attempt in range(oom_retries + 1):
             with log_path.open("w", encoding="utf-8") as log_file:
-                code = subprocess.run([sys.executable, "-m", module, *args], cwd=REPO_ROOT, env=env, stdout=log_file,
-                                      stderr=subprocess.STDOUT).returncode
+                command = [sys.executable, "-m", module, *args]
+                if tracker is None:  # outside a tracked stage there is no progress to watch
+                    code = subprocess.run(command, cwd=REPO_ROOT, env=env, stdout=log_file,
+                                          stderr=subprocess.STDOUT).returncode
+                else:
+                    code = self._run_watched(command, env, log_file, tracker)
             if code == 0:
                 return
             log_text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -482,6 +498,40 @@ class Episode:
             log_path.with_suffix(f".oom{attempt + 1}.log").write_text(log_text, encoding="utf-8")
             time.sleep(oom_wait_s)
         raise SystemExit(f"{name} failed (exit {code}), see {log_path}")
+
+    def _run_watched(self, command: list[str], env: dict[str, str], log_file: Any,
+                     tracker: progress.Tracker) -> int:
+        """Run ``command`` (output to ``log_file``) and return its exit code; while it runs, copy its progress
+        (``[<episode>] voiceover (f5): 25/640 lines``) into this log every ``PROGRESS_LOG_LINES`` lines."""
+        process = subprocess.Popen(command, cwd=REPO_ROOT, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+        last = 0
+        try:
+            while True:
+                try:
+                    return process.wait(timeout=PROGRESS_POLL_S)
+                except subprocess.TimeoutExpired:
+                    last = self._log_progress(tracker, last)
+        except BaseException:  # Ctrl+C or an error here: do not leave the module running on its own
+            process.terminate()
+            raise
+
+    def _log_progress(self, tracker: progress.Tracker | None, last: int) -> int:
+        """Log the stage's progress if it moved far enough since ``last`` was logged; returns the new ``last``."""
+        if tracker is None:
+            return last
+        try:
+            record = json.loads(tracker.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return last
+        done, total, unit = record.get("done"), record.get("total"), record.get("unit")
+        if done is None or not total or not unit:
+            return last
+        if done < last or done - last >= (PROGRESS_LOG_LINES if unit in ("lines", "clips") else 1):
+            if done >= last:
+                label = f"{tracker.stage} ({tracker.engine})" if tracker.engine else tracker.stage
+                log.info("[%s] %s: %d/%d %s", self.media.stem, label, done, total, unit)
+            return done
+        return last
 
     def _voiceover_config(self) -> Path:
         """voiceover_config.json with this run's engine, voices, text preparation and timing; saved per engine."""
@@ -678,6 +728,8 @@ class Episode:
                 self.mux()
 
 
+PROGRESS_POLL_S = 2.0  # how often a running module's progress file is looked at
+PROGRESS_LOG_LINES = 25  # progress of lines / clips goes to the log every this many
 SHARED_STAGES = {"transcribe", "glossary", "speakers", "translate", "stress"}  # one result for all engines
 ENGINE_STAGES = {"dub", "voiceover", "check", "mix"}
 CPU_ENGINES = {"vosk"}  # synthesise on the CPU: can run next to the GPU engines
@@ -761,11 +813,26 @@ def season_voices_model(config: dict[str, Any]) -> str:
     return plain
 
 
+def fetch_voice_model(config: dict[str, Any]) -> None:
+    """Download the trained weights of the season's voices once. A failed download only means the plain model is used."""
+    from stt.refine_speakers import HUB_WEIGHTS, download_model, model_available
+
+    model = str((config.get("season_voices") or {}).get("model") or "")
+    if model not in HUB_WEIGHTS or model_available(model):
+        return
+    log.info("season voices: downloading the weights of %s ...", model)
+    try:
+        log.info("season voices: weights saved: %s", download_model(model))
+    except Exception as error:  # noqa: BLE001 - the run goes on with the plain model
+        log.warning("season voices: could not download %s: %s", model, error)
+
+
 def run_season_voices(files: list[Path], out_root: Path, args: argparse.Namespace, config: dict[str, Any],
-                      engines: list[str]) -> None:
+                      engines: list[str], first_pass: bool = True) -> None:
     """Every episode up to ``speakers`` first, then the words of each are assigned again over the people named in its whole
     season (the videos in the same folder that have a transcript: ``stt.season_voices``). A changed transcript gets a new
-    ``speakers`` mark, so the stages after it run again and the earlier ones do not."""
+    ``speakers`` mark, so the stages after it run again and the earlier ones do not. With ``first_pass=False`` no episode
+    is processed: only those that already have a transcript get their voices counted again."""
     from stt import season_voices
 
     if STAGES.index(args.until) < STAGES.index("speakers"):
@@ -773,8 +840,13 @@ def run_season_voices(files: list[Path], out_root: Path, args: argparse.Namespac
     forced = args.force in STAGES[: STAGES.index("speakers") + 1]
     first = argparse.Namespace(**{**vars(args), "engine": engines[0], "until": "speakers"})
     episodes = {media: Episode(media, out_root, first, config) for media in files}
-    for episode in episodes.values():
-        episode.run()
+    if first_pass:
+        for episode in episodes.values():
+            episode.run()
+    else:
+        files = [media for media in files if (episodes[media].out / "speakers.json").exists()]
+        if not files:
+            log.warning("season voices: no episode here has its transcript and names yet, nothing to count")
     if forced:
         args.force = None  # done above; the marks make the later stages follow
     cfg = config.get("season_voices") or {}
@@ -861,6 +933,10 @@ def main(argv: list[str] | None = None) -> None:
                         help="Do not look for existing subtitles that name speakers (config: subtitles)")
     parser.add_argument("--no-season-voices", action="store_true",
                         help="Do not assign the words again over the season's named people (config: season_voices)")
+    parser.add_argument("--season-voices-only", action="store_true",
+                        help="Only count the season's voices again from the episodes that have a transcript; process nothing else")
+    parser.add_argument("--download-voice-model", action="store_true",
+                        help="Download the trained weights of the season's voices first, when they are not here (115 MB, once)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
@@ -874,10 +950,16 @@ def main(argv: list[str] | None = None) -> None:
     if missing or not files:
         raise SystemExit(f"Media not found: {missing or args.media}")
     out_root = Path(args.out_root or (config.get("paths") or {}).get("work") or "output/stt").expanduser()
-    check_subscription(config)
+    if args.download_voice_model and (args.season_voices_only or season_voices_enabled(config, args)):
+        fetch_voice_model(config)
+    if not args.season_voices_only:
+        check_subscription(config)
     engines = [e.strip() for e in (args.engine or (config.get("voiceover") or {}).get("engine", "vosk")).split(",")
                if e.strip()]
     args.planned_engines = engines  # the finished video's size budget counts these voice-over tracks
+    if args.season_voices_only:
+        run_season_voices(files, out_root, args, config, engines, first_pass=False)
+        return
     if season_voices_enabled(config, args):
         run_season_voices(files, out_root, args, config, engines)
     run_lanes(files, out_root, args, config, engines)

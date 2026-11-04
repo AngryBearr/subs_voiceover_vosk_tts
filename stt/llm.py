@@ -8,6 +8,7 @@ cost, no token counts), ``orcarouter:`` / ``openrouter:`` the paid routers;
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -20,7 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from stt import progress
 from stt.runner import REPO_ROOT
+from utils.atomic_io import write_text_atomic
 from utils.llm_route import ROUTERS, split_route
 from utils.opencode_clean import OpenCodeError, flatten_messages, shared_server
 
@@ -28,6 +31,7 @@ DEFAULT_MODEL = "openai/gpt-6-luna"
 
 log = logging.getLogger(__name__)
 _USAGE_LOCK = threading.Lock()  # clients may be shared by worker threads
+_KEPT_NOW: set[Path] = set()  # answers kept by this process: a repeated request is a retry and asks again
 
 
 def load_api_key(env_file: Path = REPO_ROOT / ".env", name: str = "OPENROUTER_API_KEY") -> str:
@@ -154,7 +158,38 @@ class OpenRouterClient:
 
         Retries on HTTP/JSON errors; when a transport keeps failing, the next one of the model's
         route takes over for this and all later requests of the client.
+
+        Inside a tracked ``stt.run`` stage every answer is also kept under ``<episode>/.partial/llm/<stage>/``
+        and reused when the same request comes again, so a stage that was stopped does not pay twice.
         """
+        kept = self._partial_path(system, user, temperature, max_tokens)
+        if kept is not None and kept not in _KEPT_NOW:
+            try:
+                answer = json.loads(kept.read_text(encoding="utf-8"))["answer"]
+                _KEPT_NOW.add(kept)  # reused once: the same request again is a retry and asks the model
+                log.info("LLM answer of an interrupted run reused (%s)", self.bare_model)
+                return answer
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # no answer yet, or a half-written one: ask again
+        answer = self._ask(system, user, temperature, max_tokens, retries)
+        if kept is not None:
+            try:
+                write_text_atomic(kept, json.dumps({"answer": answer}, ensure_ascii=False))
+                _KEPT_NOW.add(kept)
+            except OSError as exc:  # a full disk must not lose the answer just paid for
+                log.warning("could not keep the LLM answer: %s", exc)
+        return answer
+
+    def _partial_path(self, system: str, user: str, temperature: float, max_tokens: int) -> Path | None:
+        """Where the answer to exactly this request is kept; None outside a tracked stage."""
+        folder = progress.partial_dir("llm")
+        if folder is None:
+            return None
+        request = json.dumps([self.bare_model, self.reasoning, system, user, temperature, max_tokens],
+                             ensure_ascii=False)
+        return folder / f"{hashlib.sha256(request.encode('utf-8')).hexdigest()}.json"
+
+    def _ask(self, system: str, user: str, temperature: float, max_tokens: int, retries: int) -> Any:
         while True:
             active = self._active
             try:

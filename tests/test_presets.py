@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import argparse
 import json
 from pathlib import Path
@@ -65,8 +66,8 @@ def test_start_passes_the_preset_and_the_form_wins(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(dub_app, "base_config", lambda: json.loads(json.dumps(CONFIG)))
     seen: dict[str, Any] = {}
     monkeypatch.setattr(dub_app, "start_job", lambda *values, **kwargs: seen.update(values=values, **kwargs) or "ok")
-    assert dub_app.start_with_preset("folder", ["ep.mkv"], "fast") == "ok"
-    assert seen == {"values": ("folder", ["ep.mkv"]), "preset": "fast"}
+    assert dub_app.start_with_preset("folder", ["ep.mkv"], False, "fast") == "ok"
+    assert seen == {"values": ("folder", ["ep.mkv"]), "download_voice_model": False, "preset": "fast"}
     config = dub_app.job_config(list(dub_app.MODES)[0], list(dub_app.MODELS)[0], True, True, True, True, preset="upload")
     assert config["mix"]["video"]["compress"] is True
     assert config["mode"] == "accurate"
@@ -143,3 +144,44 @@ def test_a_season_all_translated_needs_no_voices(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(season_voices, "apply_season", never)
     monkeypatch.setattr(run, "season_voices_model", lambda _: "resnet293")
     run.run_season_voices([media], tmp_path / "work", argparse.Namespace(until="mix", force="mix", engine="f5"), {"season_voices": {}}, ["f5"])
+
+
+def test_voice_model_is_downloaded_once_and_a_failure_does_not_stop_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(refine_speakers, "download_model", lambda name: calls.append(name) or Path("weights"))
+    monkeypatch.setattr(refine_speakers, "model_available", lambda name: True)
+    run.fetch_voice_model(CONFIG)
+    assert calls == []  # already here
+    monkeypatch.setattr(refine_speakers, "model_available", lambda name: False)
+    run.fetch_voice_model(CONFIG)
+    assert calls == ["resnet293-ft"]
+
+    def broken(name: str) -> Path:
+        raise OSError("no network")
+
+    monkeypatch.setattr(refine_speakers, "download_model", broken)
+    run.fetch_voice_model(CONFIG)  # only a warning: the plain model takes over
+
+
+def test_recount_of_season_voices_keeps_translated_episodes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    videos, work = tmp_path / "season", tmp_path / "work"
+    videos.mkdir()
+    for name in ("E1", "E2", "E3"):
+        (videos / f"{name}.mkv").touch()
+    started: list[list[str]] = []
+    monkeypatch.setattr(dub_app, "JOB", None)
+    monkeypatch.setattr(dub_app, "_run", lambda job: started.append(job.extra + [p.stem for p in job.files]))
+    assert "сначала запустите обработку" in dub_app.recount_season_voices(str(videos), str(work))
+    for name in ("E1", "E2"):
+        (work / name).mkdir(parents=True)
+        (work / name / "speakers.json").write_text("{}", encoding="utf-8")
+        (work / name / "subs.ru.json").write_text("[]", encoding="utf-8")
+    assert "пересчитывать нечего" in dub_app.recount_season_voices(str(videos), str(work))
+    assert started == []
+    (work / "E2" / "subs.ru.json").unlink()
+    assert "реплики изменятся у 1" in dub_app.recount_season_voices(str(videos), str(work), True)
+    for _ in range(100):
+        if started:
+            break
+        time.sleep(0.01)
+    assert started == [["--season-voices-only", "--download-voice-model", "E1", "E2"]]

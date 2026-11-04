@@ -31,6 +31,8 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
+from stt import progress
+from utils.atomic_io import write_text_atomic
 from voiceover.normalize import SPELLED
 from voiceover.text import syllables
 
@@ -194,11 +196,13 @@ def check_run(run_dir: Path, root: Path, device: str = "cuda") -> dict[str, Any]
     clips = final_clips(run_dir)
     recognizer = Recognizer(device)
     results = []
-    for clip in clips:
+    progress.tick(0, len(clips), "clips")
+    for n, clip in enumerate(clips, 1):
         path = Path(clip["path"]) if Path(clip["path"]).is_absolute() else root / clip["path"]
         audio, sr = sf.read(str(path), dtype="float32")
         heard, words = recognizer(audio, sr)
         results.append(check_clip(clip, heard, words, len(audio) / sr))
+        progress.tick(n, len(clips), "clips")
     cers = [r["cer"] for r in results]
     summary = {
         "clips": len(results),
@@ -246,9 +250,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     result = check_run(args.run_dir, args.root, args.device)
-    (args.run_dir / "speech_check.json").write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n",
-                                                    encoding="utf-8")
-    (args.run_dir / "speech_check.md").write_text(render_markdown(result), encoding="utf-8")
+    write_text_atomic(args.run_dir / "speech_check.md", render_markdown(result))
+    write_text_atomic(args.run_dir / "speech_check.json", json.dumps(result, ensure_ascii=False, indent=1) + "\n")
     log.info("speech check: %s -> %s", result["summary"], args.run_dir / "speech_check.md")
     return 0
 

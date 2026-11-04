@@ -15,13 +15,21 @@ from ui import dub_app, settings
 
 
 def _clicks(app: Any) -> dict[str, list[Any]]:
-    """Button label -> what its click runs."""
+    """Button label -> what its click runs (for the two-step buttons: the second step, which does the work)."""
+    followers: dict[Any, list[Any]] = {}
+    for fn in app.fns.values():
+        if getattr(fn, "trigger_after", None) is not None:
+            followers.setdefault(fn.trigger_after, []).append(fn)
+    ids = {id(fn): key for key, fn in app.fns.items()}
     found: dict[str, list[Any]] = {}
     for fn in app.fns.values():
         for block_id, event in fn.targets:
             block = app.blocks.get(block_id)
             if event == "click" and block is not None and getattr(block, "value", None):
-                found.setdefault(str(block.value), []).append(fn)
+                last = fn
+                while last.fn.__name__ == "<lambda>" and followers.get(ids[id(last)]):  # step one: the button waits
+                    last = followers[ids[id(last)]][0]
+                found.setdefault(str(block.value), []).append(last)
     return found
 
 
@@ -34,7 +42,7 @@ def clicks() -> dict[str, list[Any]]:
     return _clicks(dub_app.build())
 
 
-@pytest.mark.parametrize("button,handler", [("Найти самое громкое место", "find_spot"), ("Послушать", "listen_mix"),
+@pytest.mark.parametrize("button,handler", [("Найти самое громкое место", "find_spot_done"), ("Послушать", "listen_mix_done"),
                                             ("Сохранить настройки", "save_mix_settings"),
                                             ("Пересвести эту серию", "remix")])
 def test_button_runs_its_function(clicks: dict[str, list[Any]], button: str, handler: str) -> None:
@@ -49,7 +57,7 @@ def test_sliders_reach_the_listen_function_in_order(clicks: dict[str, list[Any]]
 
 
 def test_saved_fields_go_to_their_settings(clicks: dict[str, list[Any]]) -> None:
-    labels = _labels(clicks["Сохранить настройки"][0])
+    labels = _labels(clicks["Сохранить настройки"][0])[1:]  # the first input is the results folder of the season
     paths = [s.path for s in dub_app.MIX_SETTINGS]
     assert list(zip(labels, paths)) == [
         ("Голоса громче, дБ", ("mix", "voice_gain_db")),
@@ -100,37 +108,40 @@ def test_remix_asks_for_the_mix_stage_of_the_voiced_engines(monkeypatch: pytest.
     (folder / "source.json").write_text(json.dumps({"media": "/video/season/ep.mkv"}), encoding="utf-8")
     seen: dict[str, Any] = {}
 
-    def fake(folder_: str, names: list[str], out_root: str, engines: list[str], *_: Any, stt_args: list[str] | None = None) -> str:
-        seen.update(folder=folder_, names=names, out_root=out_root, engines=engines, stt_args=stt_args)
+    def fake(folder_: str, names: list[str], out_root: str, engines: list[str], *_: Any, stt_args: list[str] | None = None,
+             title: str = "") -> str:
+        seen.update(folder=folder_, names=names, out_root=out_root, engines=engines, stt_args=stt_args, title=title)
         return "ok"
 
     monkeypatch.setattr(dub_app, "start_job", fake)
     assert dub_app.remix(str(tmp_path), "ep") == "ok"
     assert seen == {"folder": "/video/season", "names": ["ep.mkv"], "out_root": str(tmp_path),
-                    "engines": ["Vosk", "ESpeech (голоса героев)"], "stt_args": ["--force", "mix"]}
+                    "engines": ["Vosk", "ESpeech (голоса героев)"], "stt_args": ["--force", "mix"],
+                    "title": "Пересведение ep"}
 
 
-@pytest.mark.parametrize("sample,extra,suffix", [(False, [], "small"), (True, ["--sample-minute", "10", "--sample-seconds", "60"], "sample")])
-def test_compress_buttons_start_the_right_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sample: bool, extra: list[str],
-                                                  suffix: str) -> None:
+@pytest.mark.parametrize("sample,extra,suffix,title", [(False, [], "small", "Сжатие видео"),
+                                                       (True, ["--sample-minute", "10", "--sample-seconds", "60"], "sample",
+                                                        "Сжатие видео (пробный кусок)")])
+def test_compress_buttons_start_the_right_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sample: bool, extra: list[str],
+                                               suffix: str, title: str) -> None:
     video = tmp_path / "ep.ru.mkv"
     video.touch()
-    seen: dict[str, Any] = {}
-
-    class Process:
-        def poll(self) -> int | None:
-            return None
-
-    def fake(cmd: list[str], **_: Any) -> Process:
-        seen["cmd"] = cmd
-        return Process()
-
-    monkeypatch.setattr(dub_app, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(dub_app.subprocess, "Popen", fake)
-    monkeypatch.setitem(dub_app.COMPRESS, "process", None)
-    message = dub_app.start_compress(str(video), sample, 2.5, list(settings.VIDEO_CODECS)[1])
-    assert seen["cmd"][1:] == ["-m", "stt.video_compress", str(video), "--target-gb", "2.5", "--codec", "h264_nvenc", *extra]
-    assert f"ep.ru.{suffix}.mkv" in message
+    launched: list[dub_app.Job] = []
+    monkeypatch.setattr(dub_app, "JOB", None)
+    monkeypatch.setattr(dub_app, "_launch", launched.append)
+    message = dub_app.start_compress(str(video), sample, 2.5, list(settings.VIDEO_CODECS)[1], str(tmp_path / "STT_S"))
+    job = launched[0]
+    assert job.cmd is not None and job.cmd[1:] == ["-m", "stt.video_compress", str(video), "--target-gb", "2.5", "--codec",
+                                                    "h264_nvenc", *extra]
+    assert job.title == title and job.result == str(tmp_path / f"ep.ru.{suffix}.mkv") and not job.is_stt_run
+    assert job.log_path.parent == tmp_path / "STT_S" / ".ui"  # the log lives in the results folder of the season
+    assert message.startswith(f"⏳ Запущено: {title}. Ход — в строке состояния вверху.") and f"ep.ru.{suffix}.mkv" in message
+    monkeypatch.setattr(dub_app, "JOB", job)  # one heavy task at a time
+    assert dub_app.start_compress(str(video), sample, 2.5, list(settings.VIDEO_CODECS)[1]).startswith(f"Сейчас идёт «{title}»")
+    assert len(launched) == 1
+    monkeypatch.setattr(dub_app, "JOB", None)
+    assert dub_app.start_compress("", False, 2.5, list(settings.VIDEO_CODECS)[1]).startswith("❌ Выберите")
 
 
 def _episode(tmp_path: Path, video: dict[str, Any]) -> run.Episode:

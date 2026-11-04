@@ -1,8 +1,11 @@
-"""Settings page of the UI: the options of ``stt_config.json`` people change, kept in ``stt_config.local.json``.
+"""Settings page of the UI: the options of ``stt_config.json`` people change, kept in the global settings file
+(``stt_config.local.json`` unless another file is chosen, see ``ui.season_settings``).
 
 Only values that differ from ``stt_config.json`` are written, so the rest follows future defaults;
-other personal keys of the local file (LLM through a subscription, folders) are never touched.
-"Reset" removes the page's own keys from the local file.
+other personal keys of the file (LLM through a subscription, folders) are never touched.
+The folders (``paths``) are not settings of the page any more: the season picked on top of the page sets them
+for every job (``ui.seasons``); the keys stay in the config for the command line.
+"Reset" removes the page's own keys from the file.
 """
 
 from __future__ import annotations
@@ -14,18 +17,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from utils.atomic_io import write_text_atomic
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = REPO_ROOT / "stt_config.json"
 LOCAL = REPO_ROOT / "stt_config.local.json"
 TERATTS_VOICES = ["ru_f1+ru_f2", "ru_f1", "ru_f2", "ru_m5", "ru_m1"]  # offered first; any style of the model works
 VOSK_SPEAKERS = 57  # vosk-model-tts-ru-0.10-multi
+VOSK_CONFIG = REPO_ROOT / "models" / "vosk-model-tts-ru-0.10-multi" / "config.json"
+VOSK_FEMALE = {1, 2, 4, 5, 6, 11, 15, 16, 18, 19, 22, 24, 29, 33, 36, 38, 42, 44, 46, 48, 49, 51, 53}  # by first name
+VOSK_NO_GENDER = {9, 35, 40}  # chiffa, nebesky_jam, prometey: not a person's name
 
 
 @dataclass(frozen=True)
 class Setting:
     path: tuple[str, ...]
     label: str
-    kind: str  # bool | choice | number | integer | text | folder | voice | engines
+    kind: str  # bool | choice | number | integer | text | folder | voice | vosk_voice | engines
     group: str
     choices: dict[str, Any] = field(default_factory=dict)  # label -> value (choice, engines)
     info: str = ""
@@ -47,11 +55,6 @@ class SettingsError(ValueError):
         self.problems = problems
 
 SETTINGS: list[Setting] = [
-    Setting(("paths", "work"), "Рабочая папка", "folder", "Папки", info="Промежуточные файлы серий"),
-    Setting(("paths", "season"), "Папка файлов сезона", "folder", "Папки", nullable=True,
-            info="Словарь, состав, банк голосов и образцы голосов; пусто: рабочая папка"),
-    Setting(("paths", "finished"), "Папка готовых видео", "folder", "Папки", nullable=True,
-            info="Видео кладутся в подпапку STT_<сезон>; пусто: в папку серии"),
     Setting(("ui", "engines"), "Движки, отмеченные при запуске", "engines", "Запуск", ENGINES),
     Setting(("voiceover", "parallel_cpu"), "Vosk одновременно с TeraTTS и ESpeech (Vosk на процессоре)", "bool",
             "Запуск"),
@@ -78,10 +81,10 @@ SETTINGS: list[Setting] = [
     Setting(("voiceover", "listen_stress"), "Слушать ударения в дублях (имена, омографы) и переозвучивать неверные",
             "bool", "Озвучка"),
     Setting(("voiceover", "speech_check"), "Проверять речь озвучки распознаванием", "bool", "Озвучка"),
-    Setting(("voiceover", "engines", "vosk", "voices", "female"), "Vosk: женский голос", "integer", "Озвучка",
-            info=f"Номер голоса 0-{VOSK_SPEAKERS - 1}"),
-    Setting(("voiceover", "engines", "vosk", "voices", "male"), "Vosk: мужской голос", "integer", "Озвучка",
-            info=f"Номер голоса 0-{VOSK_SPEAKERS - 1}"),
+    Setting(("voiceover", "engines", "vosk", "voices", "female"), "Vosk: женский голос", "vosk_voice", "Озвучка",
+            info="Выберите голос и нажмите «Послушать»"),
+    Setting(("voiceover", "engines", "vosk", "voices", "male"), "Vosk: мужской голос", "vosk_voice", "Озвучка",
+            info="Выберите голос и нажмите «Послушать»"),
     Setting(("voiceover", "engines", "teratts", "voices", "female"), "TeraTTS: женский голос", "voice", "Озвучка",
             info="Голос или смесь двух: ru_f1+ru_f2"),
     Setting(("voiceover", "engines", "teratts", "voices", "male"), "TeraTTS: мужской голос", "voice", "Озвучка"),
@@ -120,6 +123,33 @@ def teratts_styles() -> set[str]:
     hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub"
     found = {p.name for p in hub.glob("models--TeraSpace--TeraTTSv2/snapshots/*/styles/*") if p.is_dir()}
     return found or {part for voice in TERATTS_VOICES for part in voice.split("+")}
+
+
+def vosk_speaker_names(config_path: Path = VOSK_CONFIG) -> dict[int, str]:
+    """Voice number -> name from the model's ``speaker_id_map``; empty if the model is not there."""
+    try:
+        mapping = json.loads(config_path.read_text(encoding="utf-8"))["speaker_id_map"]
+        return {int(number): str(name) for name, number in mapping.items()}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def vosk_voice_choices(gender: str, config_path: Path = VOSK_CONFIG) -> list[tuple[str, int]]:
+    """(label, number) of the Vosk voices, like ``49 · Trofimova Ekaterina (жен.)``; the voices of ``gender``
+    ("female" or "male") first, then the ones without a gender, then the others. Plain numbers without the model."""
+    names = vosk_speaker_names(config_path)
+
+    def mark(number: int) -> str:
+        return "" if number in VOSK_NO_GENDER else (" (жен.)" if number in VOSK_FEMALE else " (муж.)")
+
+    def rank(number: int) -> int:
+        if number in VOSK_NO_GENDER:
+            return 1
+        return 0 if (number in VOSK_FEMALE) == (gender == "female") else 2
+
+    numbers = sorted(names) if names else list(range(VOSK_SPEAKERS))
+    numbers.sort(key=lambda number: (rank(number), number))
+    return [(f"{n} · {names[n].replace('_', ' ').title()}{mark(n)}" if n in names else f"{n}", n) for n in numbers]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -180,7 +210,7 @@ def from_form(setting: Setting, value: Any) -> Any:
         return [setting.choices[label] for label in value or [] if label in setting.choices]
     if setting.kind == "bool":
         return bool(value)
-    if setting.kind in ("number", "integer"):
+    if setting.kind in ("number", "integer", "vosk_voice"):
         if value is None or value == "":
             raise ValueError(f"«{setting.label}»: введите число")
         number = float(value)
@@ -188,7 +218,7 @@ def from_form(setting: Setting, value: Any) -> Any:
             return number
         if number != int(number):
             raise ValueError(f"«{setting.label}»: нужно целое число")
-        if setting.path[-2:-1] == ("voices",) and not 0 <= number < VOSK_SPEAKERS:
+        if setting.kind == "vosk_voice" and not 0 <= number < VOSK_SPEAKERS:
             raise ValueError(f"«{setting.label}»: номер голоса Vosk от 0 до {VOSK_SPEAKERS - 1}")
         return int(number)
     text = str(value or "").strip()
@@ -254,4 +284,4 @@ def _write(local_path: Path, local: dict[str, Any]) -> None:
     """The local file, the previous version kept as ``.bak`` (personal settings are not in git)."""
     if local_path.is_file():
         shutil.copyfile(local_path, local_path.with_name(local_path.name + ".bak"))
-    local_path.write_text(json.dumps(local, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_text_atomic(local_path, json.dumps(local, ensure_ascii=False, indent=2) + "\n")

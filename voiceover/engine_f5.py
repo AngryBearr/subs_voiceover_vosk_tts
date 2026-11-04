@@ -29,14 +29,16 @@ from typing import Any
 
 import numpy as np
 
+from stt import progress
 from voiceover.engine import (TERATTS, PreparedText, SynthResult, VoskEngine, _sha256_file, cache_key,
-                              postprocess_wav)
+                              postprocess_wav, read_cache_entry, write_cache_entry)
 from voiceover.stress_listen import listened
 from voiceover.text import syllables
 
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+WORKER_POLL_S = 2.0  # how often the parent counts the lines the F5 worker has finished
 FALLBACK_TEXT = "Сегодня на острове снова жарко, и всех ждёт непростое испытание. Посмотрим, кто справится лучше."
 
 
@@ -101,6 +103,7 @@ class F5Engine(VoskEngine):
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
         self._identity: dict[str, Any] | None = None
+        self._progress_base = (0, 0)  # (lines finished before the worker starts, lines of the synthesis)
         self._accentizer: Any = None
         self.teratts_config = dict(config.get("teratts", {}))  # for teratts:<voice> lines
         self._teratts: Any = None
@@ -153,13 +156,12 @@ class F5Engine(VoskEngine):
             meta = cache_dir / f"{key}.json"
             listen = self._listen_here(row.tts_text) if self.attempts > 1 else []
             cached = None
-            if meta.exists() and (cache_dir / f"{key}.wav").exists():
-                entry = json.loads(meta.read_text(encoding="utf-8"))
-                if entry.get("tts_text") == row.tts_text and not entry.get("error"):
-                    if not listen or listened(entry, listen):
-                        entries[key] = entry
-                        continue
-                    cached = entry  # taken before its stress was heard: heard once, redone only if wrong
+            entry = read_cache_entry(meta, cache_dir / f"{key}.wav")
+            if entry is not None and entry.get("tts_text") == row.tts_text and not entry.get("error"):
+                if not listen or listened(entry, listen):
+                    entries[key] = entry
+                    continue
+                cached = entry  # taken before its stress was heard: heard once, redone only if wrong
             ref = clip_path(voice)
             todo[key] = {"key": key, "text": row.tts_text, "ref_wav": ref,
                          "ref_text": Path(ref).with_suffix(".txt").read_text(encoding="utf-8").strip(),
@@ -172,13 +174,20 @@ class F5Engine(VoskEngine):
         for key, item in todo.items():
             take = cache_dir / f"{key}.take.json"
             if take.exists() and Path(item["out_wav"]).exists():
-                item["result"] = json.loads(take.read_text(encoding="utf-8"))
-                resumed += 1
+                try:
+                    item["result"] = json.loads(take.read_text(encoding="utf-8"))
+                    resumed += 1
+                except (OSError, ValueError):  # half written when the computer stopped: this line is done again
+                    take.unlink(missing_ok=True)
         log.info("synthesis: %d distinct texts, %d cached, %d to synthesize (F5, %d voices)%s%s",
                  len(entries) + len(todo), len(entries) + len(relisten), len(todo) - resumed - len(relisten), len(voice_keys),
                  f", {resumed} finished by an interrupted run" if resumed else "",
                  f", {len(relisten)} cached to hear for their stress" if relisten else "")
+        total = len(entries) + len(todo)
+        finished = len(entries) + resumed  # lines done before the worker starts (cached takes to hear are not)
+        progress.tick(finished, total, "lines")
         if len(todo) > resumed:
+            self._progress_base = (finished, total)
             self._run_worker([item for item in todo.values() if "result" not in item], cache_dir)
         for key, item in todo.items():
             wav = Path(item["out_wav"])
@@ -196,7 +205,7 @@ class F5Engine(VoskEngine):
                          "edge_trimmed_ms": edge_ms, "reduced_pauses": reduced, "error": None, "tts_text": item["text"],
                          "voice": item["ref_wav"],
                          **{k: result[k] for k in ("seed", "takes", "check", "stress") if k in result}}
-                (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
+                write_cache_entry(cache_dir / f"{key}.json", entry)
                 (cache_dir / f"{key}.take.json").unlink(missing_ok=True)
             entries[key] = entry
         results = []
@@ -207,16 +216,30 @@ class F5Engine(VoskEngine):
         return results
 
     def _run_worker(self, items: list[dict[str, Any]], cache_dir: Path) -> None:
+        """Run the F5 worker on ``items``; while it runs, report how many lines it has finished (the lines whose
+        ``<key>.take.json`` exists). Its messages go to ``cache_dir/f5_worker.log`` (a full pipe would stall it)."""
+        before, total = self._progress_base if self._progress_base[1] else (0, len(items))
+        log_path = cache_dir / "f5_worker.log"
         with tempfile.TemporaryDirectory(dir=cache_dir) as tmp:
             job, out = Path(tmp) / "job.json", Path(tmp) / "results.json"
             job.write_text(json.dumps({"model": self.repo, "nfe": self.nfe, "attempts": self.attempts,
                                        "device": self.device, "prefix": self.prefix, "slack_s": self.slack_s,
                                        "retry_lost_words": self.retry_lost_words, "items": items},
                                       ensure_ascii=False), encoding="utf-8")
-            done = subprocess.run([str(self.python), "-m", "voiceover.f5_worker", str(job), str(out)], cwd=REPO_ROOT,
-                                  stderr=subprocess.PIPE, text=True)
-            if done.returncode != 0:
-                raise RuntimeError(f"F5 worker failed (exit {done.returncode}): {done.stderr[-2000:]}")
+            with log_path.open("w", encoding="utf-8") as worker_log:
+                process = subprocess.Popen([str(self.python), "-m", "voiceover.f5_worker", str(job), str(out)],
+                                           cwd=REPO_ROOT, stderr=worker_log, text=True)
+                while True:
+                    try:
+                        process.wait(timeout=WORKER_POLL_S)
+                        break
+                    except subprocess.TimeoutExpired:
+                        progress.tick(before + sum((cache_dir / f"{i['key']}.take.json").exists() for i in items),
+                                      total, "lines")
+            if process.returncode != 0:
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+                raise RuntimeError(f"F5 worker failed (exit {process.returncode}): {tail}")
             results = {r["key"]: r for r in json.loads(out.read_text(encoding="utf-8"))}
         for item in items:
             item["result"] = results.get(item["key"])
+        progress.tick(before + len(items), total, "lines")

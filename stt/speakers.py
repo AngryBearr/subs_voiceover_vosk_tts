@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from stt import voice_bank
+from stt import progress, voice_bank
 from stt.llm import DEFAULT_MODEL, OpenRouterClient
 from stt.runner import load_json, save_json
 
@@ -170,7 +170,9 @@ def name_speakers(
 
         prompt = build_prompt([s for s in speakers if s.get("cues")], records, glossary=glossary,
                               cast=cast_text(cast) if cast else "")
+        progress.tick(0, 1, "requests")
         answer = client.chat_json(SYSTEM_PROMPT, prompt)
+        progress.tick(1, 1, "requests")
         cards = answer.get("speakers", []) if isinstance(answer, dict) else answer
         save_json(folder / "speakers.llm.json", {"model": model, "usage": client.usage.to_dict(), "cards": cards})
         apply_cards(speakers, cards)

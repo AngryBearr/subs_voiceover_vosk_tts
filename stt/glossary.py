@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from stt import progress
 from stt.llm import DEFAULT_MODEL, OpenRouterClient
 from stt.runner import load_json, save_json
 
@@ -87,7 +88,9 @@ def main(argv: list[str] | None = None) -> None:
 
         prompt = ("Cast of the season (from the web; use these spellings for people):\n"
                   + cast_text(load_json(Path(args.cast))) + "\n\n" + prompt)
+    progress.tick(0, 1, "requests")
     answer = client.chat_json(SYSTEM_PROMPT, prompt)
+    progress.tick(1, 1, "requests")
     entries = merge(existing, answer.get("entries", []) if isinstance(answer, dict) else answer)
     write_outputs(folder, entries)
     if season_path:

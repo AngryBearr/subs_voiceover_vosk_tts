@@ -57,12 +57,14 @@ import json
 import logging
 import re
 import sys
+import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from stt import progress
 from voiceover.engine import build_engine
 from voiceover.llm import LLMClient, LLMConfig, LLMError
 from voiceover.text import join_lines
@@ -255,9 +257,27 @@ def ask(pairs: list[tuple[Suspect, str]], client: LLMClient, batch: int = 40, wo
 
     Batches go out ``workers`` at a time (S29: the screener's 7 batches took 6 min one by one)."""
     offsets = range(0, len(pairs), batch)
+    _count_requests(planned=len(offsets))
+
+    def one(offset: int) -> list[str | None]:
+        answers = _ask_batch(pairs[offset:offset + batch], client, f"stress:{offset}")
+        _count_requests(finished=1)
+        return answers
+
     with ThreadPoolExecutor(max(1, min(workers, len(offsets)))) as pool:
-        parts = pool.map(lambda offset: _ask_batch(pairs[offset:offset + batch], client, f"stress:{offset}"), offsets)
+        parts = pool.map(one, offsets)
     return [answer for part in parts for answer in part]
+
+
+_REQUESTS = [0, 0]  # finished and planned batches of the stage (progress of the run)
+_REQUESTS_LOCK = threading.Lock()
+
+
+def _count_requests(planned: int = 0, finished: int = 0) -> None:
+    with _REQUESTS_LOCK:
+        _REQUESTS[0] += finished
+        _REQUESTS[1] += planned
+        progress.tick(_REQUESTS[0], _REQUESTS[1], "requests")
 
 
 def _ask_batch(chunk: list[tuple[Suspect, str]], client: LLMClient, tag: str) -> list[str | None]:
