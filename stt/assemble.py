@@ -194,6 +194,7 @@ def merge_captions(
     tail_s: float = 0.6,
     min_word_s: float = 0.12,
     max_shift_s: float = 1.5,
+    min_similarity: float = 0.6,
 ) -> tuple[list[Word], dict[str, int]]:
     """Put on-screen captions where the ASR missed or garbled them.
 
@@ -209,8 +210,13 @@ def merge_captions(
     said entirely while the caption was shown. A caption the ASR missed completely goes to the
     nearest ASR sentence boundary, unless that is more than `max_shift_s` away: then it is a
     quieter voice under transcribed speech and stays only in the original audio.
+
+    The replacement is made only if the caption text is similar (`min_similarity`, character
+    match ratio) to the ASR words it would replace; otherwise the caption is another speaker's
+    line, a name or a title that merely shares a word with the speech, and the ASR words stay.
     """
-    stats = {"captions": len(captions), "kept_asr": 0, "replaced": 0, "added": 0, "under_speech": 0}
+    stats = {"captions": len(captions), "kept_asr": 0, "replaced": 0, "added": 0, "under_speech": 0,
+             "rejected": 0}
     words = sorted(words, key=lambda w: (w.start, w.end))
     mids = [(w.start + w.end) / 2 for w in words]
     sentence, first, last = [], {}, {}  # sentence id per word; first/last word index per sentence
@@ -259,6 +265,13 @@ def merge_captions(
                     or (sentence[i] in own and t0 - 1.5 <= mids[i] <= t1 + 1.5)
                     or (words[first[sentence[i]]].start >= t0 - 0.5 and words[last[sentence[i]]].end <= cap["end"] + 0.3))
             }
+            if span:
+                # Replace the ASR words only when the caption really is a version of them: the caption of
+                # another speaker, a name or a title shares a word or two with the speech but not its text.
+                asr_text = "".join(t for i in sorted(span) for t in _tokens(words[i].text))
+                if difflib.SequenceMatcher(None, "".join(cap_tokens[k]), asr_text).ratio() < min_similarity:
+                    stats["rejected"] += 1
+                    continue
             if span:
                 t0, t1 = min(t0, min(words[i].start for i in span)), max(t1, max(words[i].end for i in span))
                 position = min(span)

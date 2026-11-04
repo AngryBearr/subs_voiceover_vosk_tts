@@ -113,13 +113,15 @@ class Episodes(Dataset):
         queries, supports = [], []
         for cls in chosen:
             gold, support = self.gold[cls], self.support[cls]
+            # Different seasonal IDs can be the same returning person; do not mix them as rival voices.
+            rivals = [c for c in chosen if c != cls and self.same_season[cls, c]]
             used: set[int] = set()
             for k in range(self.per_person):
                 seg = gold[rng.integers(len(gold))]
                 used.add(seg["off"])
                 wav = self._clip(seg, rng)
-                if rng.random() < self.overlap_p:  # someone else talks over the line (host or tribe mate)
-                    rival = self.gold[chosen[rng.integers(len(chosen))]]
+                if rng.random() < self.overlap_p and rivals:  # a distinct same-season person or the shared host
+                    rival = self.gold[rivals[rng.integers(len(rivals))]]
                     other = rival[rng.integers(len(rival))]
                     if other["off"] not in used and other["cls"] != cls:
                         wav = self._mix(wav, self._clip(other, rng), rng.uniform(5.0, 15.0))
@@ -167,6 +169,18 @@ def embed(model: Any, wav: torch.Tensor) -> torch.Tensor:
     with torch.autocast("cuda", dtype=torch.bfloat16):
         vec = model.resnet(fbank)[1]
     return F.normalize(vec.float(), dim=-1)
+
+
+def margin_logits(q: torch.Tensor, c: torch.Tensor, target: torch.Tensor,
+                  allowed: torch.Tensor | None = None, *, margin: float = 0.2,
+                  scale: float = 32.0) -> torch.Tensor:
+    """Angular-margin logits; True in allowed means this rival may participate in the loss."""
+    cos = q @ c.T
+    sin = torch.sqrt((1.0 - cos ** 2).clamp(min=1e-6))
+    phi = cos * math.cos(margin) - sin * math.sin(margin)
+    hot = F.one_hot(target, c.size(0)).bool()
+    logits = scale * torch.where(hot, phi, cos)
+    return logits if allowed is None else logits.masked_fill(~allowed[target], -1e4)
 
 
 class Scorer:
@@ -369,16 +383,8 @@ def main() -> None:
         return 0.5 * (1 + math.cos(math.pi * (step - warm) / max(total_steps - warm, 1)))
 
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_factor)
-    cos_m, sin_m = math.cos(args.margin), math.sin(args.margin)
     same_season = dataset.same_season.to(args.device)
-
-    def margin_logits(q: torch.Tensor, c: torch.Tensor, target: torch.Tensor, allowed: torch.Tensor | None = None) -> torch.Tensor:
-        cos = q @ c.T
-        sin = torch.sqrt((1.0 - cos ** 2).clamp(min=1e-6))
-        phi = cos * cos_m - sin * sin_m
-        hot = F.one_hot(target, c.size(0)).bool()
-        logits = args.scale * torch.where(hot, phi, cos)
-        return logits if allowed is None else logits.masked_fill(~allowed[target], -1e4)
+    logit_options = {"margin": args.margin, "scale": args.scale}
 
     best = -math.inf
     global_step = 0
@@ -386,6 +392,8 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         model.train()
         freeze(model, prefixes, args.bn == "frozen")
+        # Evaluation uses larger batches; release its unused allocator blocks before backpropagation.
+        torch.cuda.empty_cache()
         for step, batch in enumerate(loader, 1):
             queries = batch["queries"].to(args.device, non_blocking=True)
             supports = batch["supports"].to(args.device, non_blocking=True)
@@ -395,21 +403,26 @@ def main() -> None:
             q, s = emb[:queries.size(0)], emb[queries.size(0):]
             proto = F.normalize(s.view(persons, per, -1).mean(1), dim=-1)
             target = torch.arange(persons, device=labels.device).repeat_interleave(per)
-            loss_proto = F.cross_entropy(margin_logits(q, proto, target), target)
+            proto_allowed = same_season[labels[:, None], labels[None, :]]
+            loss_proto = F.cross_entropy(margin_logits(q, proto, target, proto_allowed, **logit_options), target)
             class_target = labels.repeat_interleave(per)
             weights = F.normalize(head, dim=-1)
-            loss_aam = F.cross_entropy(margin_logits(q, weights, class_target, same_season), class_target)
-            loss_aam = 0.5 * (loss_aam + F.cross_entropy(margin_logits(s, weights, class_target, same_season), class_target))
+            loss_aam = F.cross_entropy(margin_logits(q, weights, class_target, same_season, **logit_options), class_target)
+            loss_aam = 0.5 * (loss_aam + F.cross_entropy(margin_logits(s, weights, class_target, same_season, **logit_options), class_target))
             sp = sum(((p - start_weights[n]) ** 2).sum() for n, p in model.named_parameters() if p.requires_grad)
             loss = loss_proto + args.aam_weight * loss_aam + args.weight_sp * sp
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"Non-finite loss at epoch {epoch}, step {step}")
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, 5.0)
+            torch.nn.utils.clip_grad_norm_(params, 5.0, error_if_nonfinite=True)
+            if head.grad is not None and not torch.isfinite(head.grad).all():
+                raise FloatingPointError(f"Non-finite head gradient at epoch {epoch}, step {step}")
             opt.step()
             sched.step()
             global_step += 1
             if step % 20 == 0 or args.smoke:
-                top1 = (q @ proto.T).argmax(-1).eq(target).float().mean().item()
+                top1 = (q @ proto.T).masked_fill(~proto_allowed[target], -1e4).argmax(-1).eq(target).float().mean().item()
                 speed = global_step / (time.perf_counter() - t0)
                 log.info("epoch %d/%d step %d/%d loss %.3f proto %.3f aam %.3f sp %.4f top1 %.3f %.2f it/s mem %.1f GB",
                          epoch, args.epochs, step, args.steps, loss.item(), loss_proto.item(), loss_aam.item(), float(sp),

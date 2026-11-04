@@ -65,6 +65,14 @@ def process(folder: Path, srt: Path) -> dict[str, Any] | None:
                       "cluster": label, "cluster_share": share, "other_voice_s": other,
                       "words": [[round(words[i].start, 3), round(words[i].end, 3)] for i in range(p.first, p.last + 1)]})
     labelled_total = sum(names_person(x.person) for x in pieces)
+    if labelled_total >= 20 and len(lines) < 0.3 * labelled_total:
+        # The subtitles belong to another cut of the episode (S50E01/E02 pinned 6 of 491 and 4 of 207 named lines; pin_pieces then
+        # reports offset 0, so the cue lines below would carry wrong people): nothing from this episode goes to training.
+        stats = {"pieces": len(pieces), "labelled": labelled_total, "kept": 0, "not_confirmed": labelled_total, "cue_lines": 0,
+                 "out_of_sync": True, "pinned": len(lines)}
+        result = {"offset_s": round(offset, 3), "stats": stats, "lines": [], "cue_lines": []}
+        (folder / "lines.json").write_text(json.dumps(result, ensure_ascii=False, indent=0), encoding="utf-8")
+        return {"code": folder.name, "offset_s": result["offset_s"], **stats, "people": 0, "seconds": 0.0}
     # Lines Whisper did not hear: mostly shouts at challenges, the hard speech. Kept with the cue's own times when the
     # cue holds one voice and the file is in sync.
     pinned_ids = {id(p.piece) for p in pinned}

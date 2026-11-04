@@ -5,7 +5,7 @@
                "settings": {"mix": {"video": {"compress": true, "target_gb": 2.0}}}},
     "fast": {"label": "Быстрый: только Whisper и Vosk, без проверок",
              "settings": {"mode": "fast", "season_voices": {"enabled": false}, "subtitles": {"online": false},
-                          "voiceover": {"engine": "vosk", "stress_check": false, "listen_stress": false, "speech_check": false},
+                          "voiceover": {"engine": "vosk", "stress_check": false, "stress_proofread": false, "listen_stress": false, "speech_check": false},
                           "ui": {"engines": ["vosk"]}}},
     "previous": {"label": "Прежний: без голосов сезона и субтитров, старая громкость",
                  "settings": {"season_voices": {"enabled": false}, "subtitles": {"enabled": false},
@@ -31,6 +31,7 @@
     "stages": {
       "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
       "stress_screen": "openai/gpt-6-luna",
+      "stress_proofread": "openai/gpt-6.1-sol",
       "cast": ["openrouter:openai/gpt-6-luna:online", "openrouter:anthropic/claude-haiku-5.5:online"]
     }
   },
@@ -42,6 +43,7 @@
     "tts_profile": null,
     "parallel": 4
   },
+  "line_gender": {"enabled": true, "override": true, "voice_override": 0.9},
   "dub": {
     "interjections": "dense"
   },
@@ -61,6 +63,8 @@
     "units": {"enabled": false},
     "normalization": {"keep_input_yo_homographs": true},
     "stress_check": true,
+    "stress_proofread": true,
+    "stress_proofread_passes": 2,
     "season_stress": true,
     "listen_stress": true,
     "speech_check": true

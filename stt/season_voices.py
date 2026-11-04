@@ -201,7 +201,9 @@ def _offset(folder: Path) -> float:
 
 
 def embedding_path(folder: Path, model: str) -> Path:
-    return folder / f"words.emb.{model}.npz"
+    from stt.refine_speakers import model_cache_key
+
+    return folder / f"words.emb.{model_cache_key(model)}.npz"
 
 
 def load_episode(folder: Path, model: str) -> EpisodeData | None:
@@ -266,7 +268,9 @@ def subtitle_hints(data: EpisodeData) -> Any:
 # ---------------------------------------------------------------- build
 def fingerprint(folders: list[Path], model: str, min_words: int) -> str:
     """What the voices depend on: the first-pass files, the word embeddings and the subtitles of every episode."""
-    digest = hashlib.sha256(f"{SCHEMA}|{model}|{min_words}".encode())
+    from stt.refine_speakers import model_cache_key
+
+    digest = hashlib.sha256(f"{SCHEMA}|{model_cache_key(model)}|{min_words}".encode())
     for folder in sorted(folders):
         sources, _ = first_pass_files(folder)
         parts = [sources["words"], sources["speakers"], embedding_path(folder, model), folder / "subs.source.en.srt"]

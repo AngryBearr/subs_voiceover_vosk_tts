@@ -150,15 +150,36 @@ class OcrTest(unittest.TestCase):
 
     def test_merge_captions_keeps_good_asr_and_replaces_missed(self) -> None:
         words = [Word(1.0, 1.3, "I"), Word(1.3, 1.6, "love"), Word(1.6, 1.9, "your"), Word(1.9, 2.4, "tattoo."),
-                 Word(5.0, 5.4, "Soul."), Word(5.4, 5.8, "He's"), Word(5.8, 6.0, "there.")]
+                 Word(5.0, 5.3, "Theirs"), Word(5.3, 5.6, "all"), Word(5.6, 5.8, "ready"), Word(5.8, 6.0, "free"),
+                 Word(6.0, 6.2, "of"), Word(6.2, 6.4, "us.")]
         caps = [{"start": 0.9, "end": 2.5, "text": "I love your tattoo."},
                 {"start": 5.0, "end": 6.2, "text": "There's already three of us."},
                 {"start": 9.0, "end": 9.8, "text": "Is it me?"}]
         merged, stats = merge_captions(words, caps)
-        self.assertEqual(stats, {"captions": 3, "kept_asr": 1, "replaced": 1, "added": 1, "under_speech": 0})
+        self.assertEqual(stats, {"captions": 3, "kept_asr": 1, "replaced": 1, "added": 1, "under_speech": 0,
+                                 "rejected": 0})
         texts = " ".join(w.text for w in merged)
         self.assertEqual(texts, "I love your tattoo. There's already three of us. Is it me?")
         self.assertEqual([w.source for w in merged][-3:], ["ocr", "ocr", "ocr"])
+
+    def test_merge_captions_keeps_speech_the_caption_does_not_resemble(self) -> None:
+        # Another speaker's caption shares only "good" with the heard sentence: the ASR words stay.
+        words = [Word(10.0, 10.3, "Yeah,"), Word(10.3, 10.6, "I'm"), Word(10.6, 10.9, "good."),
+                 Word(10.9, 11.2, "Let's"), Word(11.2, 11.4, "do"), Word(11.4, 11.7, "it.")]
+        caps = [{"start": 10.0, "end": 11.0, "text": "You good?"}, {"start": 11.0, "end": 12.0, "text": "You got this."}]
+        merged, stats = merge_captions(words, caps)
+        self.assertEqual(" ".join(w.text for w in merged), "Yeah, I'm good. Let's do it.")
+        self.assertEqual({w.source for w in merged}, {None})
+        self.assertEqual(stats["replaced"], 0)
+        self.assertGreaterEqual(stats["rejected"], 1)
+
+    def test_merge_captions_replaces_only_the_garbled_words_of_the_same_speech(self) -> None:
+        words = [Word(5.0, 5.3, "Let's"), Word(5.3, 5.6, "go,"), Word(5.6, 5.9, "Brad."),
+                 Word(8.0, 8.3, "Next"), Word(8.3, 8.6, "up.")]
+        caps = [{"start": 4.9, "end": 6.0, "text": "Let's go, Red."}]
+        merged, stats = merge_captions(words, caps)
+        self.assertEqual(" ".join(w.text for w in merged), "Let's go, Red. Next up.")
+        self.assertEqual((stats["replaced"], stats["rejected"]), (1, 0))
 
     def test_merge_captions_aligns_shifted_back_to_back_captions(self) -> None:
         def timed(text: str, start: float) -> list[Word]:
@@ -167,14 +188,15 @@ class OcrTest(unittest.TestCase):
 
         words = (timed("Does that hurt as you do that?", 46.0)
                  + timed("I'm excited you're here, Gerry.", 60.0)
-                 + timed("I'm here to see a frickin' thing.", 61.6)
+                 + timed("I think you're gonna be a frickin' hoot.", 61.6)
                  + timed("And I think you're probably gonna take on some of those big boys.", 63.8))
         caps = [{"start": 47.0, "end": 49.0, "text": "Does that hurt once you do that?"},
                 {"start": 60.1, "end": 61.7, "text": "I'm excited you're here Gerry."},
                 {"start": 61.7, "end": 63.8, "text": "I think you're going to be a friggin' hoot..."},
                 {"start": 63.9, "end": 67.5, "text": "and I think you're probably going to take on some of those big boys"}]
         merged, stats = merge_captions(words, caps)
-        self.assertEqual(stats, {"captions": 4, "kept_asr": 3, "replaced": 1, "added": 0, "under_speech": 0})
+        self.assertEqual(stats, {"captions": 4, "kept_asr": 3, "replaced": 1, "added": 0, "under_speech": 0,
+                                 "rejected": 0})
         self.assertEqual(" ".join(w.text for w in merged),
                          "Does that hurt as you do that? I'm excited you're here, Gerry. "
                          "I think you're going to be a friggin' hoot... "

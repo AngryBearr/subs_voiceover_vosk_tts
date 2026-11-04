@@ -231,6 +231,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--voice-from-zero", action="store_true",
                         help="The voice track is on the media timeline from 0 (a test piece of stt.run): "
                              "its first --start seconds are dropped")
+    parser.add_argument("--full-duration", action="store_true",
+                        help="Keep the original audio through the end, even after the last dubbed line")
     parser.add_argument("--duck-db", type=float, default=12.0, help="How much to lower the original under speech")
     parser.add_argument("--duck-voices-only", action="store_true",
                         help="Lower only the original voices (Hybrid Demucs), keep music and effects")
@@ -255,7 +257,8 @@ def main(argv: list[str] | None = None) -> None:
         voice = voice[int(args.start * voice_sr):]
     voice = _resample(voice, voice_sr, args.sample_rate)
     duration = len(voice) / args.sample_rate
-    original = load_audio(args.media, start=args.start, duration=duration, sample_rate=args.sample_rate, channels=2)
+    original = load_audio(args.media, start=args.start, duration=None if args.full_duration else duration,
+                          sample_rate=args.sample_rate, channels=2)
     layers: list[tuple[np.ndarray, float]] = []
     for spec in args.extra:
         path, _, gain = spec.partition(":")
@@ -281,7 +284,7 @@ def main(argv: list[str] | None = None) -> None:
     sf.write(str(out_path), out, args.sample_rate, subtype="PCM_16")
     if args.mp3:
         sf.write(str(out_path.with_suffix(".mp3")), out, args.sample_rate, format="MP3")
-    log.info("Mixed %.1f s -> %s", duration, out_path)
+    log.info("Mixed %.1f s -> %s", len(out) / args.sample_rate, out_path)
     if args.mux:
         mux(Path(args.media), out_path, Path(args.mux), Path(args.srt) if args.srt else None,
             args.start, duration if args.start else None)

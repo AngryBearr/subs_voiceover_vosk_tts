@@ -105,3 +105,172 @@ def test_season_words_are_decided_once(tmp_path, monkeypatch) -> None:
     assert stress_check.save_season(path, {"натали": {"stressed": "натал+и"}, **result["season"]["decided"]}, "E02") == 2
     assert stress_check.save_season(path, {"натали": {"stressed": "н+атали"}}, "E03") == 0  # never replaced
     assert stress_check.load_season(path)["натали"]["stressed"] == "натал+и"
+
+
+# --- proofreading -------------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from voiceover import stress_check  # noqa: E402
+from voiceover.stress_check import Proposal, proofread, validate_proposal  # noqa: E402
+
+TEXTS = ["Сам+оа тут.", "Это Само+а и Само+а.", "Д+ома, в моём царств+е.", "Подс+адим к+ого-либо."]
+
+
+def test_proposal_validation_drops_the_unusable() -> None:
+    ok = {"id": 1, "word": "Само+а", "stressed": "Сам+оа"}
+    assert validate_proposal(ok, TEXTS) == Proposal(1, "само+а", "сам+оа")
+    assert validate_proposal({**ok, "id": 9}, TEXTS) is None  # unknown id
+    assert validate_proposal({**ok, "id": True}, TEXTS) is None
+    assert validate_proposal({**ok, "id": 2}, TEXTS) is None  # word not in that line
+    assert validate_proposal({**ok, "stressed": "Сам+оо"}, TEXTS) is None  # other letters
+    assert validate_proposal({**ok, "stressed": "С+ам+оа"}, TEXTS) is None  # two "+"
+    assert validate_proposal({**ok, "stressed": "Самоа"}, TEXTS) is None  # no "+"
+    assert validate_proposal({"id": 0, "word": "Сам+оа", "stressed": "сам+оа"}, TEXTS) is None  # same stress
+    assert validate_proposal("junk", TEXTS) is None
+
+
+class _Result:
+    def __init__(self, content: dict) -> None:
+        self.content = content
+
+
+class FakeClient:
+    """Answers the proofreading prompt with `proposals` for the lines it gets; the vote prompt per `votes`."""
+
+    def __init__(self, proposals=None, votes=None, fail=False, only=None) -> None:  # noqa: ANN001
+        self.proposals, self.votes, self.fail, self.only = proposals or [], votes or {}, fail, only
+        self.config = SimpleNamespace(model="fake")
+        self.seen: list[str] = []
+        self.seen_sentences: set[str] = set()
+
+    def complete_json(self, system, user, prompt_version, tag):  # noqa: ANN001
+        if self.fail:
+            raise RuntimeError("not reachable")
+        payload = json.loads(user)
+        if "lines" in payload:
+            self.seen += [x["text"] for x in payload["lines"]]
+            ids = {x["id"] for x in payload["lines"]}
+            return _Result({"items": [p for p in self.proposals if p["id"] in ids]})
+        self.seen_sentences |= {x["sentence"] for x in payload["items"]}
+        return _Result({"items": [{"id": x["id"], "stressed": self.votes.get(x["word"], x["word"])
+                                   if self.only in (None, x["sentence"]) else x["word"]}
+                                  for x in payload["items"]]})
+
+    def stats(self) -> dict:
+        return {}
+
+
+def test_proofread_returns_valid_proposals_and_survives_failure() -> None:
+    client = FakeClient([{"id": 0, "word": "Сам+оа", "stressed": "сам+оа"}, {"id": 1, "word": "Само+а", "stressed": "сам+оа"},
+                         {"id": 3, "word": "x", "stressed": "x"}, {"id": 99, "word": "y", "stressed": "y"}])
+    report: dict[str, int] = {}
+    assert proofread(TEXTS, client, batch=2, report=report) == [Proposal(1, "само+а", "сам+оа")]
+    assert report == {"proposals": 3} and client.seen == TEXTS
+    assert proofread(TEXTS, FakeClient(fail=True)) == []
+
+
+def _check(monkeypatch, texts, voters, proofreader_client, omographs=None, season=None, accents=None, passes=1):  # noqa: ANN001
+    class Engine:
+        def prepare(self, items):  # noqa: ANN001
+            return [SimpleNamespace(tts_text=t) for t in texts]
+
+    engine = Engine()
+    engine._accentizer = SimpleNamespace(custom_dict={}, omographs=omographs or {},
+                                         accents=accents or {"самоа": "сам+оа", "дома": "дом+а"})
+    monkeypatch.setattr(stress_check, "build_engine", lambda config: engine)
+    clients = iter(voters)
+    monkeypatch.setattr(stress_check, "_client", lambda cfg, model, env, **k: proofreader_client if model == "sol"
+                        else next(clients))
+    lines = [{"text": t.replace("+", "")} for t in texts]
+    return stress_check.check(lines, {}, {}, ["a", "b", "c"], second=False, season=season, proofreader="sol",
+                             proofread_passes=passes)
+
+
+def test_proposals_are_voted_and_a_majority_applies(monkeypatch) -> None:
+    texts = ["Само+а тут.", "Это Само+а."]
+    proposals = [{"id": 0, "word": "Само+а", "stressed": "сам+оа"}, {"id": 1, "word": "Само+а", "stressed": "сам+оа"}]
+    voters = [FakeClient(votes={"само+а": "сам+оа"}), FakeClient(votes={"само+а": "сам+оа"}), FakeClient()]
+    result = _check(monkeypatch, texts, voters, FakeClient(proposals))
+    # two of three: fixed where it was voted, but not for the whole season
+    assert result["dictionary"] == {} and result["season"]["decided"] == {}
+    assert result["sentences"] == {"Самоа тут.": {"самоа": "сам+оа"}, "Это Самоа.": {"самоа": "сам+оа"}}
+    assert result["proofread"] == {"model": "sol", "proposals": 2, "valid": 2, "corrected": 2}
+    # all three: one stress for the season
+    voters = [FakeClient(votes={"само+а": "сам+оа"}) for _ in range(3)]
+    result = _check(monkeypatch, texts, voters, FakeClient(proposals))
+    assert result["dictionary"] == {"самоа": "сам+оа"} and result["sentences"] == {}
+    assert result["season"]["decided"]["самоа"]["source"] == "proofread"
+    assert result["season"]["decided"]["самоа"]["votes"] == {"a": "сам+оа", "b": "сам+оа", "c": "сам+оа"}
+    assert next(v for v in result["verdicts"] if v["word"] == "самоа")["contexts"][0]["proposal"] == "сам+оа"
+    # one of three agrees: nothing changes
+    voters = [FakeClient(votes={"само+а": "сам+оа"}), FakeClient(), FakeClient()]
+    result = _check(monkeypatch, texts, voters, FakeClient(proposals))
+    assert result["dictionary"] == {} and result["season"]["decided"] == {}
+    assert result["proofread"]["corrected"] == 0
+
+
+def test_homograph_correction_stays_in_its_sentence(monkeypatch) -> None:
+    texts = ["Дом+а, в моём царств+е.", "Мы дом+а."]
+    proposals = [{"id": 0, "word": "Дом+а", "stressed": "д+ома"}]
+    voters = [FakeClient(votes={"дом+а": "д+ома"}, only="Дома, в моём царстве.") for _ in range(3)]
+    omographs = {"дома": ["д+ома", "дом+а"]}
+    result = _check(monkeypatch, texts, voters, FakeClient(proposals), omographs=omographs)
+    assert result["sentences"] == {"Дома, в моём царстве.": {"дома": "д+ома"}}
+    assert result["dictionary"] == {} and "дома" not in result["season"]["decided"]
+    # not a homograph for RUAccent, but stressed two ways in the episode: also per sentence
+    result = _check(monkeypatch, texts, [FakeClient(votes={"дом+а": "д+ома"}, only="Дома, в моём царстве.") for _ in range(3)],
+                    FakeClient(proposals))
+    assert result["sentences"] == {"Дома, в моём царстве.": {"дома": "д+ома"}} and result["dictionary"] == {}
+
+
+def test_season_words_are_applied_before_proofreading(monkeypatch) -> None:
+    texts = ["Само+а тут.", "Д+ома тут."]
+    proofreader = FakeClient([{"id": 0, "word": "Сам+оа", "stressed": "само+а"}])
+    season = {"самоа": {"stressed": "сам+оа", "source": "proofread"}, "дома": {"stressed": "дом+а"}}
+    result = _check(monkeypatch, texts, [FakeClient(), FakeClient(), FakeClient()], proofreader,
+                    omographs={"дома": ["д+ома", "дом+а"]}, season=season)
+    assert proofreader.seen == ["Сам+оа тут.", "Д+ома тут."]  # the homograph is not forced
+    assert result["dictionary"] == {"самоа": "сам+оа"}
+    assert result["proofread"]["valid"] == 1 and result["proofread"]["corrected"] == 0  # the season's word: not asked
+    assert result["season"]["decided"] == {}
+
+
+def test_proofreader_failing_keeps_the_old_behaviour(monkeypatch) -> None:
+    result = _check(monkeypatch, ["Само+а тут."], [FakeClient(), FakeClient(), FakeClient()], FakeClient(fail=True))
+    assert result["dictionary"] == {} and result["proofread"]["proposals"] == 0
+
+
+def test_plain_word_corrected_in_every_sentence_goes_to_the_whole_season(monkeypatch) -> None:
+    texts = ["На Само+а.", "И снова Само+а, и хватит."]
+    proposals = [{"id": 0, "word": "Само+а", "stressed": "сам+оа"}]  # the proofreader points at one sentence only
+    voters = [FakeClient(votes={"само+а": "сам+оа"}) for _ in range(3)]
+    result = _check(monkeypatch, texts, voters, FakeClient(proposals))
+    assert result["dictionary"] == {"самоа": "сам+оа"} and result["sentences"] == {}
+    assert result["season"]["decided"]["самоа"]["source"] == "proofread"
+    assert all(v.seen_sentences >= {"На Самоа.", "И снова Самоа, и хватит."} for v in voters)  # the other one is voted on too
+
+
+def test_two_readings_are_merged(monkeypatch) -> None:
+    class Alternating(FakeClient):  # each reading finds a different error
+        def complete_json(self, system, user, prompt_version, tag):  # noqa: ANN001
+            self.proposals = [self.queue.pop(0)] if "lines" in json.loads(user) else self.proposals
+            return super().complete_json(system, user, prompt_version, tag)
+
+    reader = Alternating()
+    reader.queue = [{"id": 0, "word": "Само+а", "stressed": "сам+оа"}, {"id": 1, "word": "Дом+а", "stressed": "д+ома"}]
+    texts = ["На Само+а.", "Дом+а, в моём царстве."]
+    voters = [FakeClient(votes={"само+а": "сам+оа", "дом+а": "д+ома"}) for _ in range(3)]
+    result = _check(monkeypatch, texts, voters, reader, omographs={"дома": ["д+ома", "дом+а"]}, passes=2)
+    assert result["proofread"]["proposals"] == 2 and result["proofread"]["valid"] == 2
+    assert result["dictionary"] == {"самоа": "сам+оа"}
+    assert result["sentences"] == {"Дома, в моём царстве.": {"дома": "д+ома"}}
+
+
+def test_each_sentence_is_voted_against_its_own_stress(monkeypatch) -> None:
+    """A homograph stressed two ways: the vote for the second sentence compares with ITS stress, not the first one's."""
+    texts = ["Я д+ома.", "Дом+а, в моём царстве."]
+    voters = [FakeClient(votes={"д+ома": "д+ома", "дом+а": "д+ома"}) for _ in range(3)]
+    proposals = [{"id": 1, "word": "Дом+а", "stressed": "д+ома"}]
+    result = _check(monkeypatch, texts, voters, FakeClient(proposals), omographs={"дома": ["д+ома", "дом+а"]})
+    assert result["sentences"] == {"Дома, в моём царстве.": {"дома": "д+ома"}}

@@ -296,6 +296,11 @@ class SegmentEmbedder:
     """WeSpeaker embedding of an audio stretch, in the space of pyannote community-1's cluster prints."""
 
     def __init__(self, device: str = "cuda") -> None:
+        from stt.refine_speakers import WespeakerTorch, runtime_checkpoint
+
+        self.runtime = WespeakerTorch("resnet293-ft", device) if runtime_checkpoint() else None
+        if self.runtime is not None:
+            return
         import glob as globlib
 
         import torch
@@ -309,6 +314,14 @@ class SegmentEmbedder:
         self.inference = Inference(Model.from_pretrained(found[-1]), window="whole", device=torch.device(device))
 
     def __call__(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        if self.runtime is not None:
+            if sample_rate != 16_000:
+                from math import gcd
+                from scipy.signal import resample_poly
+
+                common = gcd(sample_rate, 16_000)
+                audio = resample_poly(audio, 16_000 // common, sample_rate // common)
+            return self.runtime(audio)
         vector = self.inference({"waveform": self._torch.from_numpy(np.ascontiguousarray(audio))[None],
                                  "sample_rate": sample_rate})
         return _unit(list(np.asarray(vector).ravel()))

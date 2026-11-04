@@ -62,6 +62,76 @@ def attach_times(tokens: list[str], aligned: list[tuple[str, float, float]], off
     return words
 
 
+MAX_DRIFT_S = 1.5  # CTC times further than this from a matching reference word are treated as drifted
+MIN_DRIFT_RUN = 3  # ... when at least this many matched words in a row drift
+
+
+def anchor_to_reference(words: list[Word], reference: list[Word], max_drift: float = MAX_DRIFT_S,
+                        min_run: int = MIN_DRIFT_RUN) -> list[Word]:
+    """Replace drifted forced-alignment times by the times of the same words in a reference recognition.
+
+    wav2vec2 CTC alignment loses its place in shouting, chanting and music: a whole stretch of words
+    lands seconds away from where it was said (and the real speech ends up with no words). A word that
+    also stands in the reference (Whisper's own word times, matched by text) and differs from it by more
+    than `max_drift` seconds, in a run of at least `min_run` such words (a lone mismatch is more likely
+    the reference's own timing error), takes the reference time; words without a match that no longer fit between
+    their matched neighbours are spread evenly between those neighbours. Words are never dropped.
+    """
+    if not words or not reference:
+        return words
+    lo, hi = words[0].start - 2.0, words[-1].end + 2.0
+    ref = [w for w in reference if w.end > lo and w.start < hi]
+    keys = [_key(w.text) for w in words]
+    matcher = difflib.SequenceMatcher(a=keys, b=[_key(w.text) for w in ref], autojunk=False)
+    times: list[tuple[float, float]] = [(w.start, w.end) for w in words]
+    matched = [False] * len(words)
+    pairs = [(block.a + k, block.b + k) for block in matcher.get_matching_blocks() for k in range(block.size)
+             if keys[block.a + k]]
+    drifting = [abs(words[i].start - ref[j].start) > max_drift for i, j in pairs]
+    changed = False
+    for n, (i, j) in enumerate(pairs):
+        matched[i] = True
+        lo_n = n
+        while lo_n > 0 and drifting[lo_n - 1]:
+            lo_n -= 1
+        hi_n = n
+        while hi_n + 1 < len(pairs) and drifting[hi_n + 1]:
+            hi_n += 1
+        if drifting[n] and hi_n - lo_n + 1 >= min_run:
+            times[i] = (ref[j].start, max(ref[j].end, ref[j].start))
+            changed = True
+    if not changed:
+        return words
+    i = 0
+    while i < len(words):  # unmatched runs: keep their times only if they still fit between the neighbours
+        if matched[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(words) and not matched[j]:
+            j += 1
+        left = times[i - 1][1] if i > 0 else None
+        right = times[j][0] if j < len(words) else None
+        fits = all((left is None or times[k][0] >= left - 1e-6) and (right is None or times[k][1] <= right + 1e-6)
+                   for k in range(i, j))
+        if not fits and (left is not None or right is not None):
+            a = left if left is not None else right - 0.2 * (j - i)  # type: ignore[operator]
+            b = right if right is not None else a + 0.2 * (j - i)
+            b = max(a, b)
+            step = (b - a) / (j - i)
+            for k in range(i, j):
+                times[k] = (a + (k - i) * step, a + (k - i + 1) * step)
+        i = j
+    out: list[Word] = []
+    prev_end = 0.0
+    for word, (start, end) in zip(words, times):
+        start = max(start, prev_end)
+        end = max(end, start)
+        out.append(Word(start=round(start, 3), end=round(end, 3), text=word.text))
+        prev_end = end
+    return out
+
+
 class ForcedAligner:
     def __init__(self, device: str = "cuda", batch_size: int = 8, language: str = "English") -> None:
         self.device = device
@@ -154,8 +224,11 @@ class CtcAligner:
             b[0], b[1] = min(b[0], span.start * frame), max(b[1], span.end * frame)
         return [(tokens[k][0], round(b[0], 3), round(b[1], 3)) for k, b in sorted(bounds.items())]
 
-    def align(self, audio: np.ndarray, segments: list[Segment]) -> list[Segment]:
-        """Return copies of `segments` with `words` filled from forced alignment."""
+    def align(self, audio: np.ndarray, segments: list[Segment], reference: list[Word] | None = None) -> list[Segment]:
+        """Return copies of `segments` with `words` filled from forced alignment.
+
+        `reference` (e.g. Whisper's timed words) corrects stretches where the CTC alignment drifted.
+        """
         out: list[Segment] = []
         for seg in segments:
             if not seg.text.strip():
@@ -165,5 +238,7 @@ class CtcAligner:
             if not aligned:  # nothing alignable: spread the words evenly over the segment
                 aligned = [("", 0.0, seg.end - seg.start)]
             words = attach_times(seg.text.split(), aligned, seg.start)
+            if reference:
+                words = anchor_to_reference(words, reference)
             out.append(Segment(start=seg.start, end=seg.end, text=seg.text, words=words, speaker=seg.speaker))
         return out

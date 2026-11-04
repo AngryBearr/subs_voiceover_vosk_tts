@@ -7,8 +7,10 @@ times) and goes through forced alignment (`stt.align`) afterwards.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from stt.llm import OpenRouterClient
@@ -42,6 +44,38 @@ def chunk_texts(segments: list[Segment], chunks: list[Chunk]) -> list[str]:
     return [" ".join(t) for t in out]
 
 
+_KEY = re.compile(r"[^\w']+")
+HESITATIONS = {"um", "uh", "umm", "uhh", "hmm", "mm", "mmm", "er", "erm", "ah", "huh"}
+MIN_RESTORED_WORDS = 3
+
+
+def _key(token: str) -> str:
+    return _KEY.sub("", token.lower())
+
+
+def restore_dropped(fused: str, first: str, min_words: int = MIN_RESTORED_WORDS) -> str:
+    """Put back runs of the first model's words that the fused text left out completely.
+
+    The LLM follows the majority and drops what only one system heard: shouts, side remarks and
+    chants over the show's voice-over (measured on Survivor S51: about a third of the lines that
+    Whisper alone had were gone after the fusion). Only pure omissions come back: a run of at least
+    `min_words` words with no counterpart at all in the fused text. Where the fused text has other
+    words in their place (a disagreement) the LLM's version stays, so nothing is said twice.
+    """
+    a, b = first.split(), fused.split()
+    if not a or not b:
+        return fused
+    matcher = difflib.SequenceMatcher(a=[_key(t) for t in a], b=[_key(t) for t in b], autojunk=False)
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        out.extend(b[j1:j2])
+        if tag == "delete":
+            run = a[i1:i2]
+            if len(run) >= min_words and any(_key(t) not in HESITATIONS for t in run):
+                out.extend(run)
+    return " ".join(out)
+
+
 def fuse(
     chunks: list[Chunk],
     hypotheses: dict[str, list[Segment]],
@@ -53,12 +87,22 @@ def fuse(
 ) -> list[Segment]:
     """One fused text segment per non-empty chunk; the first model is the fallback.
 
+    Runs of words that the LLM dropped completely are put back (`restore_dropped`) from the models whose
+    recognition has word times (Whisper: it hears the shouts the others miss, and its times anchor the
+    alignment); from the first model when none has word times.
+
     Batches are sent in parallel; each gets the first model's text of the two preceding
     chunks as context, so batches do not depend on each other.
     """
     names = list(hypotheses)
     texts = {name: chunk_texts(segs, chunks) for name, segs in hypotheses.items()}
     first = texts[names[0]]
+    timed = [name for name in names if any(seg.words for seg in hypotheses[name])] or names[:1]
+
+    def restored(text: str, j: int) -> str:
+        for name in timed:
+            text = restore_dropped(text, texts[name][j])
+        return text
 
     def run(start: int) -> list[str]:
         ids = range(start, min(start + batch_size, len(chunks)))
@@ -71,7 +115,7 @@ def fuse(
         )
         answer = client.chat_json(SYSTEM_PROMPT, prompt)
         got = {c.get("id"): str(c.get("text", "")).strip() for c in answer.get("chunks", []) if isinstance(c, dict)}
-        return [got.get(j) or first[j] for j in ids]
+        return [restored(got[j], j) if got.get(j) else first[j] for j in ids]
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         batches = list(pool.map(run, range(0, len(chunks), batch_size)))

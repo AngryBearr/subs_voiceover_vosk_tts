@@ -76,6 +76,9 @@ echo "Две модели выдаются после согласия с усл
 echo "  https://huggingface.co/pyannote/speaker-diarization-community-1"
 echo "  https://huggingface.co/CohereLabs/cohere-transcribe-03-2026"
 hf_token || subs_env/bin/hf auth login
+echo "Модель пола по голосу (публичная, ~115 МБ):"
+subs_env/bin/python -c "from stt.line_gender import gender_files; print(*gender_files(), sep='\n')" \
+  || warn "модель пола не скачалась: конвейер попробует ещё раз при запуске"
 
 step "5/6 Ключ OpenRouter (перевод, имена, ударения)"
 if grep -qE '^\s*(export\s+)?OPENROUTER_API_KEY\s*=\s*\S' .env 2>/dev/null; then

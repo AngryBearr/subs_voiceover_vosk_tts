@@ -12,7 +12,9 @@ inside a rapid exchange stay audible in the ducked original instead of being dub
 
 Manual fixes from `corrections.json` in the folder (`stt.review` lists lines worth checking)
 are applied first: `{"123": {"gender": "female"}, "130": {"speaker": "Julie McGee"},
-"140": {"text": "..."}, "141": {"skip": true}}` (line numbers as in `subs.ru.srt`).
+"140": {"text": "..."}, "141": {"skip": true}}` (line numbers as in `subs.ru.srt`). A gender that differs
+from the speaker's (a correction, or `gender_by_voice` from `stt.line_gender`) is voiced by the voice of that
+gender, not by the speaker's own voice; a corrected gender wins over `gender_by_voice`.
 
 Writes `dub.ru.json` (or `--output`; voiced lines only, `voiceover` input format plus `speaker`,
 `gender`, `voice`), `dub.ru.srt` and `dub.report.json` (skipped lines with reasons).
@@ -92,7 +94,9 @@ def plan(
                             "text_en": text_en, "text": rec["text"], "reason": reason})
             continue
         gender = rec.get("gender", "unknown")
-        voice = (speaker_voices or {}).get(rec.get("speaker") or "") or voices.get(gender, voices["unknown"])
+        own_voice = None if rec.get("gender_changed") or rec.get("gender_by_voice") \
+            else (speaker_voices or {}).get(rec.get("speaker") or "")  # a changed gender needs that gender's voice
+        voice = own_voice or voices.get(gender, voices["unknown"])
         voiced.append({**rec, "voice": voice})
     for i, rec in enumerate(voiced, start=1):  # contiguous numbering for downstream tools
         rec["source_index"] = rec["index"]

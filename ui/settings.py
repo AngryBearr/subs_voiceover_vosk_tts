@@ -61,7 +61,9 @@ SETTINGS: list[Setting] = [
              "pyannote community-1": "pyannote-community-1"}),
     Setting(("speaker_refine", "model"), "Уточнять спикеров по голосу", "choice", "Распознавание",
             {"Да (ResNet293)": "resnet293", "Нет": "none"}),
-    Setting(("line_gender",), "Пол неопознанных спикеров по голосу каждой реплики", "bool", "Распознавание"),
+    Setting(("line_gender", "enabled"), "Пол неопознанных спикеров по голосу каждой реплики", "bool", "Распознавание"),
+    Setting(("line_gender", "override"), "Менять род реплики по голосу (если обе модели уверены)", "bool",
+            "Распознавание", info="Меняется только род, не герой; такие реплики попадают в список для проверки"),
     Setting(("ocr", "enabled"), "Читать надписи на экране (имена в титрах)", "bool", "Распознавание"),
     Setting(("cast", "enabled"), "Искать состав участников в интернете", "bool", "Распознавание"),
     Setting(("voice_bank", "enabled"), "Банк голосов сезона (узнавать героев между сериями)", "bool",
@@ -70,6 +72,7 @@ SETTINGS: list[Setting] = [
     Setting(("llm", "stages", "stress_screen"), "Модель первого отсева ударений", "choice", "Языковые модели",
             {"luna": "openai/gpt-6-luna", "Sol": "openai/gpt-6.1-sol"}),
     Setting(("voiceover", "stress_check"), "Проверять ударения (три языковые модели)", "bool", "Озвучка"),
+    Setting(("voiceover", "stress_proofread"), "Вычитывать ударения всей серии (sol)", "bool", "Озвучка"),
     Setting(("voiceover", "season_stress"), "Одно ударение имени на весь сезон (файл <сезон>.stress.json)", "bool",
             "Озвучка"),
     Setting(("voiceover", "listen_stress"), "Слушать ударения в дублях (имена, омографы) и переозвучивать неверные",
@@ -106,7 +109,8 @@ SETTINGS: list[Setting] = [
     Setting(("review",), "Список подозрительных реплик для проверки", "bool", "Сведение"),
 ]
 
-FALLBACKS: dict[tuple[str, ...], Any] = {("line_gender",): True, ("review",): True, ("ui", "engines"): ["vosk"],
+FALLBACKS: dict[tuple[str, ...], Any] = {("line_gender", "enabled"): True, ("line_gender", "override"): True,
+                                         ("review",): True, ("ui", "engines"): ["vosk"],
                                          ("voiceover", "listen_stress"): True, ("voiceover", "season_stress"): True,
                                          ("voiceover", "parallel_cpu"): True}
 

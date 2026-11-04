@@ -20,8 +20,10 @@ on-location voice split too.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +38,9 @@ WESPEAKER: dict[str, tuple[str, str]] = {
     "resnet293": ("Wespeaker/wespeaker-voxceleb-resnet293-LM", "WeSpeakerResNet293"),
     # fine-tuned on Survivor speech (docs/experiments.md); the weights live under models/, not in git
     "resnet293-ft": ("local:models/speaker/resnet293-ft/avg_model.pt", "WeSpeakerResNet293"),
+    # the voice prints of the line-gender classifier (stt.line_gender): a later fine-tune on audited data, public
+    "resnet293-gender": ("AngryBear9019/survivor-gender-resnet293@2634450d433785c26fc03ecc0a1bb09cf10679dd",
+                         "WeSpeakerResNet293"),
 }
 
 # ReDimNet2 (PalabraAI, MIT, torch.hub, pinned commit; weights of the v1.0.0 release): B6 0.29 / 0.52 / 0.99% EER on
@@ -49,8 +54,27 @@ REDIMNET2: dict[str, dict[str, str]] = {
 Embed = Callable[[np.ndarray], np.ndarray]
 
 
+def runtime_checkpoint() -> Path | None:
+    """Optional process-local fine-tuned backbone; never changes the production model."""
+    value = os.environ.get("STT_SPEAKER_CHECKPOINT")
+    if not value:
+        return None
+    path = Path(value).expanduser().resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"Not a speaker checkpoint: {path}")
+    return path
+
+
+def model_cache_key(name: str) -> str:
+    """Keep default cache names; isolate runtime fine-tuned weights by their content."""
+    path = runtime_checkpoint() if name == "resnet293-ft" else None
+    return f"{name}.{hashlib.sha256(path.read_bytes()).hexdigest()[:16]}" if path else name
+
+
 def model_available(name: str) -> bool:
     """False only for a model whose weights live in this repository's ``models`` and are missing (they are not in git)."""
+    if name == "resnet293-ft" and runtime_checkpoint() is not None:
+        return True
     repo = WESPEAKER.get(name, ("", ""))[0]
     return not repo.startswith("local:") or (Path(__file__).resolve().parents[1] / repo.removeprefix("local:")).exists()
 
@@ -66,12 +90,18 @@ class WespeakerTorch:
         from huggingface_hub import hf_hub_download
 
         repo, klass = WESPEAKER[name]
-        if repo.startswith("local:"):
+        selected = runtime_checkpoint() if name == "resnet293-ft" else None
+        if selected is not None:
+            path = selected
+        elif repo.startswith("local:"):
             path = Path(__file__).resolve().parents[1] / repo.removeprefix("local:")
             if not path.exists():
                 raise FileNotFoundError(f"Speaker model {name}: {path} is missing (train it, see docs/experiments.md)")
         else:
-            path = hf_hub_download(repo, "avg_model.pt")
+            repo_id, _, revision = repo.partition("@")
+            path = hf_hub_download(repo_id, "avg_model.pt", revision=revision or None)
+        log.info("speaker weights loaded: model=%s path=%s sha256=%s", name, path,
+                 hashlib.sha256(Path(path).read_bytes()).hexdigest())
         state = torch.load(path, map_location="cpu")
         model = getattr(wespeaker, klass)()
         model.resnet.load_state_dict({k: v for k, v in state.items() if not k.startswith("projection")})
