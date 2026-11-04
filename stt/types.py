@@ -16,6 +16,7 @@ class Word:
     score: float | None = None
     speaker: str | None = None
     source: str | None = None  # None: ASR; "ocr": on-screen caption
+    caption: bool = False  # part of an utterance that is captioned on screen (ASR words kept or replaced)
 
 
 @dataclass

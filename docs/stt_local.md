@@ -147,7 +147,11 @@ inputs are optional files: `speakers.override.json`, an edited `glossary.txt`, a
 
 One switch, `llm.model` in `stt_config.json` (default `openai/gpt-6-luna`), sets the model of
 every step; `llm.stages.<step>` overrides one step (`fuse`, `glossary`, `speakers`, `translate`,
-`voiceover`, `stress`, `stress_screen`). By default only the stress re-check uses other models.
+`voiceover`, `stress`, `stress_screen`, `translate_proofread`). By default only the stress re-check and the
+translation proofreading (`translate.proofread`, sol) use other models. The proofreading reads the Russian
+lines once more for real errors only (non-words such as "познаться", broken agreement, wrong meaning,
+untranslated English, names off the glossary); a fix is taken if it fits the time budget and the speaker
+gender, and all proposals are listed in `subs.ru.proofread.json`.
 
 The shared default is OpenRouter with gpt-6-luna (good results, much cheaper than sol; the UI
 offers luna or sol). Personal settings go into `stt_config.local.json` next to `stt_config.json`
@@ -236,8 +240,27 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   timings); otherwise the garbled ASR sentence is replaced by the caption text (`source: "ocr"`
   on the words, `ocr: true` on the cue), and a caption the ASR missed entirely is inserted at the
   nearest sentence boundary. A caption under another transcribed sentence is a quieter voice
-  and stays only in the original audio. The cues are then translated and voiced as usual.
+  and stays only in the original audio (and in the Russian on-screen track below).
   S10E01: 61 captions — 32 already right in ASR, 17 replaced, 11 added, 1 under other speech.
+- Since 4.11 the caption wins for its own utterance: a caption ASR already had is written with the
+  caption's text over the same word times (`caption: true` on its words), and a captioned run of
+  words is its own cue (`on_screen: true`). Such cues are voiced by the track's neutral voice
+  (`on_screen.voice`: `neutral` | `hero`, `on_screen.neutral_gender`), not the hero's; a manual
+  speaker/gender fix in `corrections.json` wins. S51E01: 138 captions, 109 voiced, 29 under other
+  speech (mostly whispers under a confessional) only shown as text.
+- `onscreen.json` (written by the transcribe stage): captions, name cards (+ descriptor) and lower
+  thirds with their screen box; `python -m stt.onscreen translate <folder>` (run in the translate
+  stage) writes `onscreen.ru.json` with the cast's Russian names and the glossary, cached per text and
+  speaker gender (each caption gets the gender of whoever says it, taken from the overlapping cue of
+  `subs.en.json`, so "I was waiting" becomes "Я ждала" for a woman; name cards get the named person's).
+  OCR text is repaired deterministically first (`stt.ocr_repair`: stray dots, glued words such as
+  "yourname", damaged job lines), truncated animation frames are folded into the full text, and card
+  lines read as one ("DEVIN ACTOR") are split into name and descriptor.
+  `stt.onscreen_render` turns it into an ASS track muxed as "Надписи на экране" (default, forced,
+  DejaVu fonts attached): a caption on a dark box over the English one, a card or lower third in the
+  mirrored part of the screen. When the video is compressed (`mix.video.compress`, preset `upload`)
+  the same text is burned into the picture instead (`on_screen.burn_in_when_compressing`). Off:
+  `"on_screen": {"track": false}`.
 - Name cards, titles and caption labels ("Shonee: …") become `on_screen` evidence for the
   speaker that talks most while they are shown (a card shown in a pause goes to the speaker of most
   words in the next 10 s, since 31.10); the speaker-naming LLM sees it. On S51E01-E05 this rule put

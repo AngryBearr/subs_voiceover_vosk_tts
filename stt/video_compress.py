@@ -22,6 +22,8 @@ from typing import Callable
 
 import av
 
+from stt.onscreen_render import Overlay, blend, load_items, render_overlays
+
 from utils.ffmpeg import ffmpeg_exe
 
 log = logging.getLogger("stt.video_compress")
@@ -66,8 +68,10 @@ def probe(path: Path) -> dict[str, float]:
 
 
 def _encode(src: Path, partial: Path, bitrate: int, codec: str, start_s: float | None, seconds: float | None,
-            on_progress: Callable[[float], None] | None) -> tuple[int, int]:
-    """One encoding attempt with ``codec``; (frames, bytes). Frames keep the source timestamps (a piece starts at 0)."""
+            on_progress: Callable[[float], None] | None,
+            overlays: list[Overlay] | None = None) -> tuple[int, int]:
+    """One encoding attempt with ``codec``; (frames, bytes). Frames keep the source timestamps (a piece starts at 0).
+    ``overlays`` (times on the output's timeline, i.e. from the piece's start) are burned into the frames they cover."""
     with av.open(str(src)) as source, av.open(str(partial), "w", format="matroska") as target:
         video = source.streams.video[0]
         video.thread_type = "AUTO"
@@ -93,8 +97,16 @@ def _encode(src: Path, partial: Path, bitrate: int, codec: str, start_s: float |
                 continue
             if seconds and at >= begin + seconds:
                 break
-            frame = frame.reformat(format="yuv420p")
-            frame.pts, frame.time_base = frame.pts - shift, video.time_base
+            source_pts = frame.pts  # a frame rebuilt from an array has none
+            active = [o for o in overlays or [] if o.start <= at - begin < o.end]
+            if active:  # only these frames go through RGB; the others are converted as before
+                rgb = frame.to_ndarray(format="rgb24")
+                for overlay in active:
+                    blend(rgb, overlay)
+                frame = av.VideoFrame.from_ndarray(rgb, format="rgb24").reformat(format="yuv420p")
+            else:
+                frame = frame.reformat(format="yuv420p")
+            frame.pts, frame.time_base = source_pts - shift, video.time_base
             frame.pict_type = av.video.frame.PictureType.NONE
             for packet in out.encode(frame):
                 target.mux(packet)
@@ -107,22 +119,23 @@ def _encode(src: Path, partial: Path, bitrate: int, codec: str, start_s: float |
 
 
 def encode_video(src: Path, out: Path, bitrate: int, codec: str = "hevc_nvenc", start_s: float | None = None,
-                 seconds: float | None = None, on_progress: Callable[[float], None] | None = None) -> Path:
+                 seconds: float | None = None, on_progress: Callable[[float], None] | None = None,
+                 overlays: list[Overlay] | None = None) -> Path:
     """The video stream of ``src`` alone, same resolution, ``bitrate`` kbps, source timestamps (a piece cut with
     ``start_s`` / ``seconds`` is shifted to start at 0). Written as ``<out>.partial`` and renamed when complete.
-    If the encoder (e.g. NVENC) fails to work, the software one (libx265 / libx264) is used and a warning logged."""
+    ``overlays`` are burned in (only for frames in their time range). If the encoder (e.g. NVENC) fails to work, the software one (libx265 / libx264) is used and a warning logged."""
     partial = out.with_name(out.stem + ".partial" + out.suffix)
     out.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     try:
-        frames, size = _encode(src, partial, bitrate, codec, start_s, seconds, on_progress)
+        frames, size = _encode(src, partial, bitrate, codec, start_s, seconds, on_progress, overlays)
     except (av.error.FFmpegError, ValueError, OSError) as error:
         soft = SOFT_CODECS.get(codec)
         if soft is None:
             raise
         log.warning("%s failed (%s); encoding with %s on the processor instead (slower)", codec, error, soft)
         codec = soft
-        frames, size = _encode(src, partial, bitrate, codec, start_s, seconds, on_progress)
+        frames, size = _encode(src, partial, bitrate, codec, start_s, seconds, on_progress, overlays)
     partial.replace(out)
     elapsed = time.perf_counter() - started
     log.info("%s: %d frames, %.0f fps, %.2f GB at %d kbps (%s)", out.name, frames, frames / max(elapsed, 1e-9),
@@ -152,8 +165,9 @@ def keep_streams(path: Path, copy_aac: bool = True, audio_kbps: int = 160) -> tu
 
 def shrink(src: Path, out: Path, target_gb: float = 2.0, codec: str = "hevc_nvenc", audio_kbps: int = 160,
            sample_minute: float | None = None, sample_seconds: float = 60.0,
-           on_progress: Callable[[float], None] | None = None) -> Path | None:
+           on_progress: Callable[[float], None] | None = None, onscreen: Path | None = None) -> Path | None:
     """A copy of ``src`` with a smaller video; None (nothing written) when the video is already small enough.
+    ``onscreen`` (onscreen.ru.json) is burned into the picture: only here, where the video is re-encoded anyway.
     With ``sample_minute`` only ``sample_seconds`` from that minute, to judge the quality. ``src`` stays as it is."""
     if out.resolve() == src.resolve():
         raise ValueError("the output must not be the input")
@@ -168,10 +182,15 @@ def shrink(src: Path, out: Path, target_gb: float = 2.0, codec: str = "hevc_nven
              info["height"], info["video_kbps"], bitrate, target_gb, audio_kbps_total)
     begin = sample_minute * 60 if sample_minute is not None else None
     piece = ["-ss", f"{begin:.3f}", "-t", f"{sample_seconds:.3f}"] if begin is not None else []
+    overlays = None
+    if onscreen:
+        overlays = render_overlays(load_items(onscreen), int(info["width"]), int(info["height"]), begin or 0.0)
+        log.info("burning in %d on-screen translations from %s", len(overlays), onscreen)
     video = out.with_name(out.stem + f".video{out.suffix}")
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        encode_video(src, video, bitrate, codec, begin, sample_seconds if begin is not None else None, on_progress)
+        encode_video(src, video, bitrate, codec, begin, sample_seconds if begin is not None else None, on_progress,
+                     overlays)
         partial = out.with_name(out.stem + ".partial" + out.suffix)
         # A whole file keeps every stream's own start time: without -copyts ffmpeg moves each input to zero on its own
         keep_times = [] if piece else ["-copyts"]
@@ -194,6 +213,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", default=None, help="Default: <stem>.small.mkv next to the input (<stem>.sample.mkv)")
     parser.add_argument("--sample-minute", type=float, default=None, help="Only a piece from this minute, to judge quality")
     parser.add_argument("--sample-seconds", type=float, default=60.0)
+    parser.add_argument("--onscreen", default=None,
+                        help="onscreen.ru.json: burn the Russian on-screen text into the picture")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     src = Path(args.video)
@@ -208,7 +229,8 @@ def main(argv: list[str] | None = None) -> None:
             last[0] = int(fraction * 20)
             log.info("encoded %d%%", int(fraction * 100))
 
-    shrink(src, out, args.target_gb, args.codec, args.audio_kbps, args.sample_minute, args.sample_seconds, progress)
+    shrink(src, out, args.target_gb, args.codec, args.audio_kbps, args.sample_minute, args.sample_seconds, progress,
+           Path(args.onscreen) if args.onscreen else None)
 
 
 if __name__ == "__main__":

@@ -15,9 +15,12 @@ import re
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Iterator
 
 import numpy as np
+
+from stt.ocr_repair import Vocabulary, repair_text
 
 log = logging.getLogger(__name__)
 
@@ -334,11 +337,37 @@ def captions(events: list[TextEvent]) -> list[Caption]:
     return out
 
 
-def summarize(events: list[TextEvent], total_s: float) -> dict[str, Any]:
-    """Classify timed text events into captions (speech) and cards (names, titles, lower thirds)."""
+REPAIRED_KINDS = ("caption", "name_card", "name_card_descriptor", "lower_third")
+
+
+def repair_events(events: list[TextEvent], vocabulary: Vocabulary) -> int:
+    """Fix stray dots and glued words in the texts shown to the viewer (after the classification, which
+    counts words of the raw text); returns how many texts changed."""
+    changed = 0
+    vocabulary.names |= {t.lower() for ev in events if ev.kind == "name_card" for t in _WORD.findall(ev.text)
+                         if len(ev.text.split()) == 1}  # names on cards (one word) are never split
+    for ev in events:
+        if ev.kind not in REPAIRED_KINDS:
+            continue
+        fixed = repair_text(ev.text, vocabulary)
+        variants = [v if not v.startswith("descriptor: ") else "descriptor: " + repair_text(v[12:], vocabulary)
+                    for v in ev.variants]
+        if fixed != ev.text or variants != ev.variants:
+            changed += 1
+            log.debug("OCR text repaired: %r -> %r", ev.text, fixed)
+        ev.text, ev.variants = fixed, variants
+    return changed
+
+
+def summarize(events: list[TextEvent], total_s: float, vocabulary: Vocabulary | None = None) -> dict[str, Any]:
+    """Classify timed text events into captions (speech) and cards (names, titles, lower thirds).
+
+    With a `vocabulary` (the episode's words) the shown texts are repaired first (`stt.ocr_repair`)."""
     for ev in events:  # descriptors are re-derived by classify
         ev.variants = [v for v in ev.variants if not v.startswith("descriptor: ")]
     events = classify(events, max(total_s, 1.0))
+    if vocabulary is not None:
+        repair_events(events, vocabulary)
     cards = [
         {"start": ev.start, "end": ev.end, "kind": ev.kind, "text": ev.text,
          "descriptor": next((v.split(": ", 1)[1] for v in ev.variants if v.startswith("descriptor: ")), None)}
@@ -348,11 +377,16 @@ def summarize(events: list[TextEvent], total_s: float) -> dict[str, Any]:
             "events": [ev.to_dict() for ev in events]}
 
 
-def reclassify(data: dict[str, Any]) -> dict[str, Any]:
-    """Apply the current rules to the events of a saved scan (no new video pass needed)."""
+def reclassify(data: dict[str, Any], asr_words: Iterable[str] | None = None,
+               names: Iterable[str] = ()) -> dict[str, Any]:
+    """Apply the current rules to the events of a saved scan (no new video pass needed).
+
+    With `asr_words` (the episode's spoken words) the texts are also repaired: stray dots, glued words;
+    `names` (cast, speakers) are never split."""
     events = [TextEvent(**{**e, "box": tuple(e["box"])}) for e in data.get("events", [])]
     total = max((e.end for e in events), default=0.0)
-    return {**data, **summarize(events, total)}
+    vocabulary = None if asr_words is None else Vocabulary.build(asr_words, [e.text for e in events], names)
+    return {**data, **summarize(events, total, vocabulary)}
 
 
 def run_ocr(path: str | Path, ocr: FrameOcr, *, start: float = 0.0, duration: float | None = None,

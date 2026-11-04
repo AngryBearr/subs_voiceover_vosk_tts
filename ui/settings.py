@@ -65,12 +65,22 @@ SETTINGS: list[Setting] = [
     Setting(("line_gender", "override"), "Менять род реплики по голосу (если обе модели уверены)", "bool",
             "Распознавание", info="Меняется только род, не герой; такие реплики попадают в список для проверки"),
     Setting(("ocr", "enabled"), "Читать надписи на экране (имена в титрах)", "bool", "Распознавание"),
+    Setting(("on_screen", "voice"), "Чем озвучивать строки, подписанные на экране", "choice", "Озвучка",
+            {"Нейтральным голосом": "neutral", "Голосом героя": "hero"},
+            info="Подписи на экране точнее распознавания и заменяют его текст; обычно это шёпот и неразборчивая речь"),
+    Setting(("on_screen", "neutral_gender"), "Нейтральный голос", "choice", "Озвучка",
+            {"Мужской голос дорожки": "male", "Женский голос дорожки": "female"}),
+    Setting(("on_screen", "track"), "Русский перевод надписей на экране (подписи, имена, места)", "bool", "Сведение",
+            info="Отдельная дорожка субтитров, включена по умолчанию; стоит поверх английской надписи"),
+    Setting(("on_screen", "burn_in_when_compressing"), "При сжатии видео вшивать перевод надписей в картинку", "bool",
+            "Сведение"),
     Setting(("cast", "enabled"), "Искать состав участников в интернете", "bool", "Распознавание"),
     Setting(("voice_bank", "enabled"), "Банк голосов сезона (узнавать героев между сериями)", "bool",
             "Распознавание"),
     Setting(("llm", "model"), "Языковая модель (перевод, имена)", "choice", "Языковые модели", MODELS),
     Setting(("llm", "stages", "stress_screen"), "Модель первого отсева ударений", "choice", "Языковые модели",
             {"luna": "openai/gpt-6-luna", "Sol": "openai/gpt-6.1-sol"}),
+    Setting(("translate", "proofread"), "Вычитывать перевод на ошибки (sol)", "bool", "Языковые модели"),
     Setting(("voiceover", "stress_check"), "Проверять ударения (три языковые модели)", "bool", "Озвучка"),
     Setting(("voiceover", "stress_proofread"), "Вычитывать ударения всей серии (sol)", "bool", "Озвучка"),
     Setting(("voiceover", "season_stress"), "Одно ударение имени на весь сезон (файл <сезон>.stress.json)", "bool",
@@ -110,9 +120,12 @@ SETTINGS: list[Setting] = [
 ]
 
 FALLBACKS: dict[tuple[str, ...], Any] = {("line_gender", "enabled"): True, ("line_gender", "override"): True,
+                                         ("translate", "proofread"): True,
                                          ("review",): True, ("ui", "engines"): ["vosk"],
                                          ("voiceover", "listen_stress"): True, ("voiceover", "season_stress"): True,
-                                         ("voiceover", "parallel_cpu"): True}
+                                         ("voiceover", "parallel_cpu"): True, ("on_screen", "voice"): "neutral",
+                                         ("on_screen", "neutral_gender"): "male", ("on_screen", "track"): True,
+                                         ("on_screen", "burn_in_when_compressing"): True}
 
 
 def teratts_styles() -> set[str]:

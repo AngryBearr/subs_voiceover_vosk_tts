@@ -217,7 +217,8 @@ def load_episode(folder: Path, model: str) -> EpisodeData | None:
         return None
     raw = load_json(sources["words"])
     offset = _offset(folder)
-    words = [Word(w["start"] - offset, w["end"] - offset, w["text"], w.get("score"), None, w.get("source")) for w in raw]
+    words = [Word(w["start"] - offset, w["end"] - offset, w["text"], w.get("score"), None, w.get("source"),
+                  bool(w.get("caption"))) for w in raw]
     try:
         with np.load(emb_path) as data:
             emb, starts, ends = data["emb"], data["starts"], data["ends"]

@@ -12,6 +12,7 @@ Outputs in --out:
     asr.<model>.json              ASR segments with word timings
     voice.<diarizer>.json         gender/age per diarized speaker
     words.json                    every word with time and speaker
+    onscreen.json                 with OCR: on-screen captions, name cards, lower thirds to show in Russian (stt.onscreen)
     subs.en.json / subs.en.srt    cues in the project subtitle schema (+ speaker, overlap)
     subs.en.speakers.srt          the same cues prefixed with speaker IDs, for review
     speakers.json                 speaker cards: ID, talk time, gender, age, embedding
@@ -83,7 +84,8 @@ def write_transcript(out: Path, records: list[dict[str, Any]], words: list[Word]
     write_srt(out / "subs.en.speakers.srt", records, with_speaker=True)
     save_json(
         out / "words.json",
-        [{**asdict(w), "start": round(w.start + offset, 3), "end": round(w.end + offset, 3),
+        [{**{k: v for k, v in asdict(w).items() if k != "caption" or v},  # caption only when set
+          "start": round(w.start + offset, 3), "end": round(w.end + offset, 3),
           "speaker": ids.get(w.speaker) if w.speaker else None} for w in words],
     )
 
@@ -271,9 +273,20 @@ def transcribe(args: argparse.Namespace) -> Path:
         log.info("Repetition guard removed %d looped words", loop_words)
     words = collect_words(segments)
     if ocr_data:
-        ocr_data = reclassify(ocr_data)  # rules may have changed since the (slow) scan
-        words, ocr_stats = merge_captions(words, ocr_data["captions"])
+        # rules may have changed since the (slow) scan; the spoken words help to repair the OCR text
+        ocr_data = reclassify(ocr_data, [w.text for w in words])
+        caption_decisions: list[dict[str, Any]] = []
+        words, ocr_stats = merge_captions(words, ocr_data["captions"], decisions=caption_decisions)
         log.info("On-screen captions: %s", ocr_stats)
+        from stt.ocr_repair import proper_names
+        from stt.onscreen import collect
+
+        screen_items = collect(ocr_data, caption_decisions, offset=args.start,
+                               names=proper_names(w.text for w in words))
+        save_json(out / "onscreen.json", screen_items)
+        log.info("On-screen items: %d -> %s", len(screen_items), out / "onscreen.json")
+    elif (out / "onscreen.json").exists():
+        (out / "onscreen.json").unlink()  # left over from a run with OCR
     words = assign_speakers(words, diarization, options)
     own_labels = [w.speaker for w in words]
     word_hints: Any = None  # existing subtitles (--subtitles): who speaks, pinned to the words

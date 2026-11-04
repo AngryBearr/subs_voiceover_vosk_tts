@@ -177,7 +177,7 @@ def _spread(texts: list[str], start: float, end: float) -> list[Word]:
     step = (end - start) / sum(weights)
     words, t = [], start
     for text, weight in zip(texts, weights):
-        words.append(Word(start=round(t, 3), end=round(t + weight * step, 3), text=text, source="ocr"))
+        words.append(Word(start=round(t, 3), end=round(t + weight * step, 3), text=text, source="ocr", caption=True))
         t += weight * step
     return words
 
@@ -195,6 +195,8 @@ def merge_captions(
     min_word_s: float = 0.12,
     max_shift_s: float = 1.5,
     min_similarity: float = 0.6,
+    max_rewrite_extra_s: float = 2.0,
+    decisions: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Word], dict[str, int]]:
     """Put on-screen captions where the ASR missed or garbled them.
 
@@ -204,9 +206,11 @@ def merge_captions(
     every caption finds its own ASR words without taking its neighbours'. Single-word matches
     count only near the caption's speech time, runs of 2+ words within the same margins.
 
-    A caption with at least `keep_ratio` of its words found keeps the ASR words (exact timing).
-    Otherwise its ASR version is replaced in place by the caption text (`source="ocr"`): the
-    matched words, the words between them, the rest of their ASR sentences, and ASR sentences
+    A caption with at least `keep_ratio` of its words found keeps the ASR words (exact timing), but
+    the caption is the truth about its own utterance: if its words differ from the matched ASR words,
+    their text is replaced by the caption's (spread over the same time span, `source="ocr"`). Speech
+    that is not the caption's utterance is never touched. Otherwise its ASR version is replaced in
+    place by the caption text (`source="ocr"`): the matched words, the words between them, the rest of their ASR sentences, and ASR sentences
     said entirely while the caption was shown. A caption the ASR missed completely goes to the
     nearest ASR sentence boundary, unless that is more than `max_shift_s` away: then it is a
     quieter voice under transcribed speech and stays only in the original audio.
@@ -214,9 +218,25 @@ def merge_captions(
     The replacement is made only if the caption text is similar (`min_similarity`, character
     match ratio) to the ASR words it would replace; otherwise the caption is another speaker's
     line, a name or a title that merely shares a word with the speech, and the ASR words stay.
+
+    Every word of a captioned utterance (kept, rewritten, replaced or added) gets `caption=True`.
+    If `decisions` is given it is filled, in the order of `captions`, with one dict per caption:
+    `index`, `start`, `end`, `text`, `action` (kept_asr | replaced | added | under_speech | rejected |
+    empty), `changed` (the text of ASR words was replaced), `asr` (the ASR text it replaced) and
+    `voiced` (the caption became part of the transcript).
     """
     stats = {"captions": len(captions), "kept_asr": 0, "replaced": 0, "added": 0, "under_speech": 0,
              "rejected": 0}
+    verdicts: list[dict[str, Any] | None] = [None] * len(captions)
+    order = {id(cap): n for n, cap in enumerate(captions)}
+
+    def decide(cap: dict[str, Any], action: str, asr: str = "", changed: bool = False) -> None:
+        verdicts[order[id(cap)]] = {
+            "index": order[id(cap)], "start": cap["start"], "end": cap["end"], "text": cap["text"],
+            "action": action, "changed": changed, "asr": asr,
+            "voiced": action in ("kept_asr", "replaced", "added"),
+        }
+
     words = sorted(words, key=lambda w: (w.start, w.end))
     mids = [(w.start + w.end) / 2 for w in words]
     sentence, first, last = [], {}, {}  # sentence id per word; first/last word index per sentence
@@ -226,6 +246,7 @@ def merge_captions(
         first.setdefault(sid, i)
         last[sid] = i
     dropped: set[int] = set()
+    marked: set[int] = set()  # kept ASR words of captioned utterances
     inserts: list[tuple[int, float, float, list[str]]] = []  # (position, speech start, end, words)
     for group in _caption_groups(captions, group_gap_s):
         lo, hi = group[0]["start"] - before_s, group[-1]["end"] + after_s
@@ -237,6 +258,8 @@ def merge_captions(
         speech = [(cap["start"] - lead_s, max(cap["start"] - lead_s + 0.25 * len(cap["text"].split()),
                                               cap["end"] - tail_s)) for cap in group]
         matched: list[set[int]] = [set() for _ in group]
+        offsets = [sum(len(ts) for ts in cap_tokens[:k]) for k in range(len(group))]  # first token of each caption
+        positions: list[set[int]] = [set() for _ in group]  # matched token positions inside each caption
         found = [0] * len(group)
         matcher = difflib.SequenceMatcher(a=[t for ts in cap_tokens for t in ts], b=asr_tokens, autojunk=False)
         for block in matcher.get_matching_blocks():
@@ -247,17 +270,49 @@ def merge_captions(
                 if (t0 - 0.5 <= mids[i] <= t1 + 0.5
                         or ((owners.count(k) >= 2 or len(cap_tokens[k]) == 1) and t0 - before_s <= mids[i] <= t1 + after_s)):
                     matched[k].add(i)
+                    positions[k].add(block.a + j - offsets[k])
                     found[k] += 1
         territory = [set(range(min(m), max(m) + 1)) if m else set() for m in matched]
         for k, cap in enumerate(group):
             texts = cap["text"].split()
             if not cap_tokens[k] or not texts:
+                decide(cap, "empty")
                 continue
+            others = set().union(*(t for j, t in enumerate(territory) if j != k))
             if found[k] / len(cap_tokens[k]) >= keep_ratio:
                 stats["kept_asr"] += 1
+                own_words = sorted(i for i in territory[k] if i not in others and i not in dropped
+                                   and words[i].source != "ocr")
+                asr_tokens_own = [t for i in own_words for t in _tokens(words[i].text)]
+                changed = False
+                if own_words and positions[k]:
+                    # ASR words next to the matched ones stand for the caption words that found no match
+                    # (a garbled first/last word): same ASR sentence, around the time of the caption's speech.
+                    lead, trail = min(positions[k]), len(cap_tokens[k]) - 1 - max(positions[k])
+                    t0, t1 = speech[k]
+                    for count, step, edge in ((lead, -1, own_words[0]), (trail, 1, own_words[-1])):
+                        for _ in range(count):
+                            i = edge + step
+                            if (i not in near or i in others or i in dropped or sentence[i] != sentence[edge]
+                                    or not t0 - 1.0 <= mids[i] <= t1 + 1.0):
+                                break
+                            own_words.insert(0 if step < 0 else len(own_words), i)
+                            edge = i
+                    asr_tokens_own = [t for i in own_words for t in _tokens(words[i].text)]
+                if own_words:
+                    s0, s1 = words[own_words[0]].start, max(words[i].end for i in own_words)
+                    if asr_tokens_own != cap_tokens[k] and s1 - s0 <= cap["end"] - cap["start"] + max_rewrite_extra_s:
+                        changed = True  # the caption's text wins over the heard words
+                        dropped |= set(own_words)
+                        end = re.search(r"[.!?…,;:]+$", words[own_words[-1]].text)
+                        if end and not texts[-1].endswith(_SENTENCE_END + _CLAUSE_END):  # captions often drop the final stop
+                            texts = [*texts[:-1], texts[-1] + end.group()]
+                        inserts.append((own_words[0], s0, s1, texts))
+                    else:
+                        marked |= set(own_words)
+                decide(cap, "kept_asr", " ".join(words[i].text for i in own_words) if changed else "", changed)
                 continue
             t0, t1 = speech[k]
-            others = set().union(*(t for j, t in enumerate(territory) if j != k))
             own = {sentence[i] for i in territory[k]}
             span = {
                 i for i in near if i not in others and (
@@ -271,6 +326,7 @@ def merge_captions(
                 asr_text = "".join(t for i in sorted(span) for t in _tokens(words[i].text))
                 if difflib.SequenceMatcher(None, "".join(cap_tokens[k]), asr_text).ratio() < min_similarity:
                     stats["rejected"] += 1
+                    decide(cap, "rejected")
                     continue
             if span:
                 t0, t1 = min(t0, min(words[i].start for i in span)), max(t1, max(words[i].end for i in span))
@@ -282,9 +338,11 @@ def merge_captions(
                     shift_back, shift_on = t1 - words[first[sid]].start, words[last[sid]].end - t0
                     if min(shift_back, shift_on) > max_shift_s:
                         stats["under_speech"] += 1  # a quieter voice under the transcribed one
+                        decide(cap, "under_speech")
                         continue
                     position = first[sid] if shift_back <= shift_on else last[sid] + 1
             stats["replaced" if span else "added"] += 1
+            decide(cap, "replaced" if span else "added", " ".join(words[i].text for i in sorted(span)), bool(span))
             dropped |= span
             inserts.append((position, t0, t1, texts))
 
@@ -302,7 +360,9 @@ def merge_captions(
                 t0, t1 = max(prev_end, t0 - (t1 - words[kept[j]].start)), words[kept[j]].start
             out += _spread(texts, t0, max(t1, t0 + min_word_s * len(texts)))
         if position < len(words) and position not in dropped:
-            out.append(words[position])
+            out.append(replace(words[position], caption=True) if position in marked else words[position])
+    if decisions is not None:
+        decisions[:] = [v for v in verdicts if v is not None]
     return out, stats
 
 
@@ -404,7 +464,7 @@ def build_cues(words: list[Word], options: CueOptions) -> list[Cue]:
             chars = sum(len(w.text) + 1 for w in current) + len(word.text)
             gap = word.start - prev.end
             limit = options.max_gap_s if _ends_sentence(prev) else options.max_gap_mid_s
-            if word.speaker != prev.speaker or (gap > limit and not _fragment_pause(words, i, current, options)):
+            if word.speaker != prev.speaker or word.caption != prev.caption or (gap > limit and not _fragment_pause(words, i, current, options)):
                 flush(current)
                 current = []
             elif _ends_sentence(prev) and prev.end - current[0].start >= options.sentence_split_s:
@@ -480,6 +540,7 @@ def subtitle_records(
                 "speaker": speaker,
                 "overlap": cue.overlap,
                 "ocr": any(w.source == "ocr" for w in cue.words),
+                **({"on_screen": True} if any(w.caption for w in cue.words) else {}),
             }
         )
     return records

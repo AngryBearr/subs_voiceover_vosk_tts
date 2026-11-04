@@ -198,9 +198,10 @@ class OcrTest(unittest.TestCase):
         self.assertEqual(stats, {"captions": 4, "kept_asr": 3, "replaced": 1, "added": 0, "under_speech": 0,
                                  "rejected": 0})
         self.assertEqual(" ".join(w.text for w in merged),
-                         "Does that hurt as you do that? I'm excited you're here, Gerry. "
+                         "Does that hurt once you do that? I'm excited you're here, Gerry. "
                          "I think you're going to be a friggin' hoot... "
-                         "And I think you're probably gonna take on some of those big boys.")
+                         "and I think you're probably going to take on some of those big boys.")
+        self.assertTrue(all(w.caption for w in merged))  # on-screen text wins over the heard words
 
     def test_merge_captions_skips_caption_under_other_speech(self) -> None:
         words = [Word(10.0 + 0.8 * i, 10.6 + 0.8 * i, t)

@@ -10,6 +10,9 @@ at most `--extend` seconds past its own end). The budget comes either from a fla
 characters-per-second rate or from a linear TTS duration profile
 (`seconds = intercept + slope * chars`, e.g. the Vosk calibration of the shortening branch).
 Lines still over budget after translation get up to `--shorten-rounds` shortening passes.
+
+With `--proofread-model` a last pass reads the Russian lines for real errors (non-words, grammar, meaning,
+names); accepted and rejected proposals are written to `subs.ru.proofread.json`.
 """
 
 from __future__ import annotations
@@ -81,6 +84,23 @@ Rewrite the line so that every form referring to the speaker agrees with "g". Ch
 same meaning, words, punctuation and length. Forms about other people stay as they are.
 
 Answer with JSON only: {"items": [{"i": <index>, "ru": "<corrected Russian text>"}, ...]}"""
+
+
+PROOFREAD_PROMPT = """You proofread Russian voice-over lines that were translated from English.
+Each line has the English original ("en"), the Russian translation ("ru"), the speaker card id ("s"), the
+speaker gender ("g") and "max" = the characters that fit its time window. Lines marked "ctx" are context only.
+
+Report ONLY lines with a real error:
+- a word that does not exist in Russian or is misspelt ("познаться" instead of "познакомиться");
+- broken grammar or agreement: gender, case, number, tense; first-person forms must agree with "g";
+- wrong meaning: a mistranslation, a lost negation, mixed-up people or numbers;
+- English left untranslated by mistake (names and terms of the glossary may stay as the glossary writes them);
+- a name written differently from the glossary or the speaker cards ("label_ru").
+Never rewrite for style, never change a correct line, never make a line longer than needed (keep it within "max"
+when you can). Change as little as possible: the corrected line must keep everything that was right.
+When a line is fine, leave it out. When nothing is wrong, answer {"items": []}.
+
+Answer with JSON only: {"items": [{"i": <index>, "ru": "<corrected Russian text>", "why": "<the error, a few words>"}]}"""
 
 
 def gender_mismatches(text: str, gender: str) -> list[str]:
@@ -277,6 +297,84 @@ def gender_fix_pass(
     return len(flagged), fixed
 
 
+def _check_fix(record: dict[str, Any], before: str, after: str, budget: int, tolerance: float) -> str | None:
+    """Why a proposed correction is not taken (None: it is taken)."""
+    if after == before:
+        return "unchanged"
+    if len(after) > max(budget * tolerance, len(before)):  # a line that was over budget may not get longer
+        return "over budget"
+    if gender_mismatches(after, record.get("gender", "unknown")):
+        return "gender mismatch"
+    return None
+
+
+def _proofread_batch(
+    records: list[dict[str, Any]], start: int, stop: int, translated: dict[int, str], client: OpenRouterClient,
+    cards: list[dict[str, Any]], glossary: str, context: int,
+) -> list[dict[str, Any]]:
+    """Proposed corrections for `records[start:stop]` (raw answers of the model, not checked yet)."""
+    def line(r: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        return {"s": r.get("speaker"), "g": r.get("gender", "unknown"), "en": " ".join(r["text"]),
+                "ru": translated[r["index"]], **extra}
+
+    lines = [{"ctx": True, **line(r)} for r in records[max(0, start - context) : start]]
+    lines += [line(r, i=r["index"]) for r in records[start:stop]]
+    lines += [{"ctx": True, **line(r)} for r in records[stop : stop + context]]
+    answer = client.chat_json(PROOFREAD_PROMPT, _prompt(cards, glossary, lines))
+    rows = answer.get("items", []) if isinstance(answer, dict) else answer
+    wanted = {r["index"] for r in records[start:stop]}
+    return [row for row in rows if isinstance(row, dict) and row.get("i") in wanted
+            and str(row.get("ru", "")).strip()]
+
+
+def proofread_pass(
+    records: list[dict[str, Any]],
+    translated: dict[int, str],
+    client: OpenRouterClient,
+    *,
+    budgets: dict[int, int],
+    tolerance: float,
+    batch_size: int = 40,
+    context: int = 3,
+    speakers: list[dict[str, Any]] | None = None,
+    glossary: str = "",
+    parallel: int = 4,
+) -> list[dict[str, Any]]:
+    """Ask a second reader for real errors of the Russian lines (non-words, grammar, meaning, names).
+
+    Lines go in batches of contiguous cues with a few lines of context; the model answers only the lines it
+    would change. A correction is taken (written into `translated`) only if it differs, is not over
+    budget x `tolerance` (unless the line already was) and agrees with the speaker gender.
+    Returns every proposal as {index, before, after, why, status: "accepted" | "rejected", reason}.
+    """
+    cards = speaker_cards(speakers or [])
+    by_index = {r["index"]: r for r in records}
+    before_all = dict(translated)  # the context of every batch is the translation as it was before this pass
+    spans = [(i, min(i + batch_size, len(records))) for i in range(0, len(records), batch_size)]
+
+    def run(span: tuple[int, int]) -> list[dict[str, Any]]:
+        try:
+            return _proofread_batch(records, span[0], span[1], before_all, client, cards, glossary, context)
+        except Exception as error:  # noqa: BLE001 - the proofreading is a bonus: the translation stays as it is
+            log.warning("Proofreading of lines %d-%d failed (%s): left as translated", span[0] + 1, span[1], error)
+            return []
+
+    with ThreadPoolExecutor(max_workers=max(1, min(parallel, len(spans) or 1))) as pool:
+        answers = list(pool.map(run, spans))
+    report: list[dict[str, Any]] = []
+    for row in (row for rows in answers for row in rows):
+        idx, before, after = row["i"], before_all[row["i"]], str(row["ru"]).strip()
+        reason = _check_fix(by_index[idx], before, after, budgets[idx], tolerance)
+        report.append({"index": idx, "before": before, "after": after, "why": str(row.get("why", "")).strip(),
+                       "status": "rejected" if reason else "accepted", "reason": reason})
+        if reason:
+            log.info("Proofread line %d not changed (%s): %s -> %s", idx, reason, before, after)
+        else:
+            translated[idx] = after
+            log.info("Proofread line %d: %s -> %s (%s)", idx, before, after, report[-1]["why"])
+    return report
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Translate speaker-attributed subtitles EN -> RU for voice-over")
     parser.add_argument("folder", help="Output folder of stt.transcribe (+ stt.speakers)")
@@ -289,6 +387,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--shorten-rounds", type=int, default=2, help="Shortening passes for over-budget lines")
     parser.add_argument("--tolerance", type=float, default=1.15, help="Over-budget threshold (x budget)")
     parser.add_argument("--batch-size", type=int, default=60)
+    parser.add_argument("--proofread-model", default=None,
+                        help="LLM id (with its route) that proofreads the Russian lines for errors; default: no pass")
+    parser.add_argument("--proofread-batch", type=int, default=40, help="Lines per proofreading request")
     parser.add_argument("--parallel", type=int, default=4,
                         help="Translate this many contiguous parts of the episode concurrently (split at pauses)")
     parser.add_argument("--context", type=int, default=12, help="Previously translated lines sent as context")
@@ -338,6 +439,18 @@ def main(argv: list[str] | None = None) -> None:
         log.info("Gender check: %d lines with first-person forms of the wrong gender, %d fixed",
                  gender_flagged, gender_fixed)
 
+    proofread: list[dict[str, Any]] | None = None
+    proofread_client: OpenRouterClient | None = None
+    if args.proofread_model:
+        proofread_client = OpenRouterClient(args.proofread_model,
+                                            reasoning=None if args.reasoning == "default" else args.reasoning)
+        proofread = proofread_pass(records, translated, proofread_client, budgets=budgets, tolerance=args.tolerance,
+                                   batch_size=args.proofread_batch, speakers=speakers, glossary=glossary,
+                                   parallel=args.parallel)
+        log.info("Proofreading: %d lines changed, %d proposals rejected, usage %s",
+                 sum(p["status"] == "accepted" for p in proofread), sum(p["status"] == "rejected" for p in proofread),
+                 proofread_client.usage.to_dict())
+
     out_records = [
         {**r, "text": [translated[r["index"]]], "text_en": r["text"], "budget_chars": budgets[r["index"]],
          "window_ms": round(w * 1000)}
@@ -345,6 +458,8 @@ def main(argv: list[str] | None = None) -> None:
     ]
     name = f"subs.ru{args.suffix}"
     save_json(folder / f"{name}.json", out_records)
+    if proofread is not None:
+        save_json(folder / f"{name}.proofread.json", proofread)
 
     from stt.transcribe import write_srt
 
@@ -364,6 +479,11 @@ def main(argv: list[str] | None = None) -> None:
             "over_budget": len(over_final),
             "gender_flagged": gender_flagged,
             "gender_fixed": gender_fixed,
+            **({"proofread": {"model": args.proofread_model,
+                              "changed": sum(p["status"] == "accepted" for p in proofread),
+                              "rejected": sum(p["status"] == "rejected" for p in proofread),
+                              "usage": proofread_client.usage.to_dict()}}
+               if proofread is not None and proofread_client is not None else {}),
         },
     )
     log.info("Wrote %s (%d lines; over budget x%.2f: %d after translation, %d after shortening), usage %s",

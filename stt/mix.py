@@ -158,12 +158,17 @@ def encode_track(wav: Path, out: Path, bitrate: str = "192k") -> None:
 
 def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path | None, start: float = 0.0,
                duration: float | None = None, srt_title: str = "Русские (озвученный текст)",
-               video_source: Path | None = None, original_audio_kbps: int | None = None) -> None:
+               video_source: Path | None = None, original_audio_kbps: int | None = None,
+               onscreen_ass: Path | None = None, fonts: list[Path] | None = None,
+               onscreen_title: str = "Надписи на экране") -> None:
     """Video copy with voice-over mixes as audio tracks (``(file, title)``, the first is the default),
     the original audio after them and optional Russian subtitles. WAV tracks are encoded to AAC,
     others copied; a test piece (``start``) is cut and its video re-encoded. The file appears only
     when complete. ``video_source`` (a file with a smaller video, same timeline; not for a test piece) replaces the
-    video stream, copied as it is; ``original_audio_kbps`` re-encodes the original audio to stereo AAC at that rate."""
+    video stream, copied as it is; ``original_audio_kbps`` re-encodes the original audio to stereo AAC at that rate.
+    ``onscreen_ass`` (translations of on-screen text) becomes a default+forced subtitle track and the SRT track stops
+    being the default; ``fonts`` are attached so players without them still draw the Cyrillic text. The ASS times are
+    on the output's timeline: for a test piece write it with ``write_ass(..., offset_s=start)`` (it is not shifted here)."""
     piece = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}"] if start and duration else []
     # A separate video file keeps its own start time: without -copyts ffmpeg moves each input to zero on its own
     keep_times = ["-copyts"] if video_source and not piece else []
@@ -174,17 +179,33 @@ def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path
         cmd += ["-i", str(srt)]
     else:
         srt = None
+    next_input = len(tracks) + 1
+    srt_input = next_input if srt else None
+    next_input += 1 if srt else 0
+    ass_input = None
+    if onscreen_ass:
+        cmd += ["-i", str(onscreen_ass)]
+        ass_input, next_input = next_input, next_input + 1
     video_input = 0
     if video_source and not piece:
-        video_input = len(tracks) + (2 if srt else 1)
+        video_input = next_input
         cmd += ["-i", str(video_source)]
     cmd += ["-map", f"{video_input}:v:0"]
     for n in range(len(tracks)):
         cmd += ["-map", f"{n + 1}:a:0"]
     cmd += ["-map", "0:a:0"]
-    if srt:
-        cmd += ["-map", f"{len(tracks) + 1}:s:0", "-c:s", "srt", "-metadata:s:s:0", "language=rus",
-                "-metadata:s:s:0", f"title={srt_title}"]
+    sub = 0  # index among the output's subtitle streams
+    if srt_input:
+        cmd += ["-map", f"{srt_input}:s:0", f"-c:s:{sub}", "srt", f"-metadata:s:s:{sub}", "language=rus",
+                f"-metadata:s:s:{sub}", f"title={srt_title}"]
+        if ass_input:
+            cmd += [f"-disposition:s:{sub}", "0"]
+        sub += 1
+    if ass_input:
+        cmd += ["-map", f"{ass_input}:s:0", f"-c:s:{sub}", "ass", f"-metadata:s:s:{sub}", "language=rus",
+                f"-metadata:s:s:{sub}", f"title={onscreen_title}", f"-disposition:s:{sub}", "default+forced"]
+    for n, font in enumerate(fonts or []):
+        cmd += ["-attach", str(font), f"-metadata:s:t:{n}", "mimetype=application/x-truetype-font"]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"] if piece else ["-c:v", "copy"]
     for n, (path, title) in enumerate(tracks):
         cmd += [f"-c:a:{n}", *(["aac", f"-b:a:{n}", "192k"] if path.suffix.lower() == ".wav" else ["copy"]),
@@ -217,9 +238,10 @@ def streams(path: Path) -> list[tuple[str, str]]:
 
 
 def mux(video: Path, mixed_wav: Path, out: Path, srt: Path | None, start: float = 0.0,
-        duration: float | None = None) -> None:
+        duration: float | None = None, onscreen_ass: Path | None = None, fonts: list[Path] | None = None) -> None:
     """Video copy with the mix as the first audio track; a test piece (``start``) is cut and re-encoded."""
-    mux_tracks(video, [(mixed_wav, "Russian voice-over")], out, srt, start, duration)
+    mux_tracks(video, [(mixed_wav, "Russian voice-over")], out, srt, start, duration, onscreen_ass=onscreen_ass,
+               fonts=fonts)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -245,6 +267,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mp3", action="store_true", help="Also write an MP3 next to the WAV")
     parser.add_argument("--mux", default=None, help="Write a video copy with the mix as the first audio track")
     parser.add_argument("--srt", default=None, help="Russian subtitles to add when muxing")
+    parser.add_argument("--onscreen-ass", default=None,
+                        help="ASS with translated on-screen text (stt.onscreen_render.write_ass) to add when muxing; "
+                             "for a test piece (--start) it must be written with offset_s=start")
     parser.add_argument("--extra", action="append", default=[], metavar="WAV[:GAIN_DB]",
                         help="Another layer on the voice timeline, added after ducking (e.g. stt.crowd)")
     args = parser.parse_args(argv)
@@ -286,8 +311,14 @@ def main(argv: list[str] | None = None) -> None:
         sf.write(str(out_path.with_suffix(".mp3")), out, args.sample_rate, format="MP3")
     log.info("Mixed %.1f s -> %s", len(out) / args.sample_rate, out_path)
     if args.mux:
+        fonts: list[Path] = []
+        if args.onscreen_ass:
+            from stt.onscreen_render import font_files
+
+            fonts = list(font_files() or [])
         mux(Path(args.media), out_path, Path(args.mux), Path(args.srt) if args.srt else None,
-            args.start, duration if args.start else None)
+            args.start, duration if args.start else None,
+            onscreen_ass=Path(args.onscreen_ass) if args.onscreen_ass else None, fonts=fonts)
         log.info("Muxed -> %s", args.mux)
 
 

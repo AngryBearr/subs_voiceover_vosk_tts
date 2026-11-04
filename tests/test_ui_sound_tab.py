@@ -152,7 +152,7 @@ def test_mux_uses_the_small_video_when_compression_is_on(monkeypatch: pytest.Mon
     encoded: dict[str, Any] = {}
     muxed: dict[str, Any] = {}
 
-    def fake_encode(src: Path, out: Path, bitrate: int, codec: str) -> Path:
+    def fake_encode(src: Path, out: Path, bitrate: int, codec: str, overlays: Any = None) -> Path:
         encoded.update(src=src, name=out.name, bitrate=bitrate, codec=codec)
         out.touch()
         return out
@@ -168,7 +168,8 @@ def test_mux_uses_the_small_video_when_compression_is_on(monkeypatch: pytest.Mon
     episode.mux()
     # 2 GB over an hour, 2% kept for the container, two voice-over tracks at 192 kbps and the original at 160
     assert encoded == {"src": episode.media, "name": "video.hevc_nvenc.3811k.mkv", "bitrate": 3811, "codec": "hevc_nvenc"}
-    assert muxed == {"video_source": episode.out / "video.hevc_nvenc.3811k.mkv", "original_audio_kbps": 160}
+    assert muxed == {"video_source": episode.out / "video.hevc_nvenc.3811k.mkv", "original_audio_kbps": 160,
+                     "onscreen_ass": None, "fonts": []}
 
 
 def test_mux_copies_the_video_when_compression_is_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -184,4 +185,56 @@ def test_mux_copies_the_video_when_compression_is_off(monkeypatch: pytest.Monkey
     monkeypatch.setattr(video_compress, "encode_video", never)
     monkeypatch.setattr(stt_mix, "mux_tracks", fake_mux)
     episode.mux()
-    assert muxed == {"video_source": None, "original_audio_kbps": None}
+    assert muxed == {"video_source": None, "original_audio_kbps": None, "onscreen_ass": None, "fonts": []}
+
+
+ONSCREEN_ITEM = {"id": 0, "kind": "caption", "start": 1.0, "end": 2.0, "text": "There's a boat.", "descriptor": None,
+                 "box": [0.38, 0.82, 0.62, 0.9], "voiced": True, "text_ru": "Там лодка."}
+
+
+def _with_onscreen(episode: Any) -> None:
+    (episode.out / "onscreen.json").write_text(json.dumps([{k: v for k, v in ONSCREEN_ITEM.items() if k != "text_ru"}]),
+                                               encoding="utf-8")
+    (episode.out / "onscreen.ru.json").write_text(json.dumps([ONSCREEN_ITEM], ensure_ascii=False), encoding="utf-8")
+
+
+def test_mux_adds_the_onscreen_track_when_the_video_is_copied(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    episode = _episode(tmp_path, {"compress": False})
+    _with_onscreen(episode)
+    muxed: dict[str, Any] = {}
+
+    def fake_mux(media: Path, tracks: list[Any], out: Path, srt: Any, start: float, duration: Any, **kwargs: Any) -> None:
+        muxed.update(kwargs)
+
+    monkeypatch.setattr(video_compress, "probe", lambda _: {"duration": 60.0, "video_kbps": 9000.0, "width": 1920,
+                                                            "height": 1080})
+    monkeypatch.setattr(stt_mix, "mux_tracks", fake_mux)
+    episode.mux()
+    assert muxed["onscreen_ass"] == episode.out / "onscreen.ass"
+    assert "Там лодка." in muxed["onscreen_ass"].read_text(encoding="utf-8")
+
+
+def test_mux_burns_the_onscreen_text_into_the_compressed_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    episode = _episode(tmp_path, {"compress": True, "target_gb": 2.0, "codec": "hevc_nvenc", "original_audio_kbps": 160})
+    _with_onscreen(episode)
+    encoded: dict[str, Any] = {}
+    muxed: dict[str, Any] = {}
+
+    def fake_encode(src: Path, out: Path, bitrate: int, codec: str, overlays: Any = None) -> Path:
+        encoded.update(name=out.name, overlays=overlays)
+        out.touch()
+        return out
+
+    def fake_mux(media: Path, tracks: list[Any], out: Path, srt: Any, start: float, duration: Any, **kwargs: Any) -> None:
+        muxed.update(kwargs)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.touch()
+
+    monkeypatch.setattr(video_compress, "probe", lambda _: {"duration": 3600.0, "video_kbps": 9000.0, "width": 1920,
+                                                            "height": 1080})
+    monkeypatch.setattr(video_compress, "encode_video", fake_encode)
+    monkeypatch.setattr(stt_mix, "mux_tracks", fake_mux)
+    episode.mux()
+    assert encoded["name"] == "video.hevc_nvenc.3811k.onscreen.mkv" and len(encoded["overlays"]) == 1
+    assert muxed["video_source"] == episode.out / "video.hevc_nvenc.3811k.onscreen.mkv"
+    assert muxed["onscreen_ass"] is None  # burned in: no second copy as a track

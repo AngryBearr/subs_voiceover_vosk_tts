@@ -9,6 +9,7 @@
                           "ui": {"engines": ["vosk"]}}},
     "previous": {"label": "Прежний: без голосов сезона и субтитров, старая громкость",
                  "settings": {"season_voices": {"enabled": false}, "subtitles": {"enabled": false},
+                              "on_screen": {"voice": "hero", "track": false},
                               "mix": {"rest_duck_db": 3.0, "voice_gain_db": 0.0, "loudness_lufs": null}}}
   },
   "ui": {"engines": ["vosk", "teratts", "f5"]},
@@ -24,6 +25,7 @@
   "word_speakers": {"enabled": true, "model": "resnet293", "switch_penalty": 0.3, "prior": 0.0, "change_prior": 0.15, "window_s": 1.0, "passes": 1},
   "season_voices": {"enabled": true, "model": "resnet293-ft", "min_words": 20},
   "ocr": {"enabled": true, "fps": 2.0},
+  "on_screen": {"voice": "neutral", "neutral_gender": "male", "track": true, "burn_in_when_compressing": true},
   "subtitles": {"enabled": true, "online": true, "imdb": {"amazing race": "tt0285335", "australia": null, "survivor": "tt0239195"}, "archive": null, "turn_bonus": 0.3},
   "llm": {
     "model": "openai/gpt-6-luna",
@@ -32,6 +34,7 @@
       "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
       "stress_screen": "openai/gpt-6-luna",
       "stress_proofread": "openai/gpt-6.1-sol",
+      "translate_proofread": "openai/gpt-6.1-sol",
       "cast": ["openrouter:openai/gpt-6-luna:online", "openrouter:anthropic/claude-haiku-5.5:online"]
     }
   },
@@ -41,7 +44,8 @@
     "cps": 14.0,
     "extend": 0.6,
     "tts_profile": null,
-    "parallel": 4
+    "parallel": 4,
+    "proofread": true
   },
   "line_gender": {"enabled": true, "override": true, "voice_override": 0.9},
   "dub": {

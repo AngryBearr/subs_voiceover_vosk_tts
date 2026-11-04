@@ -365,7 +365,34 @@ class Episode:
                 "--cps", str(cfg["cps"]), "--extend", str(cfg["extend"]), "--parallel", str(cfg["parallel"])]
         if cfg.get("tts_profile"):
             argv += ["--tts-profile", str(REPO_ROOT / cfg["tts_profile"])]
+        if cfg.get("proofread", True):  # a second reader looks for misspelt words and broken grammar
+            argv += ["--proofread-model", self.llm("translate_proofread")]
         translate.main(argv)
+        self.translate_onscreen()
+
+    def on_screen(self) -> dict[str, Any]:
+        """``on_screen`` settings: the voice of captioned lines and the Russian on-screen text."""
+        return {"voice": "neutral", "neutral_gender": "male", "track": True, "burn_in_when_compressing": True,
+                **(self.config.get("on_screen") or {})}
+
+    def translate_onscreen(self) -> Path | None:
+        """``onscreen.ru.json``: on-screen captions, name cards and lower thirds in Russian (cached per text).
+        None without OCR results or with the on-screen track off; a failed translation only costs the track."""
+        source, target = self.out / "onscreen.json", self.out / "onscreen.ru.json"
+        if not source.exists() or not self.on_screen()["track"]:
+            return None
+        inputs = [p for p in (source, self.out / "subs.en.json", self.out / "speakers.json") if p.exists()]
+        if target.exists() and target.stat().st_mtime >= max(p.stat().st_mtime for p in inputs):  # speakers: genders
+            return target
+        from stt import onscreen
+
+        try:
+            onscreen.main(["translate", str(self.out), "--glossary", str(self.out / "glossary.txt"),
+                           "--model", self.llm("translate")])
+        except Exception as error:  # noqa: BLE001 - the video is still made, without the on-screen track
+            log.warning("[%s] on-screen text not translated (%s): no Russian on-screen track", self.media.stem, error)
+            return None
+        return target if target.exists() else None
 
     def _engine(self) -> dict[str, Any]:
         cfg = self.config["voiceover"]
@@ -454,6 +481,8 @@ class Episode:
             argv += ["--speaker-voices", str(self._speaker_voices())]
         elif (host := self._host_voices()) is not None:
             argv += ["--speaker-voices", str(host)]
+        on_screen = self.on_screen()
+        argv += ["--on-screen-voice", str(on_screen["voice"]), "--neutral-gender", str(on_screen["neutral_gender"])]
         dub.main(argv)
 
     def _module(self, name: str, module: str, args: list[str], *, oom_retries: int = 2,
@@ -612,12 +641,31 @@ class Episode:
         video_cfg = cfg.get("video") or {}
         compress = bool(video_cfg.get("compress")) and not (self.args.start or self.args.duration)
         video_source = self.small_video(video_cfg, len(self.planned_tracks(engines))) if compress else None
+        onscreen_ass, fonts = None, []
+        if not (video_source and self.burn_onscreen()):  # burned into the compressed picture: no second copy
+            onscreen_ass, fonts = self.onscreen_track()
         mix.mux_tracks(self.media, tracks, out, srt, self.args.start or 0.0, self.args.duration,
                        video_source=video_source,
-                       original_audio_kbps=int(video_cfg.get("original_audio_kbps", 160)) if video_source else None)
+                       original_audio_kbps=int(video_cfg.get("original_audio_kbps", 160)) if video_source else None,
+                       onscreen_ass=onscreen_ass, fonts=fonts)
         log.info("[%s] %s: %s", self.media.stem, out, ", ".join(engines))
         if video_source:
             log.info("[%s] finished video %.2f GB", self.media.stem, out.stat().st_size / 1e9)
+
+    def burn_onscreen(self) -> bool:
+        return bool(self.on_screen()["burn_in_when_compressing"]) and self.translate_onscreen() is not None
+
+    def onscreen_track(self) -> tuple[Path | None, list[Path]]:
+        """The Russian on-screen text as an ASS track (default, forced) and the fonts to attach; (None, []) if none."""
+        items = self.translate_onscreen()
+        if items is None:
+            return None, []
+        from stt import onscreen_render, video_compress
+
+        info = video_compress.probe(self.media)
+        ass = onscreen_render.write_ass(onscreen_render.load_items(items), self.out / "onscreen.ass",
+                                        int(info["width"]), int(info["height"]), offset_s=self.args.start or 0.0)
+        return ass, list(onscreen_render.font_files() or []) if ass else []
 
     def planned_tracks(self, engines: list[str]) -> list[str]:
         """Voice-over tracks the finished video will have: those in it now and the engines of this run."""
@@ -638,10 +686,17 @@ class Episode:
         if bitrate is None:
             log.info("[%s] the video is already close to the target size: copied as it is", self.media.stem)
             return None
-        small = self.out / f"video.{codec}.{bitrate}k.mkv"
+        overlays = None
+        if self.burn_onscreen():
+            from stt import onscreen_render
+
+            overlays = onscreen_render.render_overlays(onscreen_render.load_items(self.out / "onscreen.ru.json"),
+                                                       int(info["width"]), int(info["height"]))
+        burned = ".onscreen" if overlays else ""
+        small = self.out / f"video.{codec}.{bitrate}k{burned}.mkv"
         if not small.exists():
             try:
-                video_compress.encode_video(self.media, small, bitrate, codec)
+                video_compress.encode_video(self.media, small, bitrate, codec, overlays=overlays)
             except Exception as error:  # noqa: BLE001 - a big video is better than no video
                 log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
                 return None

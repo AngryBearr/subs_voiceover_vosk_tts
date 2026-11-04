@@ -16,6 +16,11 @@ are applied first: `{"123": {"gender": "female"}, "130": {"speaker": "Julie McGe
 from the speaker's (a correction, or `gender_by_voice` from `stt.line_gender`) is voiced by the voice of that
 gender, not by the speaker's own voice; a corrected gender wins over `gender_by_voice`.
 
+Lines captioned on screen (`on_screen` in the records, set by `stt.transcribe`) are voiced by the engine's generic
+voice of `--neutral-gender` (`--on-screen-voice neutral`, the default), never by a speaker's own or the host's
+voice: the text on screen is not the hero's utterance. `--on-screen-voice hero` voices them like any line. A
+manual `speaker` or `gender` fix in `corrections.json` wins over the neutral voice.
+
 Writes `dub.ru.json` (or `--output`; voiced lines only, `voiceover` input format plus `speaker`,
 `gender`, `voice`), `dub.ru.srt` and `dub.report.json` (skipped lines with reasons).
 """
@@ -67,8 +72,15 @@ def plan(
     dense_gap_ms: int = 1000,
     skip: set[int] | frozenset[int] = frozenset(),
     speaker_voices: dict[str, int | str] | None = None,
+    on_screen_voice: str = "neutral",
+    neutral_gender: str = "male",
+    corrected: set[int] | frozenset[int] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return (voiced lines, skipped lines with reasons)."""
+    """Return (voiced lines, skipped lines with reasons).
+
+    `corrected`: line numbers with a manual speaker/gender fix; these keep the voice that fix implies even
+    when the line is captioned on screen.
+    """
     voiced: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for pos, rec in enumerate(records):
@@ -97,6 +109,8 @@ def plan(
         own_voice = None if rec.get("gender_changed") or rec.get("gender_by_voice") \
             else (speaker_voices or {}).get(rec.get("speaker") or "")  # a changed gender needs that gender's voice
         voice = own_voice or voices.get(gender, voices["unknown"])
+        if rec.get("on_screen") and on_screen_voice == "neutral" and rec["index"] not in corrected:
+            voice = voices.get(neutral_gender, voices["unknown"])
         voiced.append({**rec, "voice": voice})
     for i, rec in enumerate(voiced, start=1):  # contiguous numbering for downstream tools
         rec["source_index"] = rec["index"]
@@ -116,26 +130,36 @@ def main(argv: list[str] | None = None) -> None:
                         help="JSON {speaker id: voice} (e.g. cloned voices of the F5 engine); others by gender")
     parser.add_argument("--interjections", default="dense", choices=["dense", "all", "keep"],
                         help="Skip interjections over other speech / in rapid exchanges (dense), always, or never")
+    parser.add_argument("--on-screen-voice", default="neutral", choices=["neutral", "hero"],
+                        help="Voice of lines captioned on screen: the generic voice of --neutral-gender (neutral) "
+                             "or the speaker's usual one (hero)")
+    parser.add_argument("--neutral-gender", default="male", choices=["male", "female"],
+                        help="Which generic voice (of --voices) speaks the lines captioned on screen")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
     folder = Path(args.folder)
     records = load_json(folder / args.input)
     skip: set[int] = set()
+    corrected: set[int] = set()
     if (folder / "corrections.json").exists():
         from stt.review import apply_corrections
 
         corrections = load_json(folder / "corrections.json")
         records, skip = apply_corrections(records, corrections, load_json(folder / "speakers.json"))
         log.info("corrections.json: %d lines corrected", len(corrections))
+        corrected = {int(k) for k, fix in corrections.items() if "speaker" in fix or "gender" in fix}
     if args.single_voice is not None:
         voices = {"female": args.single_voice, "male": args.single_voice, "unknown": args.single_voice}
     else:
         voices = parse_voices(args.voices)
     speaker_voices = load_json(Path(args.speaker_voices)) if args.speaker_voices else None
-    voiced, skipped = plan(records, voices, interjections=args.interjections, skip=skip, speaker_voices=speaker_voices)
+    voiced, skipped = plan(records, voices, interjections=args.interjections, skip=skip, speaker_voices=speaker_voices,
+                           on_screen_voice=args.on_screen_voice, neutral_gender=args.neutral_gender,
+                           corrected=corrected)
     save_json(folder / args.output, voiced)
     save_json(folder / "dub.report.json", {"voices": voices, "interjections": args.interjections,
+                                           "on_screen_voice": args.on_screen_voice, "neutral_gender": args.neutral_gender,
                                            "voiced": len(voiced), "skipped": skipped})
     from stt.transcribe import write_srt
 
