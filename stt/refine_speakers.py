@@ -42,6 +42,10 @@ WESPEAKER: dict[str, tuple[str, str]] = {
     "resnet293-gender": ("AngryBear9019/survivor-gender-resnet293@2634450d433785c26fc03ecc0a1bb09cf10679dd",
                          "WeSpeakerResNet293"),
 }
+# Where the weights under models/ can be downloaded from once: (repo, pinned revision)
+HUB_WEIGHTS: dict[str, tuple[str, str]] = {
+    "resnet293-ft": ("AngryBear9019/wespeaker-resnet293-survivor-ft", "cc49938a801fa6a3b2a9a2ce78f0ca3e537567fe"),
+}
 
 # ReDimNet2 (PalabraAI, MIT, torch.hub, pinned commit; weights of the v1.0.0 release): B6 0.29 / 0.52 / 0.99% EER on
 # VoxCeleb1-O/E/H with 12M parameters (WeSpeaker ResNet293: ~0.45 / 0.66 / 1.18%, 28M)
@@ -79,6 +83,16 @@ def model_available(name: str) -> bool:
     return not repo.startswith("local:") or (Path(__file__).resolve().parents[1] / repo.removeprefix("local:")).exists()
 
 
+def download_model(name: str) -> Path:
+    """Download the weights of a model from ``HUB_WEIGHTS`` to their place under ``models``; returns their path."""
+    from huggingface_hub import hf_hub_download
+
+    repo, revision = HUB_WEIGHTS[name]
+    path = Path(__file__).resolve().parents[1] / WESPEAKER[name][0].removeprefix("local:")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return Path(hf_hub_download(repo, path.name, revision=revision, local_dir=path.parent))
+
+
 class WespeakerTorch:
     """A WeSpeaker model in pyannote's PyTorch port: 16 kHz audio -> unit embedding (~35 ms per turn).
 
@@ -96,7 +110,7 @@ class WespeakerTorch:
         elif repo.startswith("local:"):
             path = Path(__file__).resolve().parents[1] / repo.removeprefix("local:")
             if not path.exists():
-                raise FileNotFoundError(f"Speaker model {name}: {path} is missing (train it, see docs/experiments.md)")
+                raise FileNotFoundError(f"Speaker model {name}: {path} is missing (get it: stt.run --download-voice-model)")
         else:
             repo_id, _, revision = repo.partition("@")
             path = hf_hub_download(repo_id, "avg_model.pt", revision=revision or None)

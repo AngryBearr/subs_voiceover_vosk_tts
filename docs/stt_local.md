@@ -111,11 +111,46 @@ other, 19.6 min in two lanes without the CPU cap, 16.4 min with it (a third less
 of the clips the same). The stress check is no longer redone for each engine (the lines are the
 same: `stress.json` records them).
 
-A run can be stopped at any time (Ctrl+C, or "Стоп" in the UI) and started again with the same
-command: finished episodes and stages are skipped, the recognition keeps its finished parts
-(each ASR model, alignment, OCR, diarization), and the voice-over keeps every line already
-synthesised (Vosk, TeraTTS and ESpeech write each line to the cache as it is done). An LLM step
-that was cut off (glossary, naming, translation, stress check) starts over; they take minutes.
+## Stopping and continuing
+
+A run can be stopped at any time (Ctrl+C, "Стоп" in the UI, or the computer restarting) and started
+again with the same command. Finished episodes and stages are skipped (`[<episode>] <stage>: done earlier`);
+what a stop in the middle of a stage keeps:
+
+| stage | kept | redone |
+|---|---|---|
+| transcribe | every finished worker step (diarization, each ASR model, alignment, OCR, voices) | the step that was running |
+| glossary, speakers, translate, stress | every LLM answer already received | only the requests without an answer |
+| dub | nothing | the whole stage (seconds) |
+| voiceover | every synthesised line (`output/tts_cache`; ESpeech writes each line as it is done) | the unfinished lines |
+| check, mix | nothing | the whole stage (minutes) |
+
+LLM answers of an unfinished stage are kept in `<episode>/.partial/llm/<stage>/`, one file per request (named by a
+hash of the model, the prompt and the settings). They are used only to continue the same stage with the same
+inputs, and the folder is deleted when the stage finishes, so `--force translate` on a finished episode asks the
+model again. Files other stages read as "exists means done" (worker results, subtitles, per-line cache records,
+WAVs of ESpeech) are written to a temporary file, flushed and renamed, so a power cut leaves the old file or the
+new one, never half of one; a per-line cache record that still cannot be read counts as missing and the line is
+synthesised again.
+
+Progress is written for the UI (and for you) to `<episode>/.progress/<stage>[.<engine>].json`:
+
+    {"stage": "voiceover", "engine": "f5", "state": "running", "done": 120, "total": 640, "unit": "lines",
+     "started": 1793650000.0, "updated": 1793650300.0, "finished": null, "pid": 12345, "boot": "<boot id>"}
+
+`state` is `running`, `done` or `failed`; `unit` is `lines` (translation, voice-over), `requests` (glossary, speakers,
+stress check), `steps` (recognition), `clips` (speech check) and null for stages without a count (dub, mix). A
+`running` file whose process is gone (or whose `boot` is not the current boot) means the stage was interrupted
+there. `stt.progress.RESUME_NOTES` has the one-line text per stage shown in the UI.
+
+The log has, besides `[<episode>] <stage> ...` at the start and `<stage>: done earlier` for skipped stages:
+
+    [<episode>] <stage>: finished in <n> s              (shared stages)
+    [<episode>] <stage> (<engine>): finished in <n> s   (dub, voiceover, check, mix)
+    [<episode>] voiceover (f5): 25/640 lines            (about every 25 lines or clips of a stage run as a separate program)
+
+The ESpeech worker's own messages go to `output/tts_cache/<identity>/f5_worker.log` (the end of it is in the error
+if the worker fails).
 
 ## Presets
 
@@ -480,6 +515,36 @@ twins Nadiya and Natalie Anderson match at 0.80), `--write-overrides` puts the r
 stages after it. Per-line prints show what such a cluster holds: S29E01's "Jaclyn" cluster
 matches E02's Baylor at 0.72-0.86 in 10 of its 14 longer lines, Jaclyn's own line only 0.45.
 
+### Voice clips by hand
+
+When the automatic export finds no clean clip for a person, `<refs>/missing.json` says why (per
+person: how many solo stretches there were, how many dropped for other voices inside, for a voice
+too unlike the prints, or for a second voice/noise left after cleaning; the export log prints it
+as one Russian sentence). `stt.voice_bank.clip_states(bank)` gives a table row per person
+(`auto`/`manual`/`missing` plus the reason).
+
+A clip can be made by hand: watch the episode, find where the person speaks alone (an interview)
+and pass the time ranges (`12:30-12:41`, `1:02:05-1:02:14`, seconds also work; each at most 60 s):
+
+```
+subs_env/bin/python -m stt.voice_bank "<season>.voices.json" --manual-clip --person "Saiounia Hughley" \
+    --media <episode>.mkv --range 12:30-12:41 --range 1:02:05-1:02:14 [--text "..."] [--gender female] \
+    [--preview clip.wav]
+subs_env/bin/python -m stt.voice_bank "<season>.voices.json" --remove-manual --person "Saiounia Hughley"
+```
+
+Each range is cut from the video, cleaned by the same vocal separator as the automatic clips,
+trimmed of silence and joined with 0.3 s pauses (at most 10 s of speech, 6-10 s is best; the last
+piece is cut at a pause); the end is faded and gets 1 s of silence; Whisper writes the transcript.
+Warnings (too short, loud music, a voice unlike the person's prints) are shown, never blocking.
+`--preview OUT.wav` only writes that clip and prints the text and warnings; nothing in the season
+changes. Without it the clip is saved as `<refs>/<Name>.manual.wav` + `.txt`, an entry in
+`<refs>/manual.json` (`"source": "manual"`, `episode`, `ranges`) and in `references.json`. Exports
+(full, `--missing`, `--person`, `--reject`) never replace or drop a manual clip; `--remove-manual`
+brings back the automatic clip it replaced (or leaves the person to the next `--missing` export).
+`stt.run` sees the changed `references.json`, runs `dub` again and voices only that person's lines
+(the F5 voice id hashes the clip and its text). A person outside the bank needs `--gender`.
+
 ### Cast of the season from the web
 
 Once per season (before the first glossary) a cheap LLM with web search,
@@ -532,7 +597,7 @@ stages after it (translation, dubbing, ...) run again and the earlier ones do no
 Lines of speakers whose gender stays unknown keep the gender `stt.line_gender` heard for the old line at that time.
 
 It is on in `stt_config.json` (`"season_voices": {"enabled": true, "model": "resnet293-ft", "min_words": 20}`); `--no-season-voices` or
-the presets `fast` and `previous` switch it off for a run. Without the `resnet293-ft` weights (not in git) the stage logs a warning and uses the plain `resnet293`.
+the presets `fast` and `previous` switch it off for a run. Without the `resnet293-ft` weights (not in git; on Hugging Face, `AngryBear9019/wespeaker-resnet293-survivor-ft`, downloaded once by the tick in the UI or `stt.run --download-voice-model`) the stage logs a warning and uses the plain `resnet293`. `stt.run --season-voices-only` (UI button "Уточнить, кто говорит" on the "Голоса сезона" tab) only counts the voices again from the episodes that have a transcript.
 An episode that already has `subs.ru.json` is left alone, so a re-run never repeats the translation and the voice-over; `--force speakers` assigns it again. With several videos, `stt.run` first takes every episode up to `speakers`, applies the stage, then runs the
 other stages. With one video of a season it uses the voices of whatever episodes of that folder already have a first
 pass. Without named people nothing changes. By hand:

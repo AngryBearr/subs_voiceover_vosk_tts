@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,8 @@ from typing import Any
 
 import numpy as np
 import soundfile as sf
+
+from utils.atomic_io import fsync_file, write_text_atomic
 
 log = logging.getLogger("voiceover.f5_worker")
 
@@ -96,7 +99,10 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
                                      or wrong_words(stress)):
                     break
             assert best is not None
-            sf.write(item["out_wav"], best[1], rate, subtype="PCM_16")
+            wav_tmp = Path(item["out_wav"]).with_name(f".{Path(item['out_wav']).name}.tmp")
+            sf.write(str(wav_tmp), best[1], rate, subtype="PCM_16", format="WAV")  # whole or not at all
+            fsync_file(wav_tmp)
+            os.replace(wav_tmp, item["out_wav"])
             entry: dict[str, Any] = {"key": item["key"], "seed": first_seed + best[2], "takes": best[2] + 1,
                                      "error": None}
             if best[3]:
@@ -104,8 +110,7 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
             if listen:
                 entry["stress"] = record(item["listen"], best[4])
             # written after the WAV: an interrupted job leaves its finished lines for the next run
-            Path(item["out_wav"]).with_suffix(".take.json").write_text(json.dumps(entry, ensure_ascii=False),
-                                                                       encoding="utf-8")
+            write_text_atomic(Path(item["out_wav"]).with_suffix(".take.json"), json.dumps(entry, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001 - recorded per line, never hidden
             entry = {"key": item["key"], "error": f"{type(exc).__name__}: {exc}"[:500]}
         results.append(entry)
@@ -119,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     job = json.loads(Path(args[0]).read_text(encoding="utf-8"))
     results = run(job)
-    Path(args[1]).write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_text_atomic(args[1], json.dumps(results, ensure_ascii=False, indent=1))
     return 0
 
 

@@ -28,7 +28,6 @@ TeraTTS as a path; a fixed blend is as stable as a built-in voice.
 from __future__ import annotations
 
 import glob
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -36,7 +35,9 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
-from voiceover.engine import (PreparedText, SynthResult, VoskEngine, _sha256_file, cache_key, postprocess_wav)
+from stt import progress
+from voiceover.engine import (PreparedText, SynthResult, VoskEngine, _sha256_file, cache_key, postprocess_wav,
+                              read_cache_entry, write_cache_entry)
 from voiceover.text import syllables
 
 log = logging.getLogger(__name__)
@@ -282,21 +283,22 @@ class TeraTTSEngine(VoskEngine):
             if key in entries or key in todo:
                 continue
             meta, wav = cache_dir / f"{key}.json", cache_dir / f"{key}.wav"
-            if meta.exists() and wav.exists():
-                entry = json.loads(meta.read_text(encoding="utf-8"))
-                if entry.get("tts_text") == row.tts_text and not entry.get("error"):
-                    listen = self._listen_here(row.tts_text) if self.verify.get("enabled") else []
-                    if not listen or listened(entry, listen) or "duration_scale" not in entry:
-                        entries[key] = entry
-                    else:  # taken before its stress was heard: hear it once, redo it only if it is wrong
-                        todo[key] = (row.tts_text, voice, entry)
-                    continue
+            entry = read_cache_entry(meta, wav)
+            if entry is not None and entry.get("tts_text") == row.tts_text and not entry.get("error"):
+                listen = self._listen_here(row.tts_text) if self.verify.get("enabled") else []
+                if not listen or listened(entry, listen) or "duration_scale" not in entry:
+                    entries[key] = entry
+                else:  # taken before its stress was heard: hear it once, redo it only if it is wrong
+                    todo[key] = (row.tts_text, voice, entry)
+                continue
             self._check_voice(voice)
             todo[key] = (row.tts_text, voice, None)
         relisten = sum(cached is not None for *_, cached in todo.values())
         log.info("synthesis: %d distinct texts, %d cached, %d to synthesize%s", len(entries) + len(todo),
                  len(entries) + relisten, len(todo) - relisten,
                  f", {relisten} cached to hear for their stress" if relisten else "")
+        total = len(entries) + len(todo)
+        progress.tick(len(entries), total, "lines")
         model = load_model(self.path, self.device, self.diffusion_model) if todo else None
         if model is not None:
             set_temperature(model, self.temperature)
@@ -304,8 +306,7 @@ class TeraTTSEngine(VoskEngine):
             wav = cache_dir / f"{key}.wav"
             try:
                 entry = {**self._synth_one(model, text, voice, wav, cached), "tts_text": text}
-                (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1),
-                                                       encoding="utf-8")
+                write_cache_entry(cache_dir / f"{key}.json", entry)
             except Exception as exc:  # noqa: BLE001 - recorded per cue, never hidden
                 entry = {"path": str(wav), "sha256": "", "raw_sec": 0.0, "speech_sec": 0.0, "edge_trimmed_ms": 0,
                          "reduced_pauses": 0, "error": f"{type(exc).__name__}: {exc}"[:500], "tts_text": text}
@@ -313,6 +314,7 @@ class TeraTTSEngine(VoskEngine):
                     log.warning("stress hearing failed, cached take kept: %s", entry["error"])
                     entry = cached
             entries[key] = entry
+            progress.tick(len(entries), total)
         results = []
         for row in prepared:
             voice = self._voice(row)

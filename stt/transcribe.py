@@ -31,6 +31,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from stt import progress
 from stt.refine_speakers import REDIMNET2, WESPEAKER, model_cache_key
 from stt.runner import load_json, save_json
 
@@ -118,12 +119,22 @@ def run_stage(name: str, env: str, args: list[str], out_path: Path, log_dir: Pat
 
     if out_path.exists() and not force:
         log.info("[%s] cached: %s", name, out_path.name)
-        return load_json(out_path)
-    log.info("[%s] running in %s ...", name, env)
-    t0 = time.perf_counter()
-    data = call(env, args, out_path, log_dir / f"{name}.log")
-    log.info("[%s] done in %.1fs", name, time.perf_counter() - t0)
+        data = load_json(out_path)
+    else:
+        log.info("[%s] running in %s ...", name, env)
+        t0 = time.perf_counter()
+        data = call(env, args, out_path, log_dir / f"{name}.log")
+        log.info("[%s] done in %.1fs", name, time.perf_counter() - t0)
+    _step_done()
     return data
+
+
+def _step_done() -> None:
+    """One more worker step finished (or found cached) in the progress of the stage; steps nobody planned grow the total."""
+    tracker = progress.current()
+    if tracker is not None:
+        done = (tracker.done or 0) + 1
+        progress.tick(done, max(done, tracker.total or 0), "steps")
 
 
 def transcribe(args: argparse.Namespace) -> Path:
@@ -151,6 +162,9 @@ def transcribe(args: argparse.Namespace) -> Path:
         raise SystemExit(f"Unknown diarizer {args.diarizer!r}; known: {list(DIARIZERS)}")
     out.mkdir(parents=True, exist_ok=True)
     logs = out / "logs"
+    # worker steps: speakers, [refinement], recognition (+ models fused), [on-screen text], voices
+    progress.tick(0, 2 + (args.refine_speakers != "none") + 1 + len([m for m in (args.fuse or "").split(",") if m.strip()])
+                  + bool(args.ocr), "steps")
     stages = set(args.force or [])
     all_forced = "all" in stages or args.force == []  # bare --force recomputes everything
 

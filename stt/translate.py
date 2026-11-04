@@ -19,17 +19,21 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import contextvars
 import json
 import logging
 import math
 import re
 import sys
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from stt import progress
 from stt.llm import DEFAULT_MODEL, OpenRouterClient
 from stt.runner import load_json, save_json
 
@@ -190,8 +194,11 @@ def translate_records(
     batch_size: int,
     context_size: int,
     glossary: str = "",
+    on_lines: Callable[[int], None] | None = None,
 ) -> dict[int, str]:
-    """Translate in batches with preceding translated lines as context; retries missing lines."""
+    """Translate in batches with preceding translated lines as context; retries missing lines.
+
+    ``on_lines`` is called with the number of lines each finished batch added (progress reporting)."""
     cards = speaker_cards(speakers)
     translated: dict[int, str] = {}
     done: list[dict[str, Any]] = []
@@ -214,6 +221,8 @@ def translate_records(
         if pending:
             raise RuntimeError(f"Lines not translated: {[r['index'] for r in pending]}")
         done.extend({**r, "ru": translated[r["index"]]} for r in batch)
+        if on_lines is not None:
+            on_lines(len(batch))
         log.info("Translated %d/%d lines of a part (cost so far $%.4f)", len(translated), len(records),
                  client.usage.cost)
     return translated
@@ -418,10 +427,19 @@ def main(argv: list[str] | None = None) -> None:
     t0 = time.perf_counter()
     translated: dict[int, str] = {}
     chunks = split_parts(records, args.parallel)
+    counted, lock = [0], threading.Lock()
+    progress.tick(0, len(records), "lines")
+
+    def lines_done(n: int) -> None:
+        with lock:
+            counted[0] += n
+            progress.tick(counted[0], len(records), "lines")
+
     with ThreadPoolExecutor(max_workers=len(chunks)) as pool:  # independent runs, each with its own context
-        futures = [
-            pool.submit(translate_records, part, speakers, client, budgets=budgets, batch_size=args.batch_size,
-                        context_size=args.context, glossary=glossary)
+        futures = [  # the copied context carries the stage's progress file and answer cache into the thread
+            pool.submit(contextvars.copy_context().run, translate_records, part, speakers, client, budgets=budgets,
+                        batch_size=args.batch_size, context_size=args.context, glossary=glossary,
+                        on_lines=lines_done)
             for part in chunks
         ]
         for future in futures:
