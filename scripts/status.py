@@ -152,7 +152,13 @@ def collect() -> list[dict]:
         if (row := line_counter(log, f"speaker model {log.stem}", r"^=== |^\{'code'", None, "per episode or step")):
             rows.append(row)
     for log in sorted(HERE.glob("stt_listen/run_*.log")):
-        if (row := line_counter(log, f"voice-over {log.stem}", r"\] [a-z]+(?: \(\w+\))? \.\.\.$", 19, "stages of stt.run (3 engines)")):
+        # 19 stages per episode with 3 engines; a season run (several episodes in one log) counts them all
+        text = log.read_text(encoding="utf-8", errors="replace")
+        episodes = max(1, len(set(re.findall(r"\[([^\]]+)\] transcribe \.\.\.$", text, re.M))))
+        if (row := line_counter(log, f"voice-over {log.stem}", r"\] [a-z]+(?: \(\w+\))? \.\.\.$", 19 * episodes,
+                                f"stages of stt.run (3 engines, {episodes} episode{'s' if episodes > 1 else ''})")):
+            if log.with_suffix(".done").exists():
+                row.update(stage="finished", remaining="0", running=False)
             rows.append(row)
     for log in sorted(HERE.glob("exp_boundary/run_*.log")):
         if (row := line_counter(log, f"harness {log.stem}", r"^=== ", None, "stt.transcribe per episode / variant")):
