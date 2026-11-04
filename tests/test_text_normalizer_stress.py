@@ -66,3 +66,10 @@ def test_unstress_function_words() -> None:
     assert unstress_function_words("н+е было, н+а берег, н+и за что, н+е за что") == "н+е было, н+а берег, н+и за что, н+е за что"
     assert unstress_function_words("Д+а, з+амок на д+ому") == "Д+а, з+амок на д+ому"  # other words stay
     assert unstress_function_words("Н+а") == "На"  # nothing after it
+
+
+def test_unstress_hyphen_particles() -> None:
+    assert unstress_function_words("Кт+о-ниб+удь и ког+о-либ+о.") == "Кт+о-нибудь и ког+о-либо."
+    assert unstress_function_words("Кт+о-т+о, скаж+и-к+а, так-т+аки.") == "Кт+о-то, скаж+и-ка, так-таки."
+    assert unstress_function_words("К+ое-чт+о и к+ой-как.") == "Кое-чт+о и кой-как."
+    assert unstress_function_words("Т+о есть, к+а и ниб+удь") == "Т+о есть, к+а и ниб+удь"  # no hyphen: untouched

@@ -56,8 +56,11 @@ def test_videos_and_progress(tmp_path: Path) -> None:
     assert dub_app.results_rows(job) == [["a", "vosk", str(done / "a.ru.mkv")]]
 
 
-def test_voice_bank_rows(tmp_path: Path) -> None:
+def test_voice_bank_rows(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     import json
+
+    # the personal config may name another season folder (paths.season): the banks are read from the given folder here
+    monkeypatch.setattr(dub_app, "_season_root", lambda out_root: Path(out_root))
 
     from stt.voice_bank import VoiceBank
 

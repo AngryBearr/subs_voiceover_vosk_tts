@@ -246,9 +246,14 @@ MOVED_STRESS = {
 }
 
 
+HYPHEN_SUFFIXES = frozenset("нибудь либо то ка таки".split())  # carry no stress after a hyphen (кто-нибудь)
+HYPHEN_PREFIXES = frozenset("кое кой".split())  # nor before one (кое-что)
+
+
 def unstress_function_words(text: str) -> str:
     """Stress marks off the short words that take none ("н+а моём" -> "на моём"), unless the stress really moved
-    onto them ("н+е было", "н+а берег"). Run before ``fill_dictionary_stress``, which then marks the next word."""
+    onto them ("н+е было", "н+а берег"), and off the particles of hyphenated words ("кт+о-ниб+удь" -> "кт+о-нибудь",
+    "к+ое-чт+о" -> "кое-чт+о"). Run before ``fill_dictionary_stress``, which then marks the next word."""
     matches = list(_WORD_RE.finditer(text))
     out: List[str] = []
     last = 0
@@ -258,8 +263,11 @@ def unstress_function_words(text: str) -> str:
         following = matches[i + 1].group().replace("+", "").lower() if i + 1 < len(matches) else ""
         out.append(text[last:match.start()])
         last = match.end()
-        out.append(word.replace("+", "") if "+" in word and plain in UNSTRESSED_WORDS
-                   and following not in MOVED_STRESS.get(plain, frozenset()) else word)
+        after_hyphen = text[max(0, match.start() - 1):match.start()] == "-"
+        before_hyphen = text[match.end():match.end() + 1] == "-"
+        particle = (after_hyphen and plain in HYPHEN_SUFFIXES) or (before_hyphen and plain in HYPHEN_PREFIXES)
+        out.append(word.replace("+", "") if "+" in word and (particle or (
+            plain in UNSTRESSED_WORDS and following not in MOVED_STRESS.get(plain, frozenset()))) else word)
     out.append(text[last:])
     return "".join(out)
 

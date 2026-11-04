@@ -30,7 +30,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from stt.refine_speakers import REDIMNET2, WESPEAKER
+from stt.refine_speakers import REDIMNET2, WESPEAKER, model_cache_key
 from stt.runner import load_json, save_json
 
 if TYPE_CHECKING:
@@ -186,7 +186,7 @@ def transcribe(args: argparse.Namespace) -> Path:
                        "--device", args.device]
         diar_data = run_stage("prints", "subs_env", prints_args, diar_path, logs, True)
     if args.refine_speakers != "none":
-        refined_path = out / f"diarization.{args.diarizer}.refined.{args.refine_speakers}.json"
+        refined_path = out / f"diarization.{args.diarizer}.refined.{model_cache_key(args.refine_speakers)}.json"
         refine_args = ["refine", "--audio", audio, "--diarization", str(diar_path), "--out", str(refined_path),
                        "--model", args.refine_speakers, "--margin", str(args.refine_margin), "--device", args.device]
         stale = refined_path.exists() and (
@@ -211,13 +211,17 @@ def transcribe(args: argparse.Namespace) -> Path:
         return path, run_stage(f"asr.{model}", ASR_MODELS[model].env, stage_args, path, logs, asr_forced)
 
     asr_path, asr_data = asr_stage(args.asr)
+    reference_path = asr_path if any(seg.get("words") for seg in asr_data["segments"]) else None  # timed words anchor CTC times
     if args.fuse:
         from stt.fusion import fuse
         from stt.llm import OpenRouterClient
 
         hypotheses = {args.asr: [Segment.from_dict(s) for s in asr_data["segments"]]}
         for model in [m.strip() for m in args.fuse.split(",") if m.strip()]:
-            hypotheses[model] = [Segment.from_dict(s) for s in asr_stage(model)[1]["segments"]]
+            model_path, model_data = asr_stage(model)
+            hypotheses[model] = [Segment.from_dict(s) for s in model_data["segments"]]
+            if reference_path is None and any(seg.get("words") for seg in model_data["segments"]):
+                reference_path = model_path  # Whisper: the first recognition with word times
         asr_path = out / "asr.fused.json"
         refuse = (asr_forced or "fuse" in stages or not asr_path.exists()
                   or load_json(asr_path).get("sources") != list(hypotheses))  # other models than cached
@@ -237,6 +241,8 @@ def transcribe(args: argparse.Namespace) -> Path:
         aligned_path = asr_path.with_name(asr_path.stem + f".aligned.{args.aligner}.json")
         align_args = ["align", "--audio", audio, "--asr", str(asr_path), "--out", str(aligned_path),
                       "--device", args.device, "--aligner", args.aligner]
+        if args.fuse and args.aligner == "ctc" and reference_path is not None:  # Whisper's times anchor drifted CTC times
+            align_args += ["--reference", str(reference_path)]
         realign = asr_forced or "align" in stages or "fuse" in stages or (
             aligned_path.exists() and aligned_path.stat().st_mtime < asr_path.stat().st_mtime)  # text changed
         asr_data = run_stage("align", "subs_env" if args.aligner == "ctc" else "stt_qwen_env", align_args,
@@ -298,7 +304,7 @@ def transcribe(args: argparse.Namespace) -> Path:
                 return self.model.batch(windows)
 
         words, relabel_stats = relabel_words(words, read_wav(out / "audio.wav"), _LazyEmbedder(), params,
-                                             cache=out / f"words.emb.{params.model}.npz", hints=word_hints)
+                                             cache=out / f"words.emb.{model_cache_key(params.model)}.npz", hints=word_hints)
         log.info("[word-speakers] %s", relabel_stats)
     elif word_hints is not None and word_hints.persons:  # no Viterbi: named lines still take their person's state
         from stt.boundaries import plan_states, restore_fixed

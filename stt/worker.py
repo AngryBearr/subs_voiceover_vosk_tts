@@ -157,8 +157,12 @@ def run_refine(audio_path: Path, diarization_path: Path, out: Path, model: str, 
     save_json(out, data)
 
 
-def run_align(audio_path: Path, asr_path: Path, out: Path, device: str, kind: str = "ctc") -> None:
-    """Add forced-alignment word times to an ASR result that has none."""
+def run_align(audio_path: Path, asr_path: Path, out: Path, device: str, kind: str = "ctc",
+              reference_path: Path | None = None) -> None:
+    """Add forced-alignment word times to an ASR result that has none.
+
+    `reference_path`: an ASR result with word times (Whisper) that corrects drifted CTC times.
+    """
     from stt.align import ALIGNER_MODEL, CTC_MODEL, CtcAligner, ForcedAligner
     from stt.audio import read_wav
     from stt.gpu import VramPeak
@@ -172,7 +176,12 @@ def run_align(audio_path: Path, asr_path: Path, out: Path, device: str, kind: st
         t0 = time.perf_counter()
         aligner.load()
         t1 = time.perf_counter()
-        aligned = aligner.align(audio, segments)
+        if reference_path is not None and isinstance(aligner, CtcAligner):
+            reference = sorted((w for s in load_json(reference_path)["segments"] for w in
+                                (Segment.from_dict(s).words or [])), key=lambda w: w.start)
+            aligned = aligner.align(audio, segments, reference)
+        else:
+            aligned = aligner.align(audio, segments)
         t2 = time.perf_counter()
     save_json(
         out,
@@ -303,6 +312,7 @@ def main(argv: list[str] | None = None) -> None:
     p_align.add_argument("--out", required=True)
     p_align.add_argument("--device", default="cuda")
     p_align.add_argument("--aligner", default="ctc", choices=["ctc", "qwen"])
+    p_align.add_argument("--reference", default=None, help="ASR result with word times that anchors the CTC times")
 
     p_ocr = sub.add_parser("ocr")
     p_ocr.add_argument("--media", required=True)
@@ -331,7 +341,8 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "ocr":
         run_ocr(Path(args.media), Path(args.out), args.device, args.start, args.duration, args.fps)
     elif args.command == "align":
-        run_align(Path(args.audio), Path(args.asr), Path(args.out), args.device, args.aligner)
+        run_align(Path(args.audio), Path(args.asr), Path(args.out), args.device, args.aligner,
+                  Path(args.reference) if args.reference else None)
     elif args.command == "prints":
         run_prints(Path(args.audio), Path(args.diarization), Path(args.out), args.device)
     elif args.command == "refine":

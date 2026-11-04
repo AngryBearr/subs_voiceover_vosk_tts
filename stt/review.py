@@ -13,6 +13,8 @@ mix): music under narration made it hear the host as "female" (S29E01-E04: 30 of
 before). Shouts and crowd noise still fool it, so this is a list for a person, not an automatic
 fix. Writes:
 
+- every line whose gender ``stt.line_gender`` changed by voice (``gender_by_voice``) is listed whatever the
+  signals say, with a Russian ``note`` and a ``fix`` that undoes it (unless a person already set that line's gender);
 - ``review.json``: one entry per suspicious line - its number in ``subs.ru.srt``, time,
   speaker, the voice used, what the audio sounds like, English and Russian text, and a
   ready ``fix`` to copy into ``corrections.json``;
@@ -47,6 +49,7 @@ VOICE_MIN = 0.6  # another speaker's print must be at least this close ...
 VOICE_MARGIN = 0.15  # ... and this much closer than the line's own speaker
 MIN_VOICE_S = 1.0
 OWN_VOICE_OK = 0.35  # a line this close to its own speaker's print is not flagged for gender alone
+GENDER_RU = {"male": "мужской", "female": "женский"}
 # (S29: the host's shouts heard as "female" matched his print at 0.36-0.76; other gender flags under 0.31)
 
 
@@ -57,11 +60,13 @@ def _clock(seconds: float) -> str:
 
 def suspects(records: list[dict[str, Any]], speakers: list[dict[str, Any]], audio: np.ndarray, rate: int,
              gender_of: Any, embed: Any, skip: set[int] = frozenset(), offset: float = 0.0,
-             voices: np.ndarray | None = None) -> list[dict[str, Any]]:
+             voices: np.ndarray | None = None, fixed_gender: set[str] = frozenset()) -> list[dict[str, Any]]:
     """Suspicious voiced lines; ``gender_of(audio) -> (p_female, p_male)``, ``embed(audio, rate) -> unit vector``.
 
     ``offset``: media time of the first sample of ``audio`` (a test piece starts mid-episode);
-    ``voices``: the audio's separated voices (same rate and length), heard by the gender model."""
+    ``voices``: the audio's separated voices (same rate and length), heard by the gender model;
+    ``fixed_gender``: line numbers (as in ``corrections.json``) a person already gave a gender: their
+    ``gender_by_voice`` is not listed again."""
     from stt.voice_bank import _unit
 
     cards = {s["id"]: s for s in speakers}
@@ -95,6 +100,15 @@ def suspects(records: list[dict[str, Any]], speakers: list[dict[str, Any]], audi
                 name = other.get("name") or other.get("label_ru") or best
                 entry["sounds_like"] = f"{name} ({sims[best]:.2f}; own speaker {sims[own]:.2f})"
                 entry["fix"] = {"speaker": name}
+        by_voice = r.get("gender_by_voice")
+        if by_voice and str(r["index"]) not in fixed_gender:  # always listed, with a fix that undoes it
+            theirs = by_voice.get("speaker_gender")
+            sure = by_voice["p_female"] if voice == "female" else 1 - by_voice["p_female"]
+            who = (cards.get(own) or {}).get("label_ru") or (cards.get(own) or {}).get("name") or own
+            entry.update(
+                changed_by_voice=f"{voice} ({sure:.2f})", fix={"gender": theirs},
+                note=f"Род изменён по голосу: {GENDER_RU.get(voice, voice)} (уверенность {sure:.2f}".replace(".", ",")
+                     + f"); герой — {who} ({GENDER_RU.get(theirs, theirs)})")
         if entry:
             card = cards.get(own, {})
             out.append({
@@ -117,6 +131,8 @@ def write_review(folder: Path, items: list[dict[str, Any]]) -> None:
             what.append(f"voice {sign.get(item['voice'], '?')}, heard {item['heard']}")
         if "sounds_like" in item:
             what.append(f"sounds like {item['sounds_like']}")
+        if "note" in item:
+            what.append(item["note"])
         blocks.append(f"{item['line']}\n{item['time']} --> {item['end_time']}\n"
                       f"#{item['line']} {item['speaker']}: {'; '.join(what)}\n{item['text_ru']}\n")
     (folder / "review.srt").write_text("\n".join(blocks), encoding="utf-8")
@@ -154,7 +170,10 @@ def review(folder: Path, device: str = "cuda") -> list[dict[str, Any]]:
         _, probs = estimator.predict(segment)
         return float(probs[0]), float(probs[1])
 
-    items = suspects(records, speakers, audio, rate, gender_of, SegmentEmbedder(device), skip, offset, voices)
+    corrections = folder / "corrections.json"
+    fixed_gender = {k for k, v in load_json(corrections).items() if "gender" in v} if corrections.exists() else set()
+    items = suspects(records, speakers, audio, rate, gender_of, SegmentEmbedder(device), skip, offset, voices,
+                     fixed_gender)
     write_review(folder, items)
     log.info("review: %d of %d lines to check (%d with both signals) -> %s", len(items), len(records),
              sum(i["both_signals"] for i in items), folder / "review.json")
@@ -184,10 +203,15 @@ def apply_corrections(records: list[dict[str, Any]], corrections: dict[str, dict
                 raise ValueError(f"corrections.json line {key}: no speaker {wanted!r} in speakers.json")
             record.update(speaker=card["id"], speaker_name=card.get("label_ru") or card.get("name"),
                           gender=card.get("gender", record.get("gender")))
+            record.pop("gender_by_voice", None)  # the new speaker's own gender applies
         if "gender" in fix:
             if fix["gender"] not in ("male", "female"):
                 raise ValueError(f"corrections.json line {key}: gender must be male or female")
             record["gender"] = fix["gender"]
+            record.pop("gender_by_voice", None)  # a person's gender wins over the voice's
+        if "gender" in fix or "speaker" in fix:
+            card = next((s for s in speakers if s["id"] == record.get("speaker")), {})
+            record["gender_changed"] = card.get("gender") in ("male", "female") and record["gender"] != card["gender"]
         if "text" in fix:
             record["text"] = fix["text"] if isinstance(fix["text"], list) else [str(fix["text"])]
     return records, skip

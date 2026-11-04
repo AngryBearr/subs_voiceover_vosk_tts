@@ -351,6 +351,8 @@ def review_note(item: dict[str, Any] | None) -> str:
     what = item.get("heard") and f"слышно {item['heard']}" or ""
     if item.get("sounds_like"):
         what = (what + "; " if what else "") + f"похоже на {item['sounds_like']}"
+    if item.get("note"):  # e.g. the gender changed by voice (stt.line_gender)
+        what = (what + "; " if what else "") + item["note"]
     return what
 
 

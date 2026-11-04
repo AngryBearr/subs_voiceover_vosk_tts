@@ -378,6 +378,25 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   the ~180 later questions, holds if a vote wobbles and takes a season-wide hand fix. Fewer items
   change how the rest are batched: 2 of 86 homograph votes of S29E02 came out differently (LLM
   noise; one better: "за обе ст+ороны").
+- **Whole-text proofreading (`"stress_proofread": true`, `llm.stages.stress_proofread`, default
+  gpt-6.1-sol).** The checks above only look at words RUAccent guessed, at homographs, names and
+  disputed words; a word taken from its dictionary was never asked about, even when wrong in its
+  context. Australian S10E01, first 20 minutes, 269 lines: sol flagged 10 stresses, 8 of them real
+  errors ("Само+а" for "Сам+оа" x5, "дом+а" for "д+ома", "кт+о-ниб+удь" x2) and 2 right future forms
+  ("Подс+адим!"); luna got none right and made 4 harmful changes. So sol reads every line twice
+  (`voiceover.stress_check --proofread MODEL --proofread-passes 2`; the second reading has its batch
+  borders shifted, so it is not the cached first), its proposals are checked (the line and the word
+  exist, the same letters, one "+") and go to the vote of the strong models like names (no
+  screener), together with the other sentences of a proposed word; a correction needs a majority.
+  A word that is no homograph and that all three models corrected the same way goes to
+  `dictionary` and to the season file (`"source": "proofread"`), so it holds in all episodes; with
+  two of three it is fixed in its sentences only. Season words are put on the text before the
+  proofreader reads it. Each sentence is voted against the stress the word has in that sentence
+  (before 3.11 against its first sentence's, so "Дом+а, в моём царстве" after an earlier "я д+ома"
+  was never fixed). Whole S10E01: 10 more fixes than the old check, 9 right, 1 wrong by two votes
+  of three ("в+ыигрывает"); 2.7 min per episode. A rule also removes the stress
+  from "-нибудь", "-либо", "-то", "-ка", "-таки" and "кое-", "кой-". Finished episodes keep their
+  `stress.json`: the stage reruns only when the lines change.
 - **Stress heard in the takes (since 28.10, `"listen_stress": true` in `voiceover`).** The words
   the stress check looked at (`stress.json`: names, homographs, guessed and disputed words) are
   heard in every take by TeraAnaly (`voiceover.stress_listen`); a take whose voice said another
@@ -517,7 +536,8 @@ narration and shouts "heard as female" from 30 to 6. Shouts and crowd noise stil
 gender model, so this is a list for a person, not an automatic fix.
 
 - `review.json`: line number (as in `subs.ru.srt`), time, speaker, voice used, what was heard,
-  English and Russian text, and a ready `fix`;
+  English and Russian text, and a ready `fix`; lines whose gender `stt.line_gender` changed by voice are
+  always here, with a Russian `note`;
 - `review.srt`: the same lines, for Subtitle Edit next to the original video (or open
   `subs.ru.srt` and jump to the numbers).
 
@@ -602,7 +622,16 @@ gave 7-11% zero-length words on these shows; with CTC, cues starting >1 s before
 S10E01 (against hand-synced subtitles) went from 25 to 15.
 Speakers whose gender stays unknown after the naming (mostly mixed clusters) get it per line from
 their lines' own voices (`stt.line_gender`, after the naming, before the translation; S10 SDH lines:
-right gender 78.2% -> 84.8%; `"line_gender": false` turns it off).
+right gender 78.2% -> 84.8%; `"line_gender": {"enabled": false}` (or `false`) turns it off).
+For speakers of known gender the same stage can change a single line's gender (never the speaker): the
+average of audeering and a logistic regression on the resnet293-ft voice print of the whole line
+(`models/gender/resnet293-ft-gender.npz`, trained by `scripts/speaker_training/train_gender.py`) must be
+sure of the other gender (p >= 0.9; `"line_gender": {"override": true, "voice_override": 0.9}`). The host
+and caption-only lines are skipped. On 899 voiced S51 contestant lines it changed 26 (about 3%): 22 fixed,
+4 broken (right gender 86.2% -> 88.2%); audeering alone fixed 37 and broke 36. A changed cue carries
+`gender_by_voice`, is voiced by the voice of the new gender (not the speaker's own), and every such cue is
+listed in `review.json` / `review.srt` with a note and a `fix` that undoes it. A gender in `corrections.json`
+wins. Missing model files: a warning, the override is skipped.
 Diarization: `diarizen-v2` (default since 28.10; `pyannote-community-1` when `diarizen_env` is missing; more speaker changes found: F1 vs the captions' turn marks 0.73 -> 0.83, who is who the same, see `docs/roadmap.md` §6; its own venv: `bash scripts/setup_envs.sh diarizen`), then speaker refinement (`stt.refine_speakers`,
 `"speaker_refine"` in `stt_config.json`): every diarized turn gets an embedding of the stronger
 WeSpeaker ResNet293 (pyannote's PyTorch port of the checkpoint, ~17 s per episode), every speaker a

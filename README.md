@@ -223,13 +223,20 @@ work folder, and episodes of one folder share a season glossary and a voice bank
 6. **stress**. Russian stress marks. RUAccent places them; a rule removes marks from short words
    like "на" and "не" (except real cases such as "не было"); words RUAccent left bare get the
    dictionary stress; names and disputed words are re-checked by language models (three of
-   them vote). Names get one stress for the whole season.
+   them vote). Names get one stress for the whole season. Then one strong model (gpt-6.1-sol)
+   reads every line and points out stresses that are definitely wrong, even in words RUAccent
+   took from its dictionary ("Само+а" instead of "Сам+оа"); the voting models decide on each
+   point (a fix for the whole season needs all three), and a word fixed this way sounds the same in
+   the whole season. The voting is not perfect: on one episode it made 9 right fixes and 1 wrong. Off with
+   `"stress_proofread": false`.
 7. **voiceover** (local). Each line is synthesised by the chosen engines and placed on a timeline
    (section 11). A solver shifts and speeds up lines so they do not collide, and asks for shorter
    text only when needed.
 8. **check** (local). Every voiced clip is recognised again in Russian (GigaAM-v3) and compared
    with the text; `speech_check.md` lists mispronounced or swallowed words. `review.json` and
-   `review.srt` list lines where the voice may be wrong, for a person to look at.
+   `review.srt` list lines where the voice may be wrong, for a person to look at; they also list every
+   line whose gender was changed by its own voice (about 3% of lines; on S51, 22 fixed and 4 broken of
+   26 changed, right gender 86.2% -> 88.2%), each with a ready fix that undoes it.
 9. **mix** (local). The Russian track is laid over the original (the original is turned down
    under the voice, section 12), encoded as AAC, and put into one `.mkv` with the original audio
    and the Russian subtitles. Each engine's run adds its own audio track.

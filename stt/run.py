@@ -350,8 +350,12 @@ class Episode:
         if self._find_cast():
             argv += ["--cast", str(self.cast)]
         speakers.main(argv)
-        if self.config.get("line_gender", True):  # speakers left unknown: their lines' own voices (GPU, own process)
-            self._module("line_gender", "stt.line_gender", [str(self.out)])
+        gender = self.config.get("line_gender", True)  # a bool or {"enabled", "override", "voice_override"}
+        gender = gender if isinstance(gender, dict) else {"enabled": bool(gender)}
+        if gender.get("enabled", True):  # unknown speakers: their lines' own voices; known: sure-of-other-gender lines
+            argv = [str(self.out), "--skip-speakers", ",".join(self._host_speakers())]
+            argv += ["--voice-override", str(gender.get("voice_override", 0.9) if gender.get("override", True) else 0)]
+            self._module("line_gender", "stt.line_gender", argv)  # GPU, own process
 
     def translate(self) -> None:
         from stt import translate
@@ -530,6 +534,10 @@ class Episode:
             args += ["--names", str((self.out / "glossary.json").resolve())]
         if cfg.get("season_stress", True):  # one stress per name for the whole season
             args += ["--season", str(self.season_stress.resolve())]
+        if cfg.get("stress_proofread", False):  # sol reads every line; its proposals go to the vote
+            proofreader = self.llm("stress_proofread")
+            args += ["--proofread", proofreader[0] if isinstance(proofreader, list) else proofreader,
+                     "--proofread-passes", str(int(cfg.get("stress_proofread_passes", 2)))]
         self._module("stress", "voiceover.stress_check", args + (["--screen", screen] if screen else ["--no-screen"]))
 
     def voiceover(self) -> None:
@@ -646,6 +654,8 @@ class Episode:
         out_wav = self.out / f"{self.media.stem}.ru.{self.engine}.wav"
         argv = [str(self.media), str(self.vo_dir / "export" / "track.wav"), "--out", str(out_wav),
                 "--duck-db", str(cfg["duck_db"])]
+        if not self.args.start and not self.args.duration:
+            argv.append("--full-duration")
         if cfg.get("duck") == "voices":  # lower only the original voices, keep music and effects
             argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 6.0))]
         argv += ["--voice-gain-db", str(cfg.get("voice_gain_db", 3.0))]

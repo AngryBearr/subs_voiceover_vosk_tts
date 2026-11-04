@@ -25,6 +25,16 @@ so a name sounds the same all season and a hand edit of the file applies to ever
 Homographs stay per sentence. Without the file a name could get its correction in one episode
 and not in the next, where the vote fell short.
 
+Proofreading (``--proofread``): RUAccent's dictionary words are never looked at above, yet some are
+wrong in their context (Australian S10E01: "Сам+оа" said "Само+а" five times, "д+ома" as "дом+а",
+"кт+о-ниб+удь", "подс+адим" for "подсад+им"). One strong model reads every line as the TTS gets it
+and lists the definite errors (gpt-6.1-sol found exactly the 10 wrong stresses of the first 20
+minutes read by hand, with no false alarms; gpt-6-luna found 2 and made 4 harmful ones). Its
+proposals are not applied: they go to the vote of the strong models like names do, and a correction
+needs the same majority. A corrected word that is not a homograph goes to ``dictionary`` and to the
+season file (``"source": "proofread"``), so it sounds the same in every episode; a homograph or a word
+that stays stressed two ways in the episode is fixed in that sentence only.
+
 Corrections go to ``stress.json``, which the engines load through
 ``engine.normalization.stress_dict``: ``dictionary`` holds guessed words (the same stress
 everywhere), ``sentences`` holds homograph fixes per sentence (два го́лоса / нужны голоса́),
@@ -49,7 +59,7 @@ import re
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +69,8 @@ from voiceover.text import join_lines
 
 log = logging.getLogger("voiceover.stress_check")
 
-PROMPT_VERSION = "stress-v4"
+PROMPT_VERSION = "stress-v5"
+PROOFREAD_PROMPT_VERSION = "proofread-v1"
 SEASON_SCHEMA = "season-stress-v1"
 VOWELS = set("аеёиоуыэюя")
 _WORD = re.compile(r"[А-Яа-яЁё+]+")
@@ -82,6 +93,17 @@ Items with "name_en" are the Russian spelling of an English name of a person in 
 form of it): stress the syllable that is stressed in the English original as the person's
 name is said in English (Jaclyn -> ж+аклин, Natalie -> н+атали, Alec -> +алек, Keith -> к+ита,
 к+итом), the same syllable in every case form, not a French or Russian-word reading."""
+
+PROOFREAD_SYSTEM = """You are an expert in Russian pronunciation (orthoepy) proofreading the text of a Russian
+voice-over before speech synthesis. The lines are consecutive; a sentence may continue on the next line, so
+read each line in its context. Every word has its stress marked by "+" before the stressed vowel ("ё" is always
+stressed and carries no "+").
+Find the words whose marked stress is WRONG in the context of the line: homographs read in the wrong sense,
+a wrong stress of a known word, a short preposition or particle that should carry no stress, a proper name
+stressed in a clearly wrong way. Report only definite errors, not variants that are both acceptable.
+Keep the letters of the word exactly as given; the right stress has exactly one "+".
+Answer JSON: {"items": [{"id": <line id>, "word": "<the word as marked>", "stressed": "<the word with the right
+stress, marked with +>", "why": "<a few words>"}]} and {"items": []} when every line is right."""
 
 # Case endings a Russian name form can add to the name (Кит -> Кита, Китом; Надия -> Надию).
 NAME_ENDINGS = ("", "а", "я", "у", "ю", "ом", "ем", "ём", "ой", "ей", "е", "и", "ы", "ам", "ям", "ах", "ях")
@@ -124,6 +146,11 @@ def name_of(token: str, names: dict[str, str]) -> str | None:
         if word.startswith(stem) and word[len(stem):] in NAME_ENDINGS + ((name[-1],) if stem != name else ()):
             return english
     return None
+
+
+def _hyphenated(text: str, match: re.Match[str]) -> bool:
+    """The word is a part of a hyphenated one (кое-что, альфа-самец): such parts are stressed separately."""
+    return text[match.end():match.end() + 1] == "-" or text[max(0, match.start() - 1):match.start()] == "-"
 
 
 def classify(word: str, accentizer: Any) -> str:
@@ -186,8 +213,8 @@ def collect(texts: list[str], accentizer: Any, max_contexts: int = 8,
     for n, text in enumerate(texts):
         disputed = disagreements(text, others[n]) if others else set()
         for k, match in enumerate(_WORD.finditer(text)):
-            if text[match.end():match.end() + 1] == "-" or text[max(0, match.start() - 1):match.start()] == "-":
-                continue  # parts of hyphenated words (кое-что, альфа-самец) are stressed separately
+            if _hyphenated(text, match):
+                continue
             accented = match.group(0).lower()
             word = accented.replace("+", "")
             source = classify(word, accentizer)
@@ -265,6 +292,110 @@ def vote(suspect: Suspect, answers: list[str | None]) -> str | None:
     return stressed if votes > len(answers) / 2 else None
 
 
+@dataclass
+class Proposal:
+    """A stress the proofreader wants changed: a word of one line."""
+
+    line: int
+    word: str  # as marked in the line (lower case)
+    stressed: str  # the proposed stress (lower case, one "+")
+
+
+def apply_season(texts: list[str], season: dict[str, dict[str, Any]],
+                 accentizer: Any) -> tuple[list[str], dict[str, str]]:
+    """The lines with the season's stress on every occurrence of its words (homographs excluded: they
+    are decided per sentence), and the words that changed -> their stress."""
+    applied: dict[str, str] = {}
+
+    def fix(text: str) -> str:
+        def sub(match: re.Match[str]) -> str:
+            token = match.group(0)
+            word = token.lower().replace("+", "")
+            entry = season.get(word)
+            if entry is None or word in accentizer.omographs or _hyphenated(text, match):
+                return token
+            stressed = str(entry.get("stressed", "")).lower()
+            position = stressed.find("+")
+            if (stressed.replace("+", "") != word or stressed.count("+") != 1 or position + 1 >= len(stressed)
+                    or stressed[position + 1] not in VOWELS):
+                return token
+            if token.lower() != stressed:
+                applied[word] = stressed
+            return restress(token, stressed)
+        return _WORD.sub(sub, text)
+
+    return [fix(text) for text in texts], applied
+
+
+def validate_proposal(raw: Any, texts: list[str]) -> Proposal | None:
+    """The proposal if its line exists, the word is in that line, the letters are the same, the stress is
+    exactly one "+" before a vowel and differs from the line's; else None."""
+    if not isinstance(raw, dict):
+        return None
+    line = raw.get("id")
+    if not isinstance(line, int) or isinstance(line, bool) or not 0 <= line < len(texts):
+        return None
+    word, stressed = str(raw.get("word", "")).strip().lower(), str(raw.get("stressed", "")).strip().lower()
+    plain = word.replace("+", "")
+    position = stressed.find("+")
+    if (not plain or "ё" in plain or plain != stressed.replace("+", "") or stressed.count("+") != 1
+            or position + 1 >= len(stressed) or stressed[position + 1] not in VOWELS):
+        return None
+    text = texts[line]
+    for match in _WORD.finditer(text):
+        token = match.group(0).lower()
+        if token.replace("+", "") == plain and not _hyphenated(text, match) and token != stressed:
+            return Proposal(line, token, stressed)
+    return None
+
+
+def _proofread_batch(texts: list[str], low: int, high: int, client: LLMClient) -> list[Any]:
+    """Raw proposals of the lines ``low``..``high``; a broken answer is asked again in halves."""
+    tag = f"proofread:{low}-{high}"
+    payload = json.dumps({"lines": [{"id": i, "text": texts[i]} for i in range(low, high)]}, ensure_ascii=False)
+    try:
+        result = client.complete_json(PROOFREAD_SYSTEM, payload, prompt_version=PROOFREAD_PROMPT_VERSION, tag=tag)
+    except LLMError as error:
+        if high - low == 1:
+            log.warning("stress: %s gave no usable proofreading for %s: %s", client.config.model, tag, str(error)[:120])
+            return []
+        middle = (low + high) // 2
+        return _proofread_batch(texts, low, middle, client) + _proofread_batch(texts, middle, high, client)
+    except Exception as error:  # noqa: BLE001 - the model is not reachable: no proposals, the check goes on
+        log.warning("stress: %s did not proofread %s (%s)", client.config.model, tag, str(error)[:160])
+        return []
+    items = result.content.get("items", [])
+    return list(items) if isinstance(items, list) else []
+
+
+def proofread(texts: list[str], client: LLMClient, batch: int = 60, workers: int = 4,
+              report: dict[str, int] | None = None, shift: int = 0) -> list[Proposal]:
+    """The model reads all lines (``batch`` consecutive ones at a time) and lists wrong stresses; the
+    valid proposals are returned (``report`` gets the number of raw ones as "proposals"). ``shift`` moves the
+    batch borders (the first batch is that many lines): another reading sees other neighbours and is not
+    answered from the cache of the first."""
+    offsets = ([0] if 0 < shift < len(texts) else []) + list(range(shift if 0 < shift < len(texts) else 0, len(texts), batch))
+    if not offsets:
+        return []
+    with ThreadPoolExecutor(max(1, min(workers, len(offsets)))) as pool:
+        ends = offsets[1:] + [len(texts)]
+        parts = list(pool.map(lambda span: _proofread_batch(texts, span[0], min(span[1], span[0] + batch), client),
+                              zip(offsets, ends)))
+    raw = [item for part in parts for item in part]
+    proposals: list[Proposal] = []
+    for item in raw:
+        proposal = validate_proposal(item, texts)
+        if proposal and proposal not in proposals:
+            proposals.append(proposal)
+    if report is not None:
+        report["proposals"] = len(raw)
+    log.info("stress: the proofreader proposes %d changes, %d valid", len(raw), len(proposals))
+    if len(raw) > len(proposals):
+        log.info("stress: %d proofreading proposals dropped (unknown line, word not in it, other letters, "
+                 "bad or unchanged stress, duplicates)", len(raw) - len(proposals))
+    return proposals
+
+
 def lines_sha256(lines: list[dict[str, Any]]) -> str:
     """Fingerprint of the lines' texts: another engine's script with the same lines needs no new check."""
     import hashlib
@@ -315,9 +446,11 @@ def _client(llm_config: dict[str, Any], model: str, env_file: Path | None, **ext
 def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config: dict[str, Any],
           models: list[str], env_file: Path | None = None, screen: dict[str, Any] | None = None,
           names: dict[str, str] | None = None, second: bool = True,
-          season: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+          season: dict[str, dict[str, Any]] | None = None, proofreader: str | None = None,
+          proofread_passes: int = 2) -> dict[str, Any]:
     """Accent the lines exactly as the engine will, then re-check guessed words and homographs
-    (names and guessed words in ``season`` are taken from there, not asked)."""
+    (names and guessed words in ``season`` are taken from there, not asked). With ``proofreader`` (a
+    model) it also reads all lines; what it proposes goes to the vote of the strong models."""
     engine = build_engine({**engine_config, "normalization": {
         **engine_config.get("normalization", {}), "stress_dict": None}})
     items = [{"cue_id": str(i), "index": i, "text": join_lines(line.get("text"))} for i, line in enumerate(lines)]
@@ -338,17 +471,75 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
     if known:
         log.info("stress: %d names and guessed words decided earlier in the season", len(known))
     clients = [_client(llm_config, model, env_file) for model in models]
-    pairs = queries(suspects)
-    screened: list[str | None] = [None] * len(pairs)
+    base_pairs = queries(suspects)
+    pairs = list(base_pairs)
     stats: dict[str, Any] = {}
+    omographs = accentizer.omographs
+    # the season's words are on every occurrence before proofreading: the proofreader sees the final text
+    texts, season_applied = apply_season(texts, season, accentizer)
+    season_words = {w for w in season if w not in omographs}
+    proposed: dict[tuple[str, str], str] = {}  # (word, sentence) -> the proofreader's stress
+    siblings: set[tuple[str, str]] = set()  # other sentences of a proposed plain word, voted on too
+    proof_suspects: dict[str, Suspect] = {}
+    proof_info: dict[str, Any] | None = None
+    if proofreader:
+        proofreader_client = _client(llm_config, proofreader, env_file)
+        report: dict[str, int] = {}
+        # One reading misses some errors and finds others (S10E01: "Дома" found in one of two full runs): passes in
+        # parallel, their proposals together; the vote sorts them out
+        with ThreadPoolExecutor(max(1, proofread_passes)) as pool:
+            runs = list(pool.map(lambda k: proofread(texts, proofreader_client, report={}, shift=k * 30),
+                                 range(max(1, proofread_passes))))
+        unique: dict[tuple[int, str], Proposal] = {}
+        for run in runs:
+            for proposal in run:
+                unique.setdefault((proposal.line, proposal.word.lower()), proposal)
+        proposals = list(unique.values())
+        report = {"proposals": sum(len(run) for run in runs), "passes": len(runs)}
+        stats[f"proofread:{proofreader}"] = proofreader_client.stats()
+        by_word = {x.word: x for x in suspects}
+        seen = {(x.word, c) for x, c in pairs}
+        for proposal in proposals:
+            word = proposal.word.replace("+", "")
+            if word in season_words:
+                continue  # decided in the season: one stress for all its occurrences
+            context = texts[proposal.line].replace("+", "")
+            suspect = by_word.get(word) or proof_suspects.get(word)
+            if suspect is None:
+                count = sum(plain == word for text in texts for plain in
+                            (m.group(0).lower().replace("+", "") for m in _WORD.finditer(text)))
+                suspect = proof_suspects[word] = Suspect(word, proposal.word, "proofread", count=count)
+            if suspect.source == "proofread" and context not in suspect.contexts:
+                suspect.contexts.append(context)
+            proposed[(word, context)] = proposal.stressed
+            if (word, context) not in seen:
+                seen.add((word, context))
+                pairs.append((suspect, context))
+        for word, suspect in proof_suspects.items():  # its other sentences too: one stress for all, or per sentence
+            for text in texts:
+                context = text.replace("+", "")
+                if (len(suspect.contexts) < 8 and (word, context) not in seen
+                        and any(m.group(0).lower().replace("+", "") == word for m in _WORD.finditer(text))):
+                    seen.add((word, context))
+                    suspect.contexts.append(context)
+                    siblings.add((word, context))
+                    pairs.append((suspect, context))
+        proof_info = {"model": proofreader, "proposals": report.get("proposals", 0), "valid": len(proposals), "corrected": 0}
+    # every question shows the word as it is stressed in that sentence (a homograph may differ between sentences)
+    marked_texts = {text.replace("+", ""): text for text in texts}
+    pairs = [(replace(x, accented=here) if (here := stress_in(marked_texts.get(c, ""), x.word)) and here != x.accented
+              else x, c) for x, c in pairs]
+    base_pairs = pairs[:len(base_pairs)]
+    screened: list[str | None] = [None] * len(pairs)
     if screen:  # the cheap model proposes, the strong ones vote only on its proposals
         screener = _client(llm_config, str(screen["model"]), env_file,
                            **{k: v for k, v in screen.items() if k != "model"})
-        screened = ask(pairs, screener)
+        screened[:len(base_pairs)] = ask(base_pairs, screener)
         stats[f"screen:{screen['model']}"] = screener.stats()
-        todo = [n for n, (s, context) in enumerate(pairs)  # names and disputed sentences: always
-                if s.source == "name" or context in s.disputed or (screened[n] and screened[n] != s.accented)]
-        log.info("stress: the screener proposes %d changes in %d sentences", len(todo), len(pairs))
+        todo = [n for n, (s, context) in enumerate(pairs)  # names, disputed and proofread sentences: always
+                if s.source == "name" or context in s.disputed or (s.word, context) in proposed or (s.word, context) in siblings
+                or (screened[n] and screened[n] != s.accented)]
+        log.info("stress: the screener proposes %d changes in %d sentences", len(todo), len(base_pairs))
     else:
         todo = list(range(len(pairs)))
     with ThreadPoolExecutor(len(clients)) as pool:
@@ -362,21 +553,50 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
     guessed: dict[str, str] = {}
     new_words: dict[str, dict[str, Any]] = {}  # names and guessed words decided here, for the season
     sentences: dict[str, dict[str, str]] = {}
+    proof_fixes: dict[str, dict[str, str]] = {}  # word -> {sentence: corrected} for proofread pairs
+    proof_votes: dict[str, list[str | None]] = {}
+    proof_kept: set[str] = set()  # proofread words whose old stress the models kept in some sentence
+    proof_split: set[str] = set()  # proofread words corrected without all models agreeing
+    marked = {text.replace("+", ""): text for text in texts}
     for n, (s, context) in enumerate(pairs):
         votes = [a[n] for a in answers]
+        # The vote is against the stress the word has in THIS sentence: a homograph's first sentence may differ
+        here = stress_in(marked.get(context, ""), s.word)
+        s = replace(s, accented=here) if here and here != s.accented else s
         corrected = vote(s, votes) if n in checked else None
         entry = verdicts.setdefault(s.word, {"word": s.word, "accented": s.accented, "source": s.source,
                                              "count": s.count, "variants": s.variants, "contexts": [],
                                              **({"name_en": s.name_en} if s.name_en else {})})
         entry["contexts"].append({"sentence": context, "answers": dict(zip(models, votes)), "screen": screened[n],
-                                  "corrected": corrected, **({"disputed": True} if context in s.disputed else {})})
+                                  "corrected": corrected, **({"disputed": True} if context in s.disputed else {}),
+                                  **({"proposal": proposed[(s.word, context)]} if (s.word, context) in proposed else {})})
+        if corrected and (s.word, context) in proposed:
+            proof_info["corrected"] += 1  # type: ignore[index]
         if corrected and s.source in ("guess", "name"):
             guessed[s.word] = corrected
+        elif corrected and (s.source == "proofread" or (s.source == "disputed" and (s.word, context) in proposed)):
+            proof_fixes.setdefault(s.word, {})[context] = corrected
+            if any(v != corrected for v in votes):
+                proof_split.add(s.word)  # not every model agreed: this sentence only, not the whole season
+            proof_votes.setdefault(s.word, votes)
         elif corrected:
             sentences.setdefault(context, {})[s.word] = corrected
+        elif n in checked and ((s.word, context) in proposed or (s.word, context) in siblings) and decided(votes) == s.accented:
+            proof_kept.add(s.word)  # the models kept the stress here: the word's stress depends on its sentence
         if n in checked and s.source in ("guess", "name") and (stressed := decided(votes)):
             new_words[s.word] = {"stressed": stressed, "source": s.source, "votes": dict(zip(models, votes)),
                                  **({"name_en": s.name_en} if s.name_en else {})}
+    for word, fixes in proof_fixes.items():
+        # A plain word (Самоа) gets its corrected stress everywhere, also where the proofreader did not point at it;
+        # a homograph, different corrections, or a sentence where the models kept the old stress: per sentence only
+        stresses = set(fixes.values())
+        if word in omographs or len(stresses) > 1 or word in proof_kept or word in proof_split:
+            for context, corrected_stress in fixes.items():
+                sentences.setdefault(context, {})[word] = corrected_stress
+        else:
+            guessed[word] = next(iter(stresses))
+            new_words[word] = {"stressed": guessed[word], "source": "proofread",
+                               "votes": dict(zip(models, proof_votes[word]))}
     for s in known:
         stressed = str(season[s.word]["stressed"])
         verdicts[s.word] = {"word": s.word, "accented": s.accented, "source": s.source, "count": s.count,
@@ -384,6 +604,8 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
                             **({"name_en": s.name_en} if s.name_en else {})}
         if stressed != s.accented and valid_stress(s, stressed):
             guessed[s.word] = stressed
+    for word, stressed in season_applied.items():  # season words are on all their occurrences
+        guessed.setdefault(word, stressed)
     return {
         "schema": "voiceover-stress-v3",
         "prompt_version": PROMPT_VERSION,
@@ -395,10 +617,19 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         "corrected": {"guess": sum(v["source"] == "guess" for k, v in verdicts.items() if k in guessed),
                       "name": sum(v["source"] == "name" for k, v in verdicts.items() if k in guessed),
                       "homograph_sentences": sum(len(v) for v in sentences.values())},
-        "season": {"used": len(known), "decided": new_words},
+        "season": {"used": len(known), "applied": len(season_applied), "decided": new_words},
+        **({"proofread": proof_info} if proof_info else {}),
         "verdicts": list(verdicts.values()),
         "llm": {**stats, **{model: client.stats() for model, client in zip(models, clients)}},
     }
+
+
+def stress_in(text: str, word: str) -> str | None:
+    """The first occurrence of ``word`` (lower case, no marks) in a marked text, lower case with its mark."""
+    for match in _WORD.finditer(text):
+        if match.group(0).lower().replace("+", "") == word:
+            return match.group(0).lower()
+    return None
 
 
 def restress(token: str, stressed: str) -> str:
@@ -426,6 +657,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models", default=None, help="Comma-separated OpenRouter models (default: config/built-in)")
     parser.add_argument("--no-screen", action="store_true", help="Let the strong models check every sentence")
     parser.add_argument("--screen", default=None, help="Cheap model that proposes changes (default: config/built-in)")
+    parser.add_argument("--proofread-passes", type=int, default=2, help="Readings of the whole text by the proofreader")
+    parser.add_argument("--proofread", default=None, metavar="MODEL",
+                        help="A strong model that reads every line and proposes wrong stresses (voted on; default: none)")
+    parser.add_argument("--no-proofread", action="store_true", help="No proofreading pass (the default)")
     parser.add_argument("--no-second", action="store_true", help="No second stress placer (silero-stress)")
     parser.add_argument("--names", type=Path, default=None,
                         help="Glossary JSON (stt.glossary): its people's names are checked in every case form")
@@ -443,7 +678,8 @@ def main(argv: list[str] | None = None) -> int:
     lines = json.loads(args.source.read_text(encoding="utf-8"))
     names = glossary_names(json.loads(args.names.read_text(encoding="utf-8"))) if args.names else None
     result = check(lines, engine_config, llm_config, models, env_file=Path(".env"), screen=screen, names=names,
-                   second=not args.no_second, season=load_season(args.season))
+                   second=not args.no_second, season=load_season(args.season),
+                   proofreader=None if args.no_proofread else args.proofread, proofread_passes=args.proofread_passes)
     result["lines_sha256"] = lines_sha256(lines)
     tmp = args.out.with_suffix(".tmp")  # engines of the other lane may be reading the old one
     tmp.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
