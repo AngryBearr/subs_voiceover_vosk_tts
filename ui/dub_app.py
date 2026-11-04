@@ -2,13 +2,26 @@
 
     subs_env/bin/python -m ui.dub_app [--port 7861]
 
-Tab "Обработка": pick episodes in a folder, engines and options, start, watch the stages of every
-episode, find the finished mkv files. A job runs ``stt.run`` in a background process (one job at
-a time, engines one after the other); its config and log are kept in ``<out-root>/.ui/``. The
-folders default to ``paths`` of the config (work, season files, finished videos).
+The season bar above the tabs: one season (the folder with the original episodes + its results folder, remembered in
+``ui.local.json`` by ``ui.state``) drives every tab; there are no other folder fields. Folders are picked with the
+desktop dialog or an in-page browser (``ui.folder_pick``). The first line of each tab says what it writes where
+(``ui.seasons.tab_notes``). The settings in effect for a season are layered by ``ui.season_settings``: standard,
+global settings file, the season's ``season_settings.json``, then the form of the "Обработка" tab.
 
-Tab "Банк голосов": the season voice bank (``stt.voice_bank``): people, episodes, speech; cut
-the voice-cloning references, listen, ask for another clip, re-check names across the season.
+Tab "Обработка": pick episodes of the season, engines and options, start, watch the stages of every
+episode (and a table of their states), find the finished mkv files. A job runs ``stt.run`` in a background process (one
+job at a time, engines one after the other); its config (``ui.seasons.season_config``: everything in the results
+folder) and log are kept in ``<results>/.ui/``. The last job is kept in
+``output/ui_last_job.json``: after a restart of the page (or of the computer) it is found again, still running
+(shown and stoppable), or "прервано" with the "▶ Продолжить" button, which runs the same command with the same
+settings file; ``ui.job_view`` turns the stage marks, progress files and log into the words on the tab.
+
+Tab "Голоса сезона" (``ui.voices``): the people of the season and the voice clips ESpeech clones: listen, find another
+automatically, give a clip by hand from time ranges of an episode, re-voice ESpeech after a change, rebuild all clips,
+count the season's voices again, check names across the season.
+
+Every long action is a task of one background runner (``Job`` with a Russian title; one at a time); the status strip
+under the season bar shows the running task, and how the last one ended, on every tab.
 
 Tab "Проверка и правка реплик": every Russian line of an episode (filters: the lines ``stt.review``
 found suspicious, edited ones, ones too long for their time), the original and the voice-over of
@@ -21,16 +34,18 @@ save the mix levels, mix the episode again without voicing it, shrink a finished
 
 Tab "Справка": what the program does and how to work with it (``ui/help.md``).
 
-Tab "Настройки": the defaults people change (folders, recognition, models, voices, checks, mix),
-saved into ``stt_config.local.json`` (``ui.settings``); the "Обработка" form starts from them.
+Tab "Настройки": the defaults people change (recognition, models, voices, checks, mix), saved into the global
+settings file (``stt_config.local.json`` unless another is chosen) or the season's file (``ui.settings``); the
+"Обработка" form starts from the settings in effect for the season. Each voice has a
+"▶ Послушать" button: a sample phrase in the voice chosen now (``ui.voice_preview``, made in a subprocess).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -42,22 +57,30 @@ from typing import Any
 
 import gradio as gr  # type: ignore
 
-from stt.run import STAGES, SUBSCRIPTION_DOWN, apply_preset, finished_folder, load_config
-from ui import settings
+from stt import progress as stt_progress
+from stt.refine_speakers import HUB_WEIGHTS, model_available
+from stt.run import SUBSCRIPTION_DOWN, apply_preset, finished_folder
+from ui import folder_pick, job_view, season_settings, seasons, settings, voice_preview, voices
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELP = Path(__file__).with_name("help.md")  # the "Справка" tab
-VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm"}
+VIDEO_EXT = seasons.VIDEO_EXT
 ENGINES, MODES, MODELS = settings.ENGINES, settings.MODES, settings.MODELS
 TRANSPORTS = {"Подписка (opencode)": "opencode", "API OpenRouter": "openrouter"}
-ENGINE_STAGES = {"dub", "voiceover", "check", "mix"}
-STAGE_RU = {"transcribe": "распознавание", "glossary": "словарь", "speakers": "спикеры", "translate": "перевод",
-            "dub": "сценарий", "stress": "ударения", "voiceover": "озвучка", "check": "проверка речи",
-            "mix": "сведение"}
+STAGE_RU = job_view.STAGE_RU
+LAST_JOB = REPO_ROOT / "output" / "ui_last_job.json"  # the last job, so it can be found again after a restart
+RESUMABLE = ("прервано", "остановлено")
+
+
+DEFAULT_TITLE = "Обработка серий"
+TASK_MODULES = (b"stt.run", b"stt.voice_bank", b"stt.video_compress")  # programs the runner starts
 
 
 @dataclass
 class Job:
+    """A background task of the page (one at a time): ``stt.run`` for ``files`` (``cmd`` is None), or any other
+    command (``cmd``: the voice clips, the video compression). Every task has a Russian ``title`` for the status strip."""
+
     files: list[Path]
     out_root: Path
     engines: list[str]
@@ -69,28 +92,123 @@ class Job:
     state: str = "идёт"
     started: float = field(default_factory=time.time)
     finished: float | None = None
+    pid: int | None = None  # of the program: it keeps running when this page is restarted
+    boot: str = ""
+    title: str = DEFAULT_TITLE
+    cmd: list[str] | None = None  # None: ``stt.run`` for files / engines / extra
+    result: str = ""  # a file the task makes (shown after "Готово")
+
+    @property
+    def is_stt_run(self) -> bool:
+        return self.cmd is None
 
 
+log = logging.getLogger("ui.dub_app")
 JOB: Job | None = None
 LOCK = threading.Lock()
 
 
+def save_job(job: Job | None, path: Path | None = None) -> None:
+    """Keep the job in ``output/ui_last_job.json`` (atomic), so a restart of the page or the computer finds it."""
+    if job is None:
+        return
+    path = path or LAST_JOB
+    data = {"files": [str(f) for f in job.files], "out_root": str(job.out_root), "engines": job.engines,
+            "config_path": str(job.config_path), "log_path": str(job.log_path), "extra": job.extra, "pid": job.pid,
+            "boot": job.boot, "started": job.started, "finished": job.finished, "state": job.state,
+            "title": job.title, "cmd": job.cmd, "result": job.result}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _is_task_process(pid: int) -> bool:
+    """The process ``pid`` is one of the programs of the runner (a process id can be reused by something else after
+    a restart)."""
+    try:
+        return any(module in TASK_MODULES for module in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0"))
+    except OSError:
+        return False
+
+
+def job_alive(job: Job | None) -> bool:
+    """The program of the job still runs (started by this page, or found again after a restart)."""
+    if job is None:
+        return False
+    if job.process is not None:
+        return job.process.poll() is None
+    return bool(job.pid) and stt_progress.process_alive({"pid": job.pid, "boot": job.boot}) and _is_task_process(job.pid)
+
+
+def _episodes(job: Job) -> list[tuple[str, Path]]:
+    return [(job_view.short_name(media.stem), job.out_root / media.stem) for media in job.files]
+
+
+def _gone_state(job: Job) -> str:
+    """State of a job whose process is gone and whose exit code nobody saw: all mixes made -> done, else interrupted."""
+    if not job.is_stt_run:
+        return "прервано"
+    complete = all((job.out_root / m.stem / ".stages" / f"mix.{engine}").exists()
+                   for m in job.files for engine in job.engines)
+    return "готово" if complete and job.files else "прервано"
+
+
+def restore_last_job(path: Path | None = None) -> Job | None:
+    """Load the last job after a start of the page. Still running: shown as running (and stoppable); gone while it
+    was running: "прервано" (or "готово" when everything was made). Sets ``JOB``."""
+    global JOB
+    path = path or LAST_JOB
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        job = Job(files=[Path(f) for f in data["files"]], out_root=Path(data["out_root"]), engines=list(data["engines"]),
+                  config_path=Path(data["config_path"]), log_path=Path(data["log_path"]),
+                  extra=list(data.get("extra") or []), state=str(data.get("state") or "прервано"),
+                  started=float(data.get("started") or time.time()), finished=data.get("finished"),
+                  pid=data.get("pid"), boot=str(data.get("boot") or ""), title=str(data.get("title") or DEFAULT_TITLE),
+                  cmd=list(data["cmd"]) if data.get("cmd") else None, result=str(data.get("result") or ""))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if job.state == "идёт":
+        if job_alive(job):
+            threading.Thread(target=_watch, args=(job, path), daemon=True).start()
+        else:
+            job.state, job.finished = _gone_state(job), time.time()
+            save_job(job, path)
+    JOB = job
+    return job
+
+
+def _watch(job: Job, path: Path | None = None) -> None:
+    """For a job found again after a restart: wait until its process is gone, then settle the state."""
+    while job_alive(job):
+        time.sleep(2)
+    if job.state == "идёт":
+        job.state = _gone_state(job)
+    job.finished = time.time()
+    save_job(job, path)
+
+
 def list_videos(folder: str) -> list[str]:
-    path = Path(folder).expanduser()
-    if not path.is_dir():
-        return []
-    return sorted(p.name for p in path.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXT)
+    return seasons.video_names(Path(folder).expanduser())
 
 
 def base_config() -> dict[str, Any]:
-    """stt_config.json with the personal stt_config.local.json on top."""
-    return load_config(REPO_ROOT / "stt_config.json")
+    """stt_config.json with the global settings file on top (``stt_config.local.json`` unless another is chosen)."""
+    return season_settings.global_config()
+
+
+def season_base(out_root: str) -> dict[str, Any]:
+    """The settings in effect for the season with this results folder: standard + global + the season's own file."""
+    return season_settings.effective(base_config(), _root(out_root) if out_root else None)
 
 
 def job_config(mode: str, model: str, subtitles: bool, duck_voices: bool, stress: bool, refine: bool,
-               f5_fast: bool = False, transport: str | None = None, preset: str | None = None) -> dict[str, Any]:
-    """stt_config.json (+ local settings), the chosen set of settings on top, then the options of the form."""
-    config = apply_preset(base_config(), preset)
+               f5_fast: bool = False, transport: str | None = None, preset: str | None = None,
+               base: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The settings in effect (``base``, else the global ones), the chosen set of settings on top, then the options
+    of the form."""
+    config = apply_preset(base_config() if base is None else base, preset)
     config["mode"] = MODES.get(mode, mode)
     config.setdefault("llm", {})["model"] = MODELS.get(model, model)
     if TRANSPORTS.get(transport or "") == "openrouter":  # pay per request instead of the subscription
@@ -105,30 +223,74 @@ def job_config(mode: str, model: str, subtitles: bool, duck_voices: bool, stress
 
 
 def _run(job: Job) -> None:
-    """The job's thread: one stt.run for all engines (Vosk next to the GPU engines, ``stt.run``)."""
+    """The job's thread: one stt.run for all engines (Vosk next to the GPU engines, ``stt.run``), or the job's command."""
+    job.log_path.parent.mkdir(parents=True, exist_ok=True)
     with job.log_path.open("ab") as log_file:
         engines = ",".join(job.engines)
         job.engine = engines
-        cmd = [sys.executable, "-m", "stt.run", *map(str, job.files), "--out-root", str(job.out_root),
-               "--config", str(job.config_path), "--engine", engines, *job.extra]
-        log_file.write(f"\n=== {time.strftime('%H:%M:%S')} {engines}: {' '.join(cmd)}\n".encode())
+        cmd = job.cmd or [sys.executable, "-m", "stt.run", *map(str, job.files), "--out-root", str(job.out_root),
+                          "--config", str(job.config_path), "--engine", engines, *job.extra]
+        log_file.write(f"\n=== {time.strftime('%H:%M:%S')} {engines if job.is_stt_run else 'task'}: {' '.join(cmd)}\n".encode())
         log_file.flush()
         job.process = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT,
                                        start_new_session=True)
+        job.pid, job.boot = job.process.pid, stt_progress.boot_id()
+        save_job(job)
         code = job.process.wait()
         if job.state != "остановлено":
             job.state = "готово" if code == 0 else f"ошибка (код {code}): смотрите лог"
     job.finished = time.time()
+    save_job(job)
+
+
+NO_SEASON = "Сначала выберите сезон вверху страницы (или добавьте его кнопкой «＋ Новый сезон»)."
+
+
+def _busy() -> str | None:
+    """Why nothing new can start: the last job is running (also one found again after a restart)."""
+    job = JOB
+    if job and (job.state == "идёт" or job_alive(job)):
+        minutes = max(1, round((time.time() - job.started) / 60))
+        return f"Сейчас идёт «{job.title}» ({minutes} мин). Дождитесь или остановите её."
+    return None
+
+
+def started_text(title: str, detail: str = "") -> str:
+    """The answer of a button that started a task."""
+    return f"⏳ Запущено: {title}{f' ({detail})' if detail else ''}. Ход — в строке состояния вверху."
+
+
+def start_task(title: str, cmd: list[str], root: Path, result: str = "") -> str:
+    """Run ``cmd`` (a program of ``TASK_MODULES``) as the background task ``title``; its log is in ``<root>/.ui/``.
+    Answers at once; a task already running is a refusal that says which."""
+    with LOCK:
+        if busy := _busy():
+            return busy
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        job = Job(files=[], out_root=root, engines=[], config_path=Path(), log_path=root / ".ui" / f"task_{stamp}.log",
+                  title=title, cmd=cmd, result=result)
+        _launch(job)
+    return started_text(title)
+
+
+def _launch(job: Job) -> None:
+    global JOB
+    JOB = job
+    save_job(job)
+    threading.Thread(target=_run, args=(job,), daemon=True).start()
 
 
 def start_job(folder: str, names: list[str], out_root: str, engines: list[str], mode: str, model: str,
               subtitles: bool, duck_voices: bool, stress: bool, refine: bool, preview: bool,
               preview_from: float, preview_minutes: float, f5_fast: bool = False, transport: str | None = None,
-              stt_args: list[str] | None = None, preset: str | None = None) -> str:
+              stt_args: list[str] | None = None, preset: str | None = None,
+              download_voice_model: bool = False, title: str | None = None) -> str:
     global JOB
     with LOCK:
-        if JOB and JOB.state == "идёт":
-            return "Уже идёт обработка: дождитесь её или остановите."
+        if busy := _busy():
+            return busy
+        if not folder or not out_root:
+            return NO_SEASON
         if not names:
             return "Выберите хотя бы одну серию."
         if not engines:
@@ -137,7 +299,11 @@ def start_job(folder: str, names: list[str], out_root: str, engines: list[str], 
         if not root.is_absolute():
             root = REPO_ROOT / root
         extra: list[str] = list(stt_args or [])
-        config = job_config(mode, model, subtitles, duck_voices, stress, refine, f5_fast, transport, preset)
+        if download_voice_model:
+            extra.append("--download-voice-model")
+        config = job_config(mode, model, subtitles, duck_voices, stress, refine, f5_fast, transport, preset,
+                            base=season_base(out_root))
+        config = seasons.season_config(config, seasons.Season(Path(folder).expanduser(), root))  # all in the results folder
         if preview:  # a short piece in its own folder, so it never mixes with full episodes
             root = root / "_проба"
             extra += ["--start", str(preview_from * 60), "--duration", str(preview_minutes * 60)]
@@ -147,58 +313,112 @@ def start_job(folder: str, names: list[str], out_root: str, engines: list[str], 
         stamp = time.strftime("%Y%m%d_%H%M%S")
         config_path = ui_dir / f"config_{stamp}.json"
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-        JOB = Job(files=[Path(folder).expanduser() / n for n in names], out_root=root,
+        job = Job(files=[Path(folder).expanduser() / n for n in names], out_root=root,
                   engines=[ENGINES[e] for e in engines], config_path=config_path,
-                  log_path=ui_dir / f"job_{stamp}.log", extra=extra)
-        threading.Thread(target=_run, args=(JOB,), daemon=True).start()
-        return f"Запущено: {len(names)} сер., движки: {', '.join(engines)}. Лог: {JOB.log_path}"
+                  log_path=ui_dir / f"job_{stamp}.log", extra=extra, title=title or DEFAULT_TITLE)
+        _launch(job)
+        return started_text(job.title, f"{seasons.episodes_word(len(names))}, озвучка: {', '.join(engines)}")
+
+
+def voice_model_missing() -> bool:
+    """The trained voice model of the config can be downloaded and is not on this computer yet."""
+    model = str((base_config().get("season_voices") or {}).get("model") or "")
+    return model in HUB_WEIGHTS and not model_available(model)
+
+
+RECOUNT_TITLE = "Уточнение голосов сезона"
+
+
+def recount_season_voices(folder: str, out_root: str, download_voice_model: bool = False) -> str:
+    """Count the voices of the season in ``folder`` again, from its episodes that already have a transcript. Translated
+    episodes stay as they are: a new transcript would mean a new translation and voice-over, LLM costs included."""
+    with LOCK:
+        if busy := _busy():
+            return busy
+        if not folder or not out_root:
+            return NO_SEASON
+        names = list_videos(folder)
+        root = _root(out_root)
+        done = [n for n in names if (root / Path(n).stem / "speakers.json").exists()]
+        if not done:
+            return "В этой папке ещё нет серий с распознанной речью и именами: сначала запустите обработку."
+        kept = sum((root / Path(n).stem / "subs.ru.json").exists() for n in done)
+        if kept == len(done):
+            return "Все обработанные серии этой папки уже переведены, пересчитывать нечего: их реплики не меняются."
+        ui_dir = root / ".ui"
+        ui_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        config_path = ui_dir / f"config_{stamp}.json"
+        config_path.write_text(json.dumps(seasons.season_config(season_base(out_root), seasons.Season(Path(folder).expanduser(), root)),
+                                                ensure_ascii=False, indent=2), encoding="utf-8")
+        extra = ["--season-voices-only", *(["--download-voice-model"] if download_voice_model else [])]
+        job = Job(files=[Path(folder).expanduser() / n for n in done], out_root=root, engines=["vosk"],
+                  config_path=config_path, log_path=ui_dir / f"job_{stamp}.log", extra=extra, title=RECOUNT_TITLE)
+        _launch(job)
+        return (started_text(RECOUNT_TITLE, f"серий с именами {len(done)}, реплики изменятся у {len(done) - kept}, "
+                                            f"уже переведённые ({kept}) останутся как есть"))
 
 
 def stop_job() -> str:
     with LOCK:
-        if not JOB or JOB.state != "идёт" or JOB.process is None:
-            return "Нечего останавливать."
-        JOB.state = "остановлено"
+        job = JOB
+        if not job or job.state != "идёт" or not job_alive(job):
+            return "Нечего останавливать: сейчас ничего не запущено."
+        job.state = "остановлено"
+        save_job(job)
+        pid = job.process.pid if job.process is not None else job.pid
         try:
-            os.killpg(JOB.process.pid, signal.SIGTERM)
+            if pid and os.getpgid(pid) == pid:  # ``stt.run`` leads its own process group with its children
+                os.killpg(pid, signal.SIGTERM)
+            elif pid:
+                os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        return "Остановлено. Готовые этапы сохранены: следующий запуск продолжит с места остановки."
+        if not job.is_stt_run:
+            return f"⏹ Остановлено: {job.title}."
+        return "⏹ Остановлено. Готовые этапы сохранены: кнопка «▶ Продолжить» продолжит с места остановки."
 
 
-def _current_stage(job: Job, stem: str, log_tail: str, engine: str) -> str | None:
-    """The stage the log last started for this episode: a shared one, or this engine's."""
-    found = [stage for stage, who in re.findall(rf"\[{re.escape(stem)}\] (\w+)(?: \((\w+)\))? \.\.\.", log_tail)
-             if who in ("", engine)]
-    return found[-1] if found else None
+def resume_job() -> str:
+    """Run the last, interrupted job again: the same files, engines and settings file; finished stages are skipped
+    by ``stt.run`` and voiced lines come from the cache, so only the rest is done. A new log is started."""
+    with LOCK:
+        old = JOB
+        if old is None or old.state not in RESUMABLE or not old.is_stt_run:
+            return "Продолжать нечего: последняя обработка не прервана."
+        if busy := _busy():
+            return busy
+        if not old.config_path.exists():
+            return f"Файла настроек прерванного запуска нет ({old.config_path}): начните обработку заново."
+        missing = [m.name for m in old.files if not m.exists()]
+        if missing:
+            return f"Не найдены видео: {', '.join(missing)}. Подключите диск и повторите."
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        job = Job(files=list(old.files), out_root=old.out_root, engines=list(old.engines), config_path=old.config_path,
+                  log_path=old.log_path.with_name(f"job_{stamp}.log"), extra=list(old.extra), title=old.title)
+        _launch(job)
+        return (started_text(old.title, "тот же запуск: те же серии, движки и настройки; готовые этапы пропускаются, "
+                                        "озвученные реплики и ответы языковой модели берутся из сохранённого"))
+
+
+def progress_view(job: Job | None) -> tuple[list[str], list[list[str]]]:
+    """(headers, rows) of the progress table: Серия | Общие этапы | one column per engine."""
+    if job is None:
+        return ["Серия"], []
+    return job_view.progress_table(_episodes(job), job.engines, since=job.started)
 
 
 def progress_rows(job: Job | None) -> list[list[str]]:
-    if job is None:
-        return []
-    tail = job.log_path.read_text(encoding="utf-8", errors="replace")[-200_000:] if job.log_path.exists() else ""
-    rows = []
-    for media in job.files:
-        stages_dir = job.out_root / media.stem / ".stages"
-        row = [media.stem]
-        for engine in job.engines:
-            current = _current_stage(job, media.stem, tail, engine) if job.state == "идёт" else None
-            done = [s for s in STAGES if (stages_dir / (f"{s}.{engine}" if s in ENGINE_STAGES else s)).exists()]
-            if "mix" in done and result_file(job, media, engine):
-                cell = "✅ готово"
-            elif current:  # a shared stage counts for every engine of the episode
-                cell = f"⏳ {len(done)}/{len(STAGES)}: {STAGE_RU.get(current, current)}"
-            else:
-                cell = f"{len(done)}/{len(STAGES)}"
-            row.append(cell)
-        rows.append(row)
-    return rows
+    return progress_view(job)[1]
 
 
 def result_file(job: Job, media: Path, engine: str) -> Path | None:
     """The finished video with the engine's voice-over (or, without a video, its mixed audio)."""
     work = job.out_root / media.stem
-    config = json.loads(job.config_path.read_text(encoding="utf-8")) if job.config_path.exists() else {}
+    try:
+        config = json.loads(job.config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # no settings file (any more): look in the work folder only
+        config = {}
     finished = finished_folder(config, media)
     folders = [finished, work] if finished else [work]
     track = work / f"{media.stem}.ru.{engine}.m4a"
@@ -216,11 +436,12 @@ def result_file(job: Job, media: Path, engine: str) -> Path | None:
 def results_rows(job: Job | None) -> list[list[str]]:
     if job is None:
         return []
-    return [[media.stem, engine, str(path)] for media in job.files for engine in job.engines
+    return [[media.stem, job_view.engine_label(engine), str(path)] for media in job.files for engine in job.engines
             if (path := result_file(job, media, engine))]
 
 
 def log_tail(job: Job | None, lines: int = 40) -> str:
+    """The raw log, the lines that matter."""
     if job is None or not job.log_path.exists():
         return ""
     text = job.log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -241,21 +462,90 @@ def subscription_failed(job: Job) -> bool:
     return SUBSCRIPTION_DOWN in text or "via opencode failed" in text
 
 
-def refresh() -> tuple[str, Any, str, Any]:
-    job = JOB
+def readable_log(job: Job | None) -> str:
+    """"Ход работы": one plain line per event of the job's log, newest last."""
+    if job is None or not job.log_path.exists():
+        return ""
+    text = job.log_path.read_text(encoding="utf-8", errors="replace")[-300_000:]
+    return "\n".join((job_view.readable_log if job.is_stt_run else job_view.task_log_lines)(text))
+
+
+def last_line(job: Job) -> str:
+    """What the task does now, in one line: the running stage of ``stt.run``, else the last event of the log."""
+    if job.is_stt_run:
+        lines = job_view.status_lines(_episodes(job), job.engines, since=job.started)
+        if lines:
+            return lines[0]
+    events = [e for e in readable_log(job).splitlines() if e]
+    plain = [e for e in events if "Предупреждение" not in e]  # a warning is not what the task is doing
+    return (plain or events or ["подготовка"])[-1]
+
+
+def failure_reason(job: Job) -> str:
+    """A short reason for a task that did not work: the last error line of its log, else the exit state."""
+    errors = [e for e in readable_log(job).splitlines() if e.startswith("❌") or "❌" in e[:12]]
+    if errors:
+        return errors[-1].split("❌", 1)[-1].replace("Ошибка:", "").strip(" :") or job.state
+    return job.state
+
+
+def strip_text(job: Job | None) -> str:
+    """The line under the season bar, on every tab: what runs, what ended, how."""
     if job is None:
-        status = "Нет запущенной обработки."
-    else:
-        minutes = ((job.finished or time.time()) - job.started) / 60
-        status = f"**{job.state}** · {minutes:.0f} мин · движок: {job.engine or '-'}"
-        if subscription_failed(job):
-            status += "\n\n" + SUBSCRIPTION_WARNING
-    engines = job.engines if job else []
-    progress = gr.update(value=progress_rows(job), headers=["Серия", *engines] if engines else ["Серия"])
-    return status, progress, log_tail(job), gr.update(value=results_rows(job))
+        return ""
+    spent = job_view.fmt_duration((job.finished or time.time()) - job.started)
+    if job.state == "идёт":
+        return f"⏳ **Идёт:** {job.title} · {spent} · {last_line(job)}"
+    if job.state == "готово":
+        done = Path(job.result) if job.result else None
+        size = f" · `{done}` ({done.stat().st_size / 1e9:.2f} ГБ)" if done and done.is_file() else ""
+        return f"✅ **Готово:** {job.title} за {spent}{size}"
+    if job.state == "остановлено":
+        return f"⏹ **Остановлено:** {job.title}" + (". Можно продолжить на вкладке «Обработка»." if job.is_stt_run else ".")
+    if job.state == "прервано":
+        return f"⏸ **Прервано:** {job.title}" + (". Продолжить можно на вкладке «Обработка»." if job.is_stt_run else ".")
+    return f"❌ **Не получилось:** {job.title} — {failure_reason(job)}"
 
 
-# ---------------------------------------------------------------- voice bank tab
+def strip_view() -> tuple[str, Any]:
+    """(text, "Остановить" button) of the status strip; the timer of the page calls this."""
+    job = JOB
+    return strip_text(job), gr.update(visible=bool(job and job.state == "идёт" and job_alive(job)))
+
+
+def status_text(job: Job | None) -> str:
+    """The state, the time and what happens now (one line per running stage)."""
+    if job is None:
+        return "Нет запущенной обработки."
+    minutes = ((job.finished or time.time()) - job.started) / 60
+    labels = ", ".join(job_view.engine_label(e) for e in job.engines)
+    if not job.is_stt_run:
+        return f"**{job.state}** · {job.title} · {minutes:.0f} мин. Ход — в окне «Ход работы» ниже и в строке состояния вверху."
+    text = f"**{job.state}** · {job.title} · {minutes:.0f} мин · движки: {labels or '-'}"
+    episodes = _episodes(job)
+    if job.state == "идёт":
+        lines = job_view.status_lines(episodes, job.engines, since=job.started) or ["подготовка следующего этапа"]
+        text += "\n\n" + "\n".join(f"- {line}" for line in lines)
+    elif job.state in RESUMABLE:
+        lines = job_view.interrupted_lines(episodes, job.engines, since=job.started)
+        if lines:
+            text += "\n\nОстановлено на этапах:\n\n" + "\n".join(f"- {line}" for line in lines)
+    if subscription_failed(job):
+        text += "\n\n" + SUBSCRIPTION_WARNING
+    return text
+
+
+def refresh() -> tuple[str, Any, str, Any, str, str, Any]:
+    """Everything the timer updates: status, progress table, readable log, results, checkpoints, raw log, "Продолжить"."""
+    job = JOB
+    headers, rows = progress_view(job)
+    checkpoints = job_view.checkpoints(_episodes(job), job.engines, job.state == "идёт", job.started) if job else ""
+    can_resume = bool(job and job.is_stt_run and job.state in RESUMABLE and not job_alive(job))
+    return (status_text(job), gr.update(value=rows, headers=headers), readable_log(job), gr.update(value=results_rows(job)),
+            checkpoints, log_tail(job), gr.update(interactive=can_resume))
+
+
+# ---------------------------------------------------------------- season folders
 
 def _root(out_root: str) -> Path:
     root = Path(out_root).expanduser()
@@ -263,56 +553,8 @@ def _root(out_root: str) -> Path:
 
 
 def _season_root(out_root: str) -> Path:
-    """Folder of the season files (voice banks, voice clips): ``paths.season``, else the work folder."""
-    season = (base_config().get("paths") or {}).get("season")
-    return _root(season) if season else _root(out_root)
-
-
-def list_banks(out_root: str) -> list[str]:
-    return sorted(p.name for p in _season_root(out_root).glob("*.voices.json"))
-
-
-def refs_dir(out_root: str, bank: str) -> Path:
-    return _season_root(out_root) / bank.replace(".voices.json", ".references")
-
-
-def _bank_cmd(out_root: str, bank: str, *args: str) -> tuple[int, str]:
-    cmd = [sys.executable, "-m", "stt.voice_bank", str(_season_root(out_root) / bank), *args]
-    done = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
-    lines = [line for line in (done.stdout + done.stderr).splitlines()
-             if not any(k in line.lower() for k in ("warn", "tf32", ">>>", "issues/"))]
-    return done.returncode, "\n".join(lines[-40:])
-
-
-def people_rows(out_root: str, bank: str) -> list[list[Any]]:
-    if not bank:
-        return []
-    from stt.voice_bank import VoiceBank
-
-    vb = VoiceBank.load(_season_root(out_root) / bank)
-    index_path = refs_dir(out_root, bank) / "references.json"
-    refs = {r["name"]: r for r in json.loads(index_path.read_text(encoding="utf-8"))} if index_path.exists() else {}
-    rows = []
-    for person in vb.people():
-        ref = refs.get(person["name"])
-        rows.append([person["name"], person.get("label_ru") or "", person.get("gender") or "",
-                     len(person["episodes"]), round(person["speech_s"] / 60, 1),
-                     f"{ref['score']:.2f}" if ref else "нет"])
-    return rows
-
-
-def person_view(out_root: str, bank: str, name: str) -> tuple[Any, str]:
-    index_path = refs_dir(out_root, bank) / "references.json"
-    if not name or not index_path.exists():
-        return None, "Образца пока нет: нажмите «Собрать образцы»."
-    ref = next((r for r in json.loads(index_path.read_text(encoding="utf-8")) if r["name"] == name), None)
-    if ref is None:
-        return None, "Для этого человека чистый образец не нашёлся."
-    episode = re.search(r"S\d+E\d+", ref["episode"])
-    info = (f"**{ref['name']}** · {episode.group(0) if episode else ref['episode']} "
-            f"{ref['start']:.1f}–{ref['end']:.1f} с · похожесть {ref['score']:.2f} · "
-            f"музыка {ref['music_db']:+.0f} дБ до очистки\n\n> {ref['text']}")
-    return str(refs_dir(out_root, bank) / ref["wav"]), info
+    """Folder of the season files (voice banks, voice clips): the results folder of the season."""
+    return _root(out_root)
 
 
 # ---------------------------------------------------------------- check and edit tab
@@ -553,14 +795,18 @@ def revoice(out_root: str, episode: str, engines: list[str]) -> str:
     if not episode:
         return "Выберите серию."
     folder = _episode(out_root, episode)
-    media = Path(json.loads((folder / "source.json").read_text(encoding="utf-8"))["media"])
+    try:
+        media = Path(json.loads((folder / "source.json").read_text(encoding="utf-8"))["media"])
+    except (OSError, ValueError, KeyError):
+        return f"❌ Не нашёл данные серии {job_view.short_name(episode)}: сначала обработайте её."
     done = [e for e in ENGINES if (folder / f"voiceover.{ENGINES[e]}").exists()]
     return start_job(str(media.parent), [media.name], str(_root(out_root)), engines or done or ["Vosk"],
-                     list(MODES)[0], default_model(), True, True, True, True, False, 0, 0)
+                     list(MODES)[0], default_model(season_base(out_root)), True, True, True, True, False, 0, 0,
+                     title=f"Переозвучка {job_view.short_name(episode)}")
 
 
-def default_model() -> str:
-    model = base_config().get("llm", {}).get("model")
+def default_model(config: dict[str, Any] | None = None) -> str:
+    model = (base_config() if config is None else config).get("llm", {}).get("model")
     return next((label for label, value in MODELS.items() if value == model), list(MODELS)[0])
 
 
@@ -569,44 +815,121 @@ def preset_choices() -> list[tuple[str, str]]:
     return [(str(p.get("label") or name), name) for name, p in (base_config().get("presets") or {}).items()]
 
 
-def preset_form(preset: str | None) -> list[Any]:
-    """What the "Обработка" form shows for a set of settings: engines, mode, subtitles, duck voices, stress, refine, fast ESpeech."""
-    values = form_defaults(apply_preset(base_config(), preset))
-    return [values[0], values[1], *values[4:]]
+def preset_form(preset: str | None, out_root: str = "") -> list[Any]:
+    """What the "Обработка" form shows for a set of settings (on top of the settings in effect for the season):
+    engines, mode, subtitles, duck voices, stress, refine, fast ESpeech."""
+    values = form_defaults(apply_preset(season_base(out_root), preset))
+    return [values[0], values[1], *values[3:]]
 
 
 def start_with_preset(*values: Any) -> str:
-    """``start_job`` from the form; the last value is the chosen set of settings."""
-    return start_job(*values[:-1], preset=values[-1])
+    """``start_job`` from the form; the last values are the voice model tick and the chosen set of settings."""
+    return start_job(*values[:-2], download_voice_model=values[-2], preset=values[-1])
 
 
 def form_defaults(config: dict[str, Any] | None = None) -> list[Any]:
-    """Starting values of the "Обработка" form from the settings: engines, mode, model, out root and the
+    """Starting values of the "Обработка" form from the settings: engines, mode, model and the
     subtitles / duck voices / stress / refine / fast ESpeech boxes."""
     config = base_config() if config is None else config
     chosen = (config.get("ui") or {}).get("engines") or ["vosk"]
     f5 = ((config.get("voiceover") or {}).get("engines") or {}).get("f5") or {}
     return [[label for label, value in ENGINES.items() if value in chosen],
             next((label for label, value in MODES.items() if value == config.get("mode")), list(MODES)[0]),
-            default_model(), (config.get("paths") or {}).get("work") or "output/stt",
+            default_model(config),
             bool((config.get("mix") or {}).get("subtitles", True)), (config.get("mix") or {}).get("duck") == "voices",
             bool((config.get("voiceover") or {}).get("stress_check", True)),
             (config.get("speaker_refine") or {}).get("model", "resnet293") != "none", int(f5.get("nfe", 32)) == 7]
 
 
-def save_settings(*values: Any) -> list[Any]:
+TARGET_GLOBAL, TARGET_SEASON = "global", "season"
+
+
+def _season(folder: str, out_root: str) -> seasons.Season | None:
+    return seasons.Season(Path(folder).expanduser(), _root(out_root)) if folder and out_root else None
+
+
+def target_choices(season: seasons.Season | None) -> list[tuple[str, str]]:
+    """The radio "Сохранять изменения в"."""
+    choices = [("общие настройки", TARGET_GLOBAL)]
+    if season is not None:
+        choices.append((f"настройки сезона {season.name}", TARGET_SEASON))
+    return choices
+
+
+def effect_text(season: seasons.Season | None) -> str:
+    """Which settings the season runs with, in words."""
+    if season is None:
+        return "Сезон не выбран: действуют общие настройки."
+    if season_settings.has_own(season.results):
+        return (f"Сейчас для сезона {season.name} действуют: настройки сезона "
+                f"(`{season_settings.season_file(season.results)}`).")
+    return f"Сейчас для сезона {season.name} действуют: общие настройки."
+
+
+def save_settings(folder: str, out_root: str, target: str, *values: Any) -> str:
+    """"Сохранить": the form goes to the global file or to the season's file, as the radio says."""
+    season = _season(folder, out_root)
     try:
-        own, warnings = settings.save(list(values))
+        if target == TARGET_SEASON and season is not None:
+            path = season_settings.save_own(list(values), season.results, base_config())
+            return (f"Сохранено в настройки сезона {season.name}: `{path}`. Действует со следующего запуска "
+                    "и только для этого сезона.")
+        path = season_settings.global_path()
+        own, warnings = settings.save(list(values), local_path=path)
     except settings.SettingsError as exc:
-        return ["Не сохранено:\n\n" + "\n".join(f"- {p}" for p in exc.problems), *form_defaults()]
-    text = f"Сохранено (своих значений: {own}). Действует со следующего запуска."
-    return [text + "".join(f"\n- {w}" for w in warnings), *form_defaults()]
+        return "Не сохранено:\n\n" + "\n".join(f"- {p}" for p in exc.problems)
+    text = f"Сохранено в общие настройки: `{path}` (своих значений: {own}). Действует со следующего запуска."
+    if season is not None and season_settings.has_own(season.results):
+        text += f" Сезон {season.name} использует свои настройки: на него это не влияет."
+    return text + "".join(f"\n- {w}" for w in warnings)
 
 
-def reset_settings() -> list[Any]:
-    settings.reset()
-    return ["Настройки сброшены к стандартным (личные ключи вроде подписки остались).",
-            *settings.form_values(base_config()), *form_defaults()]
+def reset_settings(folder: str, out_root: str, target: str) -> str:
+    """"Сбросить к стандартным": the chosen file gets the standard values."""
+    season = _season(folder, out_root)
+    if target == TARGET_SEASON and season is not None:
+        path = season_settings.reset_own(season.results, settings.read_json(settings.DEFAULTS))
+        return f"Настройки сезона {season.name} сброшены к стандартным: `{path}`."
+    path = season_settings.global_path()
+    settings.reset(path)
+    return f"Общие настройки сброшены к стандартным (личные ключи вроде подписки остались): `{path}`."
+
+
+def remove_season_settings(folder: str, out_root: str) -> str:
+    season = _season(folder, out_root)
+    if season is None:
+        return NO_SEASON
+    if not season_settings.remove_own(season.results):
+        return f"У сезона {season.name} нет своих настроек: действуют общие."
+    return (f"Файл настроек сезона {season.name} удалён (`{season_settings.season_file(season.results)}`): "
+            "теперь для сезона действуют общие настройки.")
+
+
+def apply_global(text: str) -> Any:
+    """Use the file in the field as the global settings (made as a copy of the current ones when it is new)."""
+    status, message = season_settings.choose_global(text)
+    return gr.update() if status == "same" else message
+
+
+def season_line_text(season: seasons.Season | None) -> str:
+    if season is None:
+        return seasons.summary(None)
+    return f"{seasons.summary(season)} · действуют: {season_settings.in_effect(season.results)}"
+
+
+def settings_view(folder: str, out_root: str, target: str | None = None) -> list[Any]:
+    """Everything that depends on the season's settings, in the order of ``build``'s ``view_outputs``: the fields of
+    the "Настройки" tab, the "Обработка" form, the sound sliders, then the texts (the line of what is in effect, the
+    radio, the button "Убрать…", the season line, the global file path, the notes of the tabs)."""
+    season = _season(folder, out_root)
+    config = season_base(out_root)
+    choices = target_choices(season)
+    has_own = season is not None and season_settings.has_own(season.results)
+    wanted = target if target in {value for _, value in choices} else (TARGET_SEASON if has_own else TARGET_GLOBAL)
+    notes = seasons.tab_notes(season, season_settings.global_path())
+    return [*settings.form_values(config), *form_defaults(config), *mix_form_defaults(out_root),
+            effect_text(season), gr.update(choices=choices, value=wanted), gr.update(visible=has_own),
+            season_line_text(season), str(season_settings.global_path()), *[notes[tab] for tab in seasons.NOTE_TABS]]
 
 
 def tts_cache(delete: bool) -> str:
@@ -635,12 +958,11 @@ MIX_SECONDS = 45.0
 MIX_SETTINGS = [next(s for s in settings.SETTINGS if s.path == path) for path in (
     ("mix", "voice_gain_db"), ("mix", "rest_duck_db"), ("mix", "duck_db"), ("mix", "loudness_lufs"),
     ("mix", "video", "compress"), ("mix", "video", "target_gb"), ("mix", "video", "codec"))]
-COMPRESS: dict[str, Any] = {"process": None, "out": None, "log": None}  # the running "Сжать готовое видео"
 
 
-def mix_form_defaults() -> list[Any]:
-    """Values of the "Звук и размер видео" form from the settings (same order as ``MIX_SETTINGS``)."""
-    config = base_config()
+def mix_form_defaults(out_root: str = "") -> list[Any]:
+    """Values of the "Звук и размер видео" form from the settings in effect (same order as ``MIX_SETTINGS``)."""
+    config = season_base(out_root)
     return [settings.to_form(s, settings.get(config, s.path)) for s in MIX_SETTINGS]
 
 
@@ -660,6 +982,14 @@ def mix_episodes(out_root: str) -> Any:
     return gr.update(choices=sorted(set(found)))
 
 
+def mix_episodes_listed(out_root: str) -> tuple[Any, str]:
+    """The list of the "Обновить список" button: (the dropdown, what was found)."""
+    update = mix_episodes(out_root) if out_root else gr.update(choices=[])
+    count = len(update["choices"])
+    return update, (f"Серий с готовой озвучкой: {count}." if count else
+                    "Серий с готовой озвучкой в папке результатов сезона пока нет (или сезон не выбран).")
+
+
 def find_spot(out_root: str, episode: str | None, engine: str) -> tuple[Any, str]:
     """(minute, message) of the place where the voice-over has the hardest time against the music."""
     if not episode:
@@ -669,9 +999,10 @@ def find_spot(out_root: str, episode: str | None, engine: str) -> tuple[Any, str
     try:
         spot = mix_preview.loudest_spot(_episode(out_root, episode), episode_media(out_root, episode),
                                         ENGINES[engine], MIX_SECONDS)
-    except (OSError, KeyError, ValueError) as error:
-        return gr.update(), f"Не получилось найти место: {error}"
-    return round(spot / 60, 2), f"Самое громкое место: с {int(spot // 60)}:{int(spot % 60):02d}."
+    except Exception as error:  # noqa: BLE001 - shown to the person, details in the log
+        log.exception("loudest spot")
+        return gr.update(), f"❌ Не получилось найти место: {error}"
+    return round(spot / 60, 2), f"✅ Самое громкое место: с {int(spot // 60)}:{int(spot % 60):02d}. Минута подставлена выше."
 
 
 def listen_mix(out_root: str, episode: str | None, engine: str, minute: float, gain: float, rest: float,
@@ -687,23 +1018,30 @@ def listen_mix(out_root: str, episode: str | None, engine: str, minute: float, g
     try:
         new = mix_preview.render_preview(folder, episode_media(out_root, episode), ENGINES[label], start, MIX_SECONDS,
                                         float(gain), float(duck_db), float(rest), float(lufs), out_dir / "new.wav",
-                                        duck=base_config().get("mix", {}).get("duck"))
-    except Exception as error:  # noqa: BLE001 - shown to the person, not a crash of the page
-        return None, None, f"Не получилось собрать отрывок: {error}"
+                                        duck=season_base(out_root).get("mix", {}).get("duck"))
+    except Exception as error:  # noqa: BLE001 - shown to the person, details in the log
+        log.exception("mix preview")
+        return None, None, f"❌ Не получилось собрать отрывок: {error}"
     track = folder / f"{episode}.ru.{ENGINES[label]}.m4a"
     now = None
     if track.exists():
         now = str(mix_preview.existing_piece(track, start, MIX_SECONDS, out_dir / "now.wav"))
-    return str(new), now, ("Слева: с новыми настройками; справа: как сейчас в серии." if now else
-                           "Серия ещё не собрана: сравнивать не с чем.")
+    return str(new), now, ("✅ Слева: с новыми настройками; справа: как сейчас в серии." if now else
+                           "✅ Готово. Серия ещё не собрана: сравнивать не с чем.")
 
 
-def save_mix_settings(*values: Any) -> str:
+def save_mix_settings(out_root: str, *values: Any) -> str:
+    """Save the sound sliders where the season's settings live: its own file when it has one, else the global file."""
+    results = _root(out_root) if out_root else None
     try:
-        own, warnings = settings.save(list(values), only=MIX_SETTINGS)
+        if results is not None and season_settings.has_own(results):
+            path = season_settings.save_own(list(values), results, base_config(), only=MIX_SETTINGS)
+            return f"Сохранено в настройки сезона: `{path}`. Действует со следующего сведения серии."
+        path = season_settings.global_path()
+        own, warnings = settings.save(list(values), local_path=path, only=MIX_SETTINGS)
     except settings.SettingsError as exc:
         return "Не сохранено:\n\n" + "\n".join(f"- {p}" for p in exc.problems)
-    return f"Сохранено (своих значений в настройках: {own}). Действует со следующего сведения серии."
+    return f"Сохранено в общие настройки: `{path}` (своих значений: {own}). Действует со следующего сведения серии."
 
 
 def remix(out_root: str, episode: str | None) -> str:
@@ -713,77 +1051,256 @@ def remix(out_root: str, episode: str | None) -> str:
     engines = voiced_engines(out_root, episode)
     if not engines:
         return "У серии нет готовой озвучки."
-    media = episode_media(out_root, episode)
-    config = base_config()
-    return start_job(str(media.parent), [media.name], str(_root(out_root)), engines, list(MODES)[0], default_model(),
+    try:
+        media = episode_media(out_root, episode)
+    except (OSError, ValueError, KeyError):
+        return f"❌ Не нашёл данные серии {job_view.short_name(episode)}: сначала обработайте её."
+    config = season_base(out_root)
+    return start_job(str(media.parent), [media.name], str(_root(out_root)), engines, list(MODES)[0], default_model(config),
                      bool((config.get("mix") or {}).get("subtitles", True)), (config.get("mix") or {}).get("duck") == "voices",
-                     True, True, False, 0, 0, stt_args=["--force", "mix"])
+                     True, True, False, 0, 0, stt_args=["--force", "mix"],
+                     title=f"Пересведение {job_view.short_name(episode)}")
+
+
+def videos_listed(out_root: str) -> tuple[Any, str]:
+    """The list of the "Обновить список" button of the compression: (the dropdown, what was found)."""
+    update = finished_videos(out_root)
+    count = len(update["choices"])
+    return update, (f"Готовых видео: {count}." if count else
+                    "Готовых видео (`*.ru.mkv`) в папке результатов пока нет: впишите путь к файлу вручную.")
 
 
 def finished_videos(out_root: str) -> Any:
-    """Finished videos (``*.ru.mkv``) of the finished-videos folder and of the work folder."""
-    config = base_config()
+    """Finished videos (``*.ru.mkv``) at the top of the results folder (and in the work folders of older runs)."""
     found: list[Path] = []
-    finished = (config.get("paths") or {}).get("finished")
-    if finished:
-        found += Path(finished).expanduser().glob("*/*.ru.mkv")
-    found += _root(out_root).glob("*/*.ru.mkv")
+    if out_root:
+        found += _root(out_root).glob("*.ru.mkv")
+        found += _root(out_root).glob("*/*.ru.mkv")
     return gr.update(choices=sorted(str(p) for p in dict.fromkeys(found)))
 
 
-def start_compress(path: str | None, sample: bool, target_gb: float, codec: str) -> str:
-    """Run ``stt.video_compress`` on a finished video in the background (the video itself is never changed)."""
-    process = COMPRESS["process"]
-    if process is not None and process.poll() is None:
-        return "Сжатие уже идёт: дождитесь его."
+def start_compress(path: str | None, sample: bool, target_gb: float, codec: str, out_root: str = "") -> str:
+    """Run ``stt.video_compress`` on a finished video as a task (the video itself is never changed)."""
     src = Path(path or "").expanduser()
     if not src.is_file():
-        return "Выберите готовое видео или впишите путь к файлу."
+        return "❌ Выберите готовое видео или впишите путь к файлу."
     out = src.with_name(f"{src.stem}.{'sample' if sample else 'small'}.mkv")
-    log_path = REPO_ROOT / "output" / "mix_preview" / "compress.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", "stt.video_compress", str(src), "--target-gb", str(target_gb),
            "--codec", settings.VIDEO_CODECS[codec]]
     if sample:
         cmd += ["--sample-minute", "10", "--sample-seconds", "60"]
-    with log_path.open("wb") as log_file:
-        COMPRESS.update(process=subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT,
-                                                 start_new_session=True), out=out, log=log_path)
-    return f"Запущено. Результат: {out}"
+    root = _root(out_root) if out_root else REPO_ROOT / "output" / "mix_preview"
+    title = "Сжатие видео (пробный кусок)" if sample else "Сжатие видео"
+    answer = start_task(title, cmd, root, result=str(out))
+    return f"{answer} Результат: `{out}`" if answer.startswith("⏳") else answer
 
 
-def compress_status() -> str:
-    process, out, log_path = COMPRESS["process"], COMPRESS["out"], COMPRESS["log"]
-    if process is None:
-        return ""
-    lines = [line for line in Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines() if " INFO " in line
-             or "Error" in line or "Traceback" in line]
-    last = lines[-1].split(": ", 1)[-1] if lines else ""
-    code = process.poll()
-    if code is None:
-        return f"⏳ Сжимаю… {last}"
-    if code != 0:
-        return f"Ошибка (код {code}): смотрите {log_path}. {last}"
-    if Path(out).exists():
-        return f"✅ Готово: {out} ({Path(out).stat().st_size / 1e9:.2f} ГБ)"
-    return f"Ничего не записано: {last}"
+VOICE_ENGINE = {("voiceover", "engines", "vosk", "voices", "female"): "vosk",
+                ("voiceover", "engines", "vosk", "voices", "male"): "vosk",
+                ("voiceover", "engines", "teratts", "voices", "female"): "teratts",
+                ("voiceover", "engines", "teratts", "voices", "male"): "teratts",
+                ("voiceover", "host_voice"): "teratts"}  # settings with a "▶ Послушать" button
+FIELDS_PER_ROW = 3
 
 
 def _setting_field(setting: settings.Setting, value: Any) -> Any:
     if setting.kind == "bool":
         return gr.Checkbox(label=setting.label, value=value, info=setting.info or None)
     if setting.kind == "choice":
-        return gr.Dropdown(label=setting.label, choices=list(setting.choices), value=value, info=setting.info or None)
+        return gr.Dropdown(label=setting.label, choices=list(setting.choices), value=value, info=setting.info or None,
+                           min_width=280)
     if setting.kind == "engines":
         return gr.CheckboxGroup(label=setting.label, choices=list(setting.choices), value=value)
+    if setting.kind == "vosk_voice":
+        return gr.Dropdown(label=setting.label, choices=settings.vosk_voice_choices(setting.path[-1]), value=value,
+                           info=setting.info or None, min_width=280)
     if setting.kind in ("number", "integer"):
         return gr.Number(label=setting.label, value=value, precision=0 if setting.kind == "integer" else None,
-                         info=setting.info or None)
+                         info=setting.info or None, min_width=200)
     if setting.kind == "voice":
         voices = settings.TERATTS_VOICES + sorted(settings.teratts_styles() - set(settings.TERATTS_VOICES))
         return gr.Dropdown(label=setting.label, choices=voices, value=value, allow_custom_value=True,
-                           info=setting.info or None)
-    return gr.Textbox(label=setting.label, value=value, info=setting.info or None)
+                           info=setting.info or None, min_width=280)
+    return gr.Textbox(label=setting.label, value=value, info=setting.info or None, min_width=280)
+
+
+def listen_voice(path: tuple[str, ...], voice: Any) -> tuple[Any, str]:
+    """(sound, message) of the sample phrase in the voice now chosen in the form (not necessarily saved yet)."""
+    engine = VOICE_ENGINE[tuple(path)]
+    if voice is None or str(voice).strip() == "":
+        return None, "Сначала выберите голос."
+    wav, message = voice_preview.preview(engine, voice)
+    return (str(wav) if wav else None), message
+
+
+def _settings_group(group: str, values: dict[tuple[str, ...], Any], fields: dict[tuple[str, ...], Any]) -> None:
+    """The fields of one group: the others in rows of three, voices with their "▶ Послушать", boxes one per line,
+    so every label and hint is whole. Components are collected in ``fields`` by path (the order of the form
+    is ``settings.SETTINGS``, whatever the order on the page)."""
+    members = [s for s in settings.SETTINGS if s.group == group]
+    plain = [s for s in members if s.kind != "bool" and s.path not in VOICE_ENGINE]
+    voices = [s for s in members if s.path in VOICE_ENGINE]
+    boxes = [s for s in members if s.kind == "bool"]
+    for start in range(0, len(plain), FIELDS_PER_ROW):
+        with gr.Row(equal_height=False):
+            for setting in plain[start:start + FIELDS_PER_ROW]:
+                fields[setting.path] = _setting_field(setting, values[setting.path])
+    for setting in voices:  # each voice with its own button, state line and player, right under it
+        with gr.Group():
+            with gr.Row(equal_height=False):
+                fields[setting.path] = _setting_field(setting, values[setting.path])
+                listen = gr.Button("▶ Послушать", scale=0, min_width=160)
+            note = gr.Markdown(visible=False)
+            player = gr.Audio(label="Образец голоса", type="filepath", autoplay=True, interactive=False,
+                              visible=False, show_label=False)
+        listen.click(lambda voice, path=setting.path: _listen_started(path, voice), fields[setting.path],
+                     [listen, note, player], queue=False).then(
+            lambda voice, path=setting.path: _listen_outputs(path, voice), fields[setting.path],
+            [listen, note, player])
+    for setting in boxes:
+        fields[setting.path] = _setting_field(setting, values[setting.path])
+
+
+def _listen_started(path: tuple[str, ...], voice: Any) -> tuple[Any, Any, Any]:
+    """Shown at once on the click: the button waits, the line says what happens and how long it may take."""
+    engine = VOICE_ENGINE[tuple(path)]
+    if voice is not None and str(voice).strip() and voice_preview.preview_path(engine, voice).exists():
+        text = "⏳ Включаю образец…"
+    elif engine == "vosk" and voice_preview.VOSK_PREPARING.is_set():
+        text = "⏳ Образцы голосов Vosk ещё готовятся после запуска программы (до 1,5 мин), дождитесь…"
+    else:
+        wait = "до 45 с" if engine == "vosk" else "около 15 с"
+        text = f"⏳ Готовлю образец этого голоса ({wait}, только в первый раз)…"
+    return (gr.update(value="⏳ Готовлю…", interactive=False), gr.update(value=text, visible=True),
+            gr.update(value=None, visible=False))
+
+
+def _listen_outputs(path: tuple[str, ...], voice: Any) -> tuple[Any, Any, Any]:
+    sound, message = listen_voice(path, voice)
+    text = f"✅ {message} Звучит фраза-образец." if sound else f"❌ {message}"
+    return (gr.update(value="▶ Послушать", interactive=True), gr.update(value=text, visible=True),
+            gr.update(value=sound, visible=sound is not None))
+
+
+def wait_state(label: str, note: str) -> tuple[Any, str]:
+    """First step of a medium action (a few seconds to a minute): the button waits, a line says what happens."""
+    return gr.update(value=f"⏳ {label}", interactive=False), f"⏳ {note}"
+
+
+def ready_button(label: str) -> Any:
+    return gr.update(value=label, interactive=True)
+
+
+def find_spot_done(out_root: str, episode: str | None, engine: str) -> tuple[Any, Any, str]:
+    minute, message = find_spot(out_root, episode, engine)
+    return ready_button("Найти самое громкое место"), minute, message
+
+
+def listen_mix_done(*args: Any) -> tuple[Any, Any, Any, str]:
+    new, now, message = listen_mix(*args)
+    return ready_button("Послушать"), new, now, message
+
+
+def cache_done(delete: bool, label: str) -> tuple[Any, str]:
+    try:
+        message = tts_cache(delete)
+    except Exception as error:  # noqa: BLE001 - shown to the person, details in the log
+        log.exception("tts cache")
+        message = f"❌ Не получилось: {error}"
+    return ready_button(label), message
+
+
+# ---------------------------------------------------------------- the season bar
+
+def season_picker(selected: seasons.Season | None = None) -> Any:
+    """The picker's choices and value: the remembered seasons (or the ones found next to the configured folders)."""
+    found = seasons.available(base_config())
+    current = selected or seasons.pick_current(found)
+    if current is not None and current.source not in {s.source for s in found}:
+        found.append(current)
+    return gr.update(choices=seasons.choices(found), value=str(current.source) if current else None)
+
+
+def select_season(source: str | None, previous: str = "") -> tuple[Any, ...]:
+    """The picker changed: (source, results, summary line, episode list, message, episode table, question panel,
+    question text, button "settings of the previous season", the pair the question is about); the choice is saved.
+    ``previous`` is the results folder of the season shown before: when the new season has no settings of its own and
+    the previous one had some that differ from the global ones, the panel asks which to take."""
+    season = seasons.choose(source, base_config()) if source else None
+    no_question = (gr.update(visible=False), "", gr.update(), None)
+    if season is None:
+        return "", "", seasons.summary(None), gr.update(choices=[], value=[]), "", [], *no_question
+    names = seasons.video_names(season.source)
+    if not season.source.is_dir():
+        note = f"⚠ Папка с оригиналами {season.source} недоступна (диск не подключён?)."
+    elif not names:
+        note = f"⚠ В папке {season.source} нет видео."
+    else:
+        note = f"Сезон «{season.name}»: {seasons.episodes_word(len(names))}."
+    question = no_question
+    before = _root(previous) if previous else None
+    if season_settings.should_ask(before, season.results, base_config()):
+        assert before is not None
+        previous_name = _season_name(before)
+        question = (gr.update(visible=True), f"**У сезона {season.name} нет своих настроек. Какие взять?**",
+                    gr.update(value=f"Настройки сезона {previous_name}"), [str(before), str(season.results)])
+    return (str(season.source), str(season.results), season_line_text(season),
+            gr.update(choices=seasons.episode_choices(names), value=[]), note, seasons.table(season), *question)
+
+
+def _season_name(results: Path) -> str:
+    """The name of the season whose results folder is ``results`` (from the remembered seasons, else the folder name)."""
+    found = next((s for s in seasons.remembered() if s.results == results), None)
+    if found is not None:
+        return found.name
+    return results.name[len(seasons.RESULTS_PREFIX):] if results.name.startswith(seasons.RESULTS_PREFIX) else results.name
+
+
+def answer_settings_question(pending: list[str] | None, copy: bool) -> tuple[Any, str]:
+    """The answer to "Какие взять?": copy the previous season's file into the new season's folder, or leave the
+    global settings in effect. Returns (the panel, the message)."""
+    hidden = gr.update(visible=False)
+    if not pending or len(pending) != 2:
+        return hidden, ""
+    before, new = Path(pending[0]), Path(pending[1])
+    name = _season_name(new)
+    if not copy:
+        return hidden, f"Для сезона {name} действуют общие настройки."
+    try:
+        path = season_settings.copy_own(before, new)
+    except OSError as error:
+        return hidden, f"❌ Не получилось скопировать настройки: {error}. Действуют общие настройки."
+    return hidden, f"Для сезона {name} действуют настройки сезона {_season_name(before)}, скопированные в `{path}`."
+
+
+def season_table(source: str, results: str) -> list[list[str]]:
+    """The state of every episode of the season (the timer calls this: folder listings only)."""
+    if not source or not results:
+        return []
+    return seasons.table(seasons.Season(Path(source), Path(results)))
+
+
+def source_changed(text: str) -> tuple[str, Any]:
+    """The folder of the new season was typed: what was found there, and the suggested results folder."""
+    ok, note = seasons.describe_source(text)
+    return note, (gr.update(value=str(seasons.suggest_results(text))) if ok else gr.update())
+
+
+def results_changed(source: str, results: str) -> str:
+    return seasons.describe_results(source, results)[1]
+
+
+def save_season(source: str, results: str) -> tuple[str, Any, Any]:
+    """"Сохранить сезон": check both folders, create the results folder, remember and select the season."""
+    season, problem = seasons.validate(source, results)
+    if season is None:
+        return problem, gr.update(), gr.update()
+    try:
+        season.results.mkdir(parents=True, exist_ok=True)
+        seasons.remember(season, base_config())
+    except OSError as error:
+        return f"❌ Не получилось сохранить: {error}", gr.update(), gr.update()
+    return f"✅ Сезон «{season.name}» сохранён и выбран.", season_picker(season), gr.update(visible=False)
 
 
 def build() -> gr.Blocks:
@@ -791,16 +1308,52 @@ def build() -> gr.Blocks:
     start_values = form_defaults()
     with gr.Blocks(title="Озвучка сериалов") as app:
         gr.Markdown("# Озвучка сериалов\nАнглийское видео → русская закадровая озвучка.")
-        with gr.Tab("Обработка"):
+        folder = gr.State("")  # the folder with the original episodes of the current season
+        out_root = gr.State("")  # its results folder: work folders, season files, finished videos
+        with gr.Row(equal_height=False):
+            season_pick = gr.Dropdown(label="Сезон", choices=[], value=None, scale=5,
+                                      info="Один сезон для всех вкладок: папка с оригиналами и папка результатов")
+            new_season = gr.Button("＋ Новый сезон", scale=1, min_width=160)
+        season_line = gr.Markdown(seasons.summary(None))
+        with gr.Column(visible=False) as season_form:
+            with gr.Row(equal_height=False):
+                new_source = gr.Textbox(label="Папка с оригинальными сериями", placeholder="/media/.../Survivor/Season_48",
+                                        scale=6)
+                pick_source = gr.Button("📁 Выбрать…", scale=1, min_width=140)
+            source_note = gr.Markdown()
+            with gr.Row(equal_height=False):
+                new_results = gr.Textbox(label="Папка результатов (можно изменить)",
+                                         info="Здесь будет всё: папки серий, файлы сезона, готовые видео. "
+                                              "Если папки нет, она создаётся при «Сохранить сезон»",
+                                         scale=6)
+                pick_results = gr.Button("📁 Выбрать…", scale=1, min_width=140)
+            results_note = gr.Markdown()
+            pick_message = gr.Markdown()
+            season_browser = folder_pick.build_browser()
             with gr.Row():
-                folder = gr.Textbox(label="Папка с сериями", value="/media/angrybear/large_storage/Survivor",
-                                    scale=4)
-                show = gr.Button("Показать серии", scale=1)
-            episodes = gr.CheckboxGroup(label="Серии", choices=[])
+                season_save = gr.Button("Сохранить сезон", variant="primary")
+                season_cancel = gr.Button("Отмена")
+        with gr.Column(visible=False) as ask_panel:  # which settings a season without its own takes
+            ask_text = gr.Markdown()
+            with gr.Row():
+                ask_copy = gr.Button("Настройки сезона", variant="primary")
+                ask_global = gr.Button("Общие настройки")
+        pending = gr.State(None)  # [results of the previous season, results of the new one] while the question is shown
+        season_message = gr.Markdown()
+        with gr.Row(equal_height=True):  # the running task, on every tab
+            strip = gr.Markdown(strip_text(JOB), elem_id="task-strip")
+            strip_stop = gr.Button("Остановить", variant="stop", size="sm", scale=0, min_width=140,
+                                   visible=bool(JOB and JOB.state == "идёт"))
+        note_boxes: dict[str, Any] = {}  # one line at the top of each tab: what it writes where
+        with gr.Tab("Обработка"):
+            note_boxes["process"] = gr.Markdown(seasons.NO_SEASON_NOTE)
+            show = gr.Button("Обновить список серий")
+            episodes = gr.CheckboxGroup(label="Серии сезона", choices=[])
             with gr.Row():
                 select_all = gr.Button("Выбрать все", size="sm")
                 select_none = gr.Button("Снять выбор", size="sm")
-            out_root = gr.Textbox(label="Рабочая папка (готовые видео: вкладка «Настройки»)", value=start_values[3])
+            season_status = gr.Dataframe(headers=["Серия", "Состояние", "Готовое видео"], label="Серии сезона: состояние",
+                                         interactive=False, wrap=True)
             preset = gr.Radio(label="Набор настроек (ниже можно поправить отдельные пункты)", choices=preset_choices(), value="main")
             with gr.Row():
                 engines = gr.CheckboxGroup(label="Озвучка", choices=list(ENGINES), value=start_values[0])
@@ -810,11 +1363,14 @@ def build() -> gr.Blocks:
                     transport = gr.Radio(label="Запросы к модели", choices=list(TRANSPORTS),
                                          value=list(TRANSPORTS)[0], visible=bool(personal.get("llm_transport_choice")))
             with gr.Row():
-                subtitles = gr.Checkbox(label="Вшить субтитры", value=start_values[4])
-                duck_voices = gr.Checkbox(label="Приглушать только голоса (музыку оставить)", value=start_values[5])
-                stress = gr.Checkbox(label="Проверять ударения", value=start_values[6])
-                refine = gr.Checkbox(label="Уточнять спикеров по голосу", value=start_values[7])
-                f5_fast = gr.Checkbox(label="ESpeech: быстрый режим (7 шагов)", value=start_values[8])
+                subtitles = gr.Checkbox(label="Вшить субтитры", value=start_values[3])
+                duck_voices = gr.Checkbox(label="Приглушать только голоса (музыку оставить)", value=start_values[4])
+                stress = gr.Checkbox(label="Проверять ударения", value=start_values[5])
+                refine = gr.Checkbox(label="Уточнять спикеров по голосу", value=start_values[6])
+                f5_fast = gr.Checkbox(label="ESpeech: быстрый режим (7 шагов)", value=start_values[7])
+            voice_model = gr.Checkbox(label="Скачать дообученную модель голосов перед обработкой (115 МБ, один раз)",
+                                      info="Точнее определяет, кто говорит. Без неё берётся обычная модель.",
+                                      value=True, visible=voice_model_missing())
             with gr.Accordion("Пробный отрывок (быстро проверить настройки)", open=False):
                 preview = gr.Checkbox(label="Только отрывок (в папку _проба)", value=False)
                 with gr.Row():
@@ -822,83 +1378,54 @@ def build() -> gr.Blocks:
                     preview_minutes = gr.Number(label="Минут", value=2)
             with gr.Row():
                 start = gr.Button("Начать", variant="primary")
+                resume = gr.Button("▶ Продолжить", interactive=False)
                 stop = gr.Button("Остановить", variant="stop")
             message = gr.Markdown()
             status = gr.Markdown("Нет запущенной обработки.")
-            progress = gr.Dataframe(headers=["Серия"], label="Ход обработки (этапов из 9)", interactive=False)
-            results = gr.Dataframe(headers=["Серия", "Движок", "Файл"], label="Готовые файлы", interactive=False)
-            log = gr.Textbox(label="Лог", lines=12, max_lines=12, autoscroll=True)
+            progress = gr.Dataframe(headers=["Серия"], label="Ход обработки по этапам", interactive=False, wrap=True)
+            checkpoints = gr.Markdown(label="Контрольные точки")
+            log = gr.Textbox(label="Ход работы", lines=12, max_lines=12, autoscroll=True, interactive=False)
+            results = gr.Dataframe(headers=["Серия", "Движок", "Файл"], label="Готовые файлы", interactive=False,
+                                   wrap=True)
+            with gr.Accordion("Подробный лог", open=False):
+                raw_log = gr.Textbox(label="Лог", lines=12, max_lines=12, autoscroll=True, interactive=False)
 
-            show.click(lambda f: gr.update(choices=list_videos(f), value=[]), folder, episodes)
-            select_all.click(lambda f: gr.update(value=list_videos(f)), folder, episodes)
-            select_none.click(lambda: gr.update(value=[]), None, episodes)
-            preset.change(preset_form, preset, [engines, mode, subtitles, duck_voices, stress, refine, f5_fast])
+            def rescan(f: str) -> tuple[Any, str]:
+                if not f:
+                    return gr.update(), NO_SEASON
+                names = list_videos(f)
+                return gr.update(choices=seasons.episode_choices(names), value=[]), (f"Найдено серий: {len(names)}." if names
+                                                            else f"⚠ В папке {f} нет видео или она недоступна.")
+
+            def pick_all(f: str) -> tuple[Any, str]:
+                names = list_videos(f) if f else []
+                return gr.update(value=names), (f"Выбрано серий: {len(names)}." if names else NO_SEASON)
+
+            show.click(rescan, folder, [episodes, message])
+            select_all.click(pick_all, folder, [episodes, message])
+            select_none.click(lambda: (gr.update(value=[]), "Выбор снят."), None, [episodes, message])
+            preset.change(preset_form, [preset, out_root], [engines, mode, subtitles, duck_voices, stress, refine, f5_fast])
             start.click(start_with_preset, [folder, episodes, out_root, engines, mode, model, subtitles, duck_voices, stress,
-                                            refine, preview, preview_from, preview_minutes, f5_fast, transport, preset], message)
+                                            refine, preview, preview_from, preview_minutes, f5_fast, transport, voice_model, preset],
+                        message)
             stop.click(stop_job, None, message)
-            gr.Timer(2.0).tick(refresh, None, [status, progress, log, results])
+            resume.click(resume_job, None, message)
+            gr.Timer(2.0).tick(refresh, None, [status, progress, log, results, checkpoints, raw_log, resume])
+            gr.Timer(2.0).tick(strip_view, None, [strip, strip_stop], show_progress="hidden")
+            strip_stop.click(stop_job, None, strip)
+            gr.Timer(2.0).tick(season_table, [folder, out_root], season_status, show_progress="hidden")
 
-        with gr.Tab("Банк голосов"):
-            gr.Markdown("Банк собирается сам при обработке серий: голоса названных героев сезона. "
-                        "Здесь можно вырезать образцы голосов для будущей озвучки голосами героев, "
-                        "послушать их и заменить неудачные.")
-            with gr.Row():
-                bank_root = gr.Textbox(label="Папка результатов", value="output/stt", scale=3)
-                bank = gr.Dropdown(label="Сезон", choices=[], scale=3)
-                bank_refresh = gr.Button("Обновить", scale=1)
-            people = gr.Dataframe(headers=["Имя", "По-русски", "Пол", "Серий", "Речи, мин", "Образец"],
-                                  label="Люди сезона", interactive=False)
-            with gr.Row():
-                export_all = gr.Button("Собрать образцы (все)", variant="primary")
-                recheck = gr.Button("Перепроверить имена по сезону")
-                write_fixes = gr.Button("Записать исправления имён")
-            bank_message = gr.Textbox(label="Результат", lines=6)
-            person = gr.Dropdown(label="Человек", choices=[])
-            with gr.Row():
-                reference = gr.Audio(label="Образец голоса", type="filepath", interactive=False)
-                reference_info = gr.Markdown()
-            another = gr.Button("Другой образец для этого человека")
-
-            def load_bank(root: str, name: str | None) -> tuple[Any, Any, Any]:
-                banks = list_banks(root)
-                name = name if name in banks else (banks[0] if banks else None)
-                rows = people_rows(root, name) if name else []
-                return (gr.update(choices=banks, value=name), gr.update(value=rows),
-                        gr.update(choices=[r[0] for r in rows], value=None))
-
-            def run_export(root: str, name: str) -> tuple[str, Any]:
-                if not name:
-                    return "Выберите сезон.", gr.update()
-                code, out = _bank_cmd(root, name, "--export", str(refs_dir(root, name)))
-                return (out if code == 0 else f"Ошибка (код {code}):\n{out}"), gr.update(value=people_rows(root, name))
-
-            def run_another(root: str, name: str, who: str) -> tuple[Any, str, Any]:
-                if not (name and who):
-                    return None, "Выберите сезон и человека.", gr.update()
-                code, out = _bank_cmd(root, name, "--export", str(refs_dir(root, name)), "--person", who, "--reject")
-                audio, info = person_view(root, name, who)
-                return audio, info if code == 0 else f"Ошибка (код {code}):\n{out}", gr.update(
-                    value=people_rows(root, name))
-
-            bank_refresh.click(load_bank, [bank_root, bank], [bank, people, person])
-            bank.change(load_bank, [bank_root, bank], [bank, people, person])
-            export_all.click(run_export, [bank_root, bank], [bank_message, people])
-            recheck.click(lambda root, name: _bank_cmd(root, name, "--recheck")[1] if name else "Выберите сезон.",
-                          [bank_root, bank], bank_message)
-            write_fixes.click(lambda root, name: _bank_cmd(root, name, "--recheck", "--write-overrides")[1]
-                              if name else "Выберите сезон.", [bank_root, bank], bank_message)
-            person.change(lambda root, name, who: person_view(root, name, who), [bank_root, bank, person],
-                          [reference, reference_info])
-            another.click(run_another, [bank_root, bank, person], [reference, reference_info, people])
+        with gr.Tab("Голоса сезона"):
+            voices_tab = voices.build(sys.modules[__name__], folder, out_root, voice_model)
 
         with gr.Tab("Проверка и правка реплик"):
+            note_boxes["edits"] = gr.Markdown(seasons.NO_SEASON_NOTE)
             gr.Markdown("Здесь можно поправить русские реплики серии: текст, говорящего, пол голоса или "
                         "«не озвучивать». Правки копятся в `corrections.json` серии; кнопка «Переозвучить "
                         "изменённое» заново озвучит только изменённые реплики (остальные берутся готовыми), "
                         "серия пересоберётся за минуты. Ударение: `+` перед ударной гласной (`зам+ок`). "
                         "Подробно: вкладка «Справка».")
             with gr.Row():
-                edit_root = gr.Textbox(label="Папка результатов", value="output/stt", scale=3)
                 edit_episode = gr.Dropdown(label="Серия", choices=[], scale=4)
                 edit_refresh = gr.Button("Обновить", scale=1)
             with gr.Row():
@@ -960,45 +1487,57 @@ def build() -> gr.Blocks:
                 return (gr.update(choices=episodes, value=episode), gr.update(value=edit_rows(root, episode, show, query)),
                         gr.update(choices=speaker_choices(root, episode), value=None))
 
+            def refresh_episodes(root: str, episode: str | None, show: str, query: str) -> tuple[Any, ...]:
+                """The "Обновить" button: the lists again, and a line saying what was found."""
+                found = load_episodes(root, episode, show, query)
+                count = len(found[0]["choices"])
+                return (*found, f"Серий с переводом: {count}." if count else
+                        "Переведённых серий в папке результатов пока нет: сначала запустите обработку.")
+
             def pick_line(root: str, episode: str, show: str, query: str, engines: list[str],
                           evt: gr.SelectData) -> tuple[Any, ...]:
                 rows = edit_rows(root, episode, show, query)
                 line = rows[evt.index[0]][0] if rows and evt.index[0] < len(rows) else None
                 if line is None:
                     return (None, "", None, None, "", "", "", None, None, False)
-                original, dub, info = line_audio(root, episode, line, [ENGINES[e] for e in engines])
-                text, fit_note, choice, gender, skip, hint = line_form(root, episode, line)
+                try:
+                    original, dub, info = line_audio(root, episode, line, [ENGINES[e] for e in engines])
+                    text, fit_note, choice, gender, skip, hint = line_form(root, episode, line)
+                except Exception as error:  # noqa: BLE001 - shown to the person, details in the log
+                    log.exception("opening line %s", line)
+                    return line, f"❌ Не получилось открыть реплику {line}: {error}", None, None, "", "", "", None, None, False
                 return line, info, original, dub, hint, text, fit_note, choice, gender, skip
 
             def saved(root: str, episode: str, show: str, query: str, message: str) -> tuple[str, Any]:
                 return message, gr.update(value=edit_rows(root, episode, show, query))
 
-            listing = [edit_root, edit_episode, edit_show, edit_query]
-            edit_refresh.click(load_episodes, listing, [edit_episode, edit_table, edit_speaker])
+            listing = [out_root, edit_episode, edit_show, edit_query]
+            edit_refresh.click(refresh_episodes, listing, [edit_episode, edit_table, edit_speaker, edit_message])
             edit_episode.change(load_episodes, listing, [edit_episode, edit_table, edit_speaker])
             edit_show.change(lambda r, e, sh, q: gr.update(value=edit_rows(r, e, sh, q)), listing, edit_table)
             edit_query.submit(lambda r, e, sh, q: gr.update(value=edit_rows(r, e, sh, q)), listing, edit_table)
             edit_table.select(pick_line, [*listing, review_engines],
                               [line_no, line_text, original_audio, dub_audio, line_hint, edit_text, edit_fit,
                                edit_speaker, edit_gender, edit_skip])
-            edit_text.change(fit_text, [edit_root, edit_episode, line_no, edit_text], edit_fit)
-            edit_speaker.change(speaker_sample, [edit_root, edit_episode, edit_speaker], sample_audio)
+            edit_text.change(fit_text, [out_root, edit_episode, line_no, edit_text], edit_fit)
+            edit_speaker.change(speaker_sample, [out_root, edit_episode, edit_speaker], sample_audio)
             save_button_line.click(
                 lambda r, e, sh, q, n, t, who, g, sk: saved(r, e, sh, q, save_line(r, e, n, t, who, g, sk)),
                 [*listing, line_no, edit_text, edit_speaker, edit_gender, edit_skip], [edit_message, edit_table])
             undo_button_line.click(lambda r, e, sh, q, n: saved(r, e, sh, q, undo_line(r, e, n)),
                                    [*listing, line_no], [edit_message, edit_table])
-            export_button.click(export_subtitles, [edit_root, edit_episode, export_kind, export_scope],
+            export_button.click(export_subtitles, [out_root, edit_episode, export_kind, export_scope],
                                 [export_out, edit_message])
-            import_preview.click(import_rows, [edit_root, edit_episode, import_file], [import_table, edit_message])
+            import_preview.click(import_rows, [out_root, edit_episode, import_file], [import_table, edit_message])
             import_button.click(lambda r, e, sh, q, f: saved(r, e, sh, q, import_apply(r, e, f)),
                                 [*listing, import_file], [edit_message, edit_table])
-            revoice_button.click(revoice, [edit_root, edit_episode, review_engines], edit_message)
+            revoice_button.click(revoice, [out_root, edit_episode, review_engines], edit_message)
 
         with gr.Tab("Звук и размер видео"):
+            note_boxes["sound"] = gr.Markdown(seasons.NO_SEASON_NOTE)
             mix_start = mix_form_defaults()
             gr.Markdown("### Громкость голосов\nСоберите короткий отрывок (45 секунд) с вашими настройками и "
-                        "сравните с тем, что сейчас в серии. Остальную серию программа не трогает. Серии берутся из рабочей папки на вкладке «Обработка».")
+                        "сравните с тем, что сейчас в серии. Остальную серию программа не трогает. Серии берутся из папки результатов выбранного сезона.")
             with gr.Row():
                 mix_episode = gr.Dropdown(label="Серия (с готовой озвучкой)", choices=[], scale=3)
                 mix_refresh = gr.Button("Обновить список", scale=1)
@@ -1038,33 +1577,48 @@ def build() -> gr.Blocks:
                 vid_go = gr.Button("Сжать", variant="primary")
                 vid_sample = gr.Button("Пробный кусок 60 с")
             vid_message = gr.Markdown()
-            vid_status = gr.Markdown()
             mix_inputs = [mix_gain, mix_rest, mix_duck, mix_lufs, vid_compress, vid_gb, vid_codec]
-            mix_refresh.click(mix_episodes, out_root, mix_episode)
-            mix_spot.click(find_spot, [out_root, mix_episode, mix_engine], [mix_minute, mix_message])
-            mix_listen.click(listen_mix, [out_root, mix_episode, mix_engine, mix_minute, mix_gain, mix_rest, mix_duck,
-                                          mix_lufs], [mix_new, mix_now, mix_message])
-            save_event = mix_save.click(save_mix_settings, mix_inputs, mix_saved)
+            mix_refresh.click(mix_episodes_listed, out_root, [mix_episode, mix_message])
+            mix_spot.click(lambda: wait_state("Ищу…", "Ищу самое громкое место серии — до 30 секунд…"), None,
+                           [mix_spot, mix_message], queue=False).then(
+                find_spot_done, [out_root, mix_episode, mix_engine], [mix_spot, mix_minute, mix_message])
+            mix_listen.click(lambda: wait_state("Собираю…", "Собираю отрывок в 45 секунд — около 20 секунд…"), None,
+                             [mix_listen, mix_message], queue=False).then(
+                listen_mix_done, [out_root, mix_episode, mix_engine, mix_minute, mix_gain, mix_rest, mix_duck, mix_lufs],
+                [mix_listen, mix_new, mix_now, mix_message])
             mix_redo.click(remix, [out_root, mix_episode], mix_saved)
-            vid_refresh.click(finished_videos, out_root, vid_path)
-            vid_go.click(lambda p, g, c: start_compress(p, False, g, c), [vid_path, vid_gb, vid_codec], vid_message)
-            vid_sample.click(lambda p, g, c: start_compress(p, True, g, c), [vid_path, vid_gb, vid_codec], vid_message)
-            gr.Timer(3.0).tick(compress_status, None, vid_status)
+            vid_refresh.click(videos_listed, out_root, [vid_path, vid_message])
+            vid_go.click(lambda p, g, c, r: start_compress(p, False, g, c, r), [vid_path, vid_gb, vid_codec, out_root],
+                         vid_message)
+            vid_sample.click(lambda p, g, c, r: start_compress(p, True, g, c, r), [vid_path, vid_gb, vid_codec, out_root],
+                             vid_message)
 
         with gr.Tab("Настройки"):
-            gr.Markdown("Значения по умолчанию для новых запусков. Сохраняются в `stt_config.local.json` "
-                        "(только отличия от `stt_config.json`; прежняя версия файла: `.bak`).")
-            fields = []
-            values = settings.form_values(base_config())
+            note_boxes["settings"] = gr.Markdown(seasons.NO_SEASON_NOTE)
+            with gr.Row(equal_height=False):
+                global_box = gr.Textbox(label="Общие настройки (файл)", value=str(season_settings.global_path()),
+                                        info="По умолчанию stt_config.local.json в папке программы; можно выбрать другой файл "
+                                             "(если его нет, он создаётся как копия нынешних общих настроек)", scale=6)
+                pick_global = gr.Button("📁 Выбрать…", scale=1, min_width=140)
+                use_global = gr.Button("Использовать этот файл", scale=1, min_width=200)
+            gr.Markdown("Каждый сезон сначала берёт общие настройки. Настройки сезона хранятся в папке его результатов "
+                        "и действуют только для него.")
+            global_pick_message = gr.Markdown()
+            global_browser = folder_pick.build_browser("Выбор файла общих настроек")
+            effect = gr.Markdown(effect_text(None))
+            target = gr.Radio(label="Сохранять изменения в", choices=target_choices(None), value=TARGET_GLOBAL)
+            gr.Markdown("Показаны значения, которые действуют для выбранного сезона. Сохраняются только отличия от "
+                        "`stt_config.json` (прежняя версия файла: `.bak`); в настройки сезона записываются все значения.")
+            by_path: dict[tuple[str, ...], Any] = {}
+            values = dict(zip((s.path for s in settings.SETTINGS), settings.form_values(base_config())))
             for group in dict.fromkeys(s.group for s in settings.SETTINGS):
                 gr.Markdown(f"### {group}")
-                with gr.Row(equal_height=False):
-                    for setting, value in zip(settings.SETTINGS, values):
-                        if setting.group == group:
-                            fields.append(_setting_field(setting, value))
+                _settings_group(group, values, by_path)
+            fields = [by_path[s.path] for s in settings.SETTINGS]  # save / reset take the form in SETTINGS order
             with gr.Row():
                 save_button = gr.Button("Сохранить", variant="primary")
                 reset_button = gr.Button("Сбросить к стандартным")
+                remove_button = gr.Button("Убрать настройки сезона (вернуть общие)", visible=False)
             settings_message = gr.Markdown()
             gr.Markdown("### Кэш озвучки\nКаждая озвученная реплика хранится в `output/tts_cache`: повторный "
                         "запуск берёт её оттуда. Реплики, которые не нужны ни одной серии, можно удалить.")
@@ -1072,24 +1626,72 @@ def build() -> gr.Blocks:
                 cache_check = gr.Button("Сколько освободится")
                 cache_clean = gr.Button("Очистить кэш озвучки", variant="stop")
             cache_message = gr.Markdown()
-            cache_check.click(lambda: tts_cache(False), None, cache_message)
-            cache_clean.click(lambda: tts_cache(True), None, cache_message)
-            form = [engines, mode, model, out_root, subtitles, duck_voices, stress, refine, f5_fast]
-            save_button_event = save_button.click(save_settings, fields, [settings_message, *form])
-            reset_button_event = reset_button.click(reset_settings, None, [settings_message, *fields, *form])
+            cache_check.click(lambda: wait_state("Считаю…", "Считаю размер кэша — до минуты…"), None,
+                              [cache_check, cache_message], queue=False).then(
+                lambda: cache_done(False, "Сколько освободится"), None, [cache_check, cache_message])
+            cache_clean.click(lambda: wait_state("Очищаю…", "Удаляю ненужное из кэша — до минуты…"), None,
+                              [cache_clean, cache_message], queue=False).then(
+                lambda: cache_done(True, "Очистить кэш озвучки"), None, [cache_clean, cache_message])
+            form = [engines, mode, model, subtitles, duck_voices, stress, refine, f5_fast]
 
         with gr.Tab("Справка"):
             gr.Markdown(HELP.read_text(encoding="utf-8") if HELP.exists() else "Справка не найдена.")
-        # The sound fields live in two tabs: saving in one must show in the other, or its next save brings the old values back
-        save_event.then(lambda: settings.form_values(base_config()), None, fields)
-        save_button_event.then(mix_form_defaults, None, mix_inputs)
-        reset_button_event.then(mix_form_defaults, None, mix_inputs)
-        out_root.change(mix_episodes, out_root, mix_episode)
-        app.load(mix_form_defaults, None, mix_inputs)
-        app.load(mix_episodes, out_root, mix_episode)
-        app.load(finished_videos, out_root, vid_path)
-        app.load(lambda: [*settings.form_values(base_config()), *form_defaults()], None, [*fields, *form])
+        # Everything that depends on the season's settings is shown again after a save, a reset and a change of season
+        note_boxes["voices"] = voices_tab.note
+        view_outputs = [*fields, *form, *mix_inputs, effect, target, remove_button, season_line, global_box,
+                        *[note_boxes[tab] for tab in seasons.NOTE_TABS]]
+        view_inputs = [folder, out_root, target]
+        save_event = mix_save.click(save_mix_settings, [out_root, *mix_inputs], mix_saved)
+        save_event.then(settings_view, view_inputs, view_outputs)
+        save_button.click(save_settings, [*view_inputs, *fields], settings_message).then(
+            settings_view, view_inputs, view_outputs)
+        reset_button.click(reset_settings, view_inputs, settings_message).then(settings_view, view_inputs, view_outputs)
+        remove_button.click(remove_season_settings, [folder, out_root], settings_message).then(
+            lambda f, r: settings_view(f, r, None), [folder, out_root], view_outputs)
+        # the global settings file: typed (Enter), the button, or picked with the dialog / in-page browser
+        use_global.click(apply_global, global_box, settings_message).then(settings_view, view_inputs, view_outputs)
+        global_box.submit(apply_global, global_box, settings_message).then(settings_view, view_inputs, view_outputs)
+        for event in folder_pick.wire_browser(global_browser, {"global": global_box},
+                                              {"global": (pick_global, folder_pick.FILE, "Файл общих настроек")},
+                                              global_pick_message):
+            event.then(apply_global, global_box, settings_message).then(settings_view, view_inputs, view_outputs)
+        # the season bar: the picker drives every tab
+        ask_outputs = [ask_panel, ask_text, ask_copy, pending]
+        chosen = season_pick.change(select_season, [season_pick, out_root], [folder, out_root, season_line, episodes,
+                                                                             season_message, season_status, *ask_outputs],
+                                    show_progress="hidden")
+        chosen.then(lambda f, r: settings_view(f, r, None), [folder, out_root], view_outputs)
+        chosen.then(voices_tab.reload, voices_tab.inputs, voices_tab.outputs)
+        chosen.then(load_episodes, [out_root, edit_episode, edit_show, edit_query], [edit_episode, edit_table, edit_speaker])
+        chosen.then(mix_episodes, out_root, mix_episode)
+        chosen.then(finished_videos, out_root, vid_path)
+        for button, copy in ((ask_copy, True), (ask_global, False)):
+            button.click(lambda pair, copy=copy: answer_settings_question(pair, copy), pending,
+                         [ask_panel, season_message]).then(
+                lambda f, r: settings_view(f, r, None), [folder, out_root], view_outputs)
+        new_season.click(lambda: (gr.update(visible=True), "",
+                                  "Укажите папку с оригинальными сериями, например /media/…/Survivor/Season_49."),
+                         None, [season_form, season_message, source_note])
+        season_cancel.click(lambda: (gr.update(visible=False), "Сезон не добавлен."), None, [season_form, season_message])
+        new_source.change(source_changed, new_source, [source_note, new_results], show_progress="hidden")
+        new_results.change(results_changed, [new_source, new_results], results_note, show_progress="hidden")
+        season_save.click(save_season, [new_source, new_results], [season_message, season_pick, season_form])
+        folder_pick.wire_browser(season_browser, {"source": new_source, "results": new_results},
+                                 {"source": (pick_source, folder_pick.FOLDER, "Папка с оригинальными сериями"),
+                                  "results": (pick_results, folder_pick.FOLDER, "Папка результатов")}, pick_message)
+        app.load(season_picker, None, season_pick)
+        app.load(settings_view, view_inputs, view_outputs)
     return app
+
+
+def _prepare_voice_samples() -> None:
+    """The samples of all Vosk voices, made once in the background so "▶ Послушать" plays at once."""
+    try:
+        made = voice_preview.prepare_vosk_voices()
+        if made:
+            log.info("Vosk voice samples made: %d", made)
+    except Exception:  # noqa: BLE001 - only the samples are missing; a click still makes one
+        log.exception("Vosk voice samples")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1097,6 +1699,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=7861)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args(argv)
+    restore_last_job()  # the job of the previous start of the page: running (shown and stoppable) or interrupted
+    threading.Thread(target=_prepare_voice_samples, daemon=True).start()
     # clips and videos may live outside the repo (an absolute output folder, the media drive)
     build().launch(server_name=args.host, server_port=args.port, allowed_paths=[str(REPO_ROOT / "output"), "/media"])
 

@@ -27,6 +27,11 @@ write the fix as ``speakers.override.json`` of that episode (``--write-overrides
     uv run -m stt.voice_bank "output/stt_s20/Season 20.voices.json"            # what the bank holds
     uv run -m stt.voice_bank "output/stt_s20/Season 20.voices.json" --export "output/stt_s20/Season 20.references"
     uv run -m stt.voice_bank "output/stt_s20/Season 20.voices.json" --recheck [--write-overrides]
+
+A person without an automatic clip ("no clean reference") can get one made by hand from time ranges of an
+episode (``--manual-clip``, see ``stt.manual_clip``); manual clips live in ``manual.json`` next to
+``references.json`` and no export ever replaces them. Every export also records, per person left without a
+clip, why candidates fell out (``missing.json``).
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from utils.atomic_io import write_text_atomic
 
 log = logging.getLogger(__name__)
 
@@ -400,12 +407,109 @@ def reject_reference(out_dir: Path, name: str) -> dict[str, Any] | None:
     """Mark a person's current clip as rejected (``rejected.json``); the next export picks another."""
     index = json.loads((out_dir / "references.json").read_text(encoding="utf-8"))
     current = next((r for r in index if r["name"] == name), None)
-    if current is None:
+    if current is None or current.get("source") == "manual":  # a hand-made clip is removed, not rejected
         return None
     rejected = load_rejected(out_dir)
     rejected.append({"name": name, "episode": current["episode"], "start": current["start"]})
-    (out_dir / "rejected.json").write_text(json.dumps(rejected, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    write_text_atomic(out_dir / "rejected.json", json.dumps(rejected, ensure_ascii=False, indent=1) + "\n")
     return current
+
+
+def references_dir(bank_path: Path) -> Path:
+    """The folder of a season's clips next to its bank (``Season 20.voices.json`` -> ``Season 20.references``)."""
+    return bank_path.with_name(bank_path.name.replace(".voices.json", ".references"))
+
+
+def load_json_list(path: Path) -> list[dict[str, Any]]:
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+def load_manual(out_dir: Path) -> list[dict[str, Any]]:
+    """Hand-made clips (``manual.json``): entries of the clip index that no export may replace."""
+    return load_json_list(out_dir / "manual.json")
+
+
+def has_manual(manual: list[dict[str, Any]], name: str) -> bool:
+    return any(same_person(m["name"], name) for m in manual)
+
+
+def write_index(out_dir: Path, auto: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Write ``references.json``: the automatic entries plus the manual ones, which win for their person.
+
+    Always the last file a clip change writes: stt.run compares its time to decide which episodes to voice again.
+    """
+    manual = load_manual(out_dir)
+    index = [r for r in auto if r.get("source") != "manual" and not has_manual(manual, r["name"])]
+    index += [{k: v for k, v in m.items() if k != "replaced"} for m in manual]
+    index.sort(key=lambda r: r["name"])
+    write_if_changed(out_dir / "references.json", json.dumps(index, ensure_ascii=False, indent=1) + "\n")
+    return index
+
+
+def load_missing(out_dir: Path) -> dict[str, dict[str, int]]:
+    """``{person: why no clip}`` recorded by the last exports (``missing.json``)."""
+    path = out_dir / "missing.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    if 10 < n % 100 < 15:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
+def reason_text(why: dict[str, int]) -> str:
+    """One Russian sentence for a ``missing.json`` entry, e.g. "55 кандидатов: в 40 рядом звучат другие голоса,
+    в 15 голос не похож"."""
+    stretches = int(why.get("stretches", 0))
+    if not why.get("episodes"):
+        return "в банке нет эпизодов с аудио и репликами этого человека"
+    if not stretches:
+        n = int(why["episodes"])
+        return (f"нет ни одного отрезка в {SAMPLE_MIN_S:.0f}-{SAMPLE_MAX_S:.0f} секунд, где человек говорит один "
+                f"(просмотрено {n} {_plural(n, 'эпизод', 'эпизода', 'эпизодов')})")
+    parts = []
+    if why.get("rejected"):
+        parts.append(f"{why['rejected']} отклонено вручную")
+    for key, text in (("other_voices", "рядом звучат другие голоса"), ("low_score", "голос не похож на человека"),
+                      ("noisy", "после очистки от музыки часть записи не похожа на человека"),
+                      ("unchecked", "не проверено")):
+        if why.get(key):
+            parts.append(f"в {why[key]} {text}" if key != "unchecked" else f"{why[key]} {text}")
+    word = _plural(stretches, "кандидат", "кандидата", "кандидатов")
+    return f"{stretches} {word}" + (": " + ", ".join(parts) if parts else "")
+
+
+def clip_states(bank_path: Path, out_dir: Path | None = None) -> list[dict[str, Any]]:
+    """One row per person of the bank (and per person with a hand-made clip outside it) for a table.
+
+    ``state``: "manual" / "auto" / "missing"; clips carry ``wav`` (path), ``text``, ``episode``, ``score``,
+    ``music_db``; "missing" rows carry ``reasons`` (counts) and ``reason_ru`` (one sentence). Cheap: reads
+    json files only.
+    """
+    out_dir = out_dir or references_dir(bank_path)
+    bank = VoiceBank.load(bank_path)
+    index = load_json_list(out_dir / "references.json")
+    missing = load_missing(out_dir)
+    rows: list[dict[str, Any]] = []
+    names = [p["name"] for p in bank.people()]
+    extra = [r["name"] for r in index if not any(same_person(r["name"], n) for n in names)]
+    people = {p["name"]: p for p in bank.people()}
+    for name in names + extra:
+        person = people.get(name, {})
+        ref = next((r for r in index if same_person(r["name"], name)), None)
+        known = ref or person
+        row: dict[str, Any] = {"name": name, "label_ru": known.get("label_ru"), "gender": known.get("gender"),
+                               "speech_s": round(person.get("speech_s", 0.0), 1)}
+        if ref:
+            row.update(state="manual" if ref.get("source") == "manual" else "auto", wav=str(out_dir / ref["wav"]),
+                       text=ref.get("text"), episode=ref.get("episode"), start=ref.get("start"), score=ref.get("score"),
+                       music_db=ref.get("music_db"), duration=ref.get("duration"))
+        else:
+            why = next((v for k, v in missing.items() if same_person(k, name)), None)
+            row.update(state="missing", reasons=why, reason_ru=reason_text(why) if why else None)
+        rows.append(row)
+    return rows
 
 
 def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only: str | None = None,
@@ -413,12 +517,14 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
     """Cut the cleanest reference stretch of every person (or only ``only``) into ``out_dir``.
 
     Returns the index (``references.json``; other people's entries are kept when ``only`` is set).
+    People with a hand-made clip (``manual.json``) are skipped and their entries stay in the index.
 
     Candidates: the person's solo stretches in every episode of the bank, without another
     diarized speaker inside. The closest to the person's prints go through vocal separation;
     a candidate needs every 3 s window of its vocals to sound like the person. Clean ones
     (accompaniment more than 20 dB under the voice) win, then the most similar. The clip is
-    the separated vocals, 24 kHz mono, with 1 s of silence at the end.
+    the separated vocals, 24 kHz mono, with 1 s of silence at the end. For a person left without
+    a clip the reasons are counted into ``missing.json``.
     """
     import soundfile as sf
     import soxr
@@ -435,17 +541,30 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
     if (only or missing) and index_path.exists():  # keep the other people's clips
         index = [r for r in json.loads(index_path.read_text(encoding="utf-8")) if r["name"] != only]
     have = {r["name"] for r in index} if missing else set()
+    manual = load_manual(out_dir)
+    why_missing = load_missing(out_dir) if (only or missing) else {}
     rejected = {(r["episode"], round(r["start"], 2)) for r in load_rejected(out_dir)}
     for person in bank.people():
         if (only and person["name"] != only) or person["name"] in have:
+            if person["name"] in have:
+                why_missing.pop(person["name"], None)
+            continue
+        if has_manual(manual, person["name"]):
+            log.info("%s: has a clip made by hand, kept (stt.voice_bank --remove-manual returns to automatic)",
+                     person["name"])
+            why_missing.pop(person["name"], None)
             continue
         mine = [p for p in bank.prints if same_person(p["name"], person["name"])]
         prints = [_unit(p["embedding"]) for p in mine]
+        why = {"episodes": 0, "stretches": 0, "rejected": 0, "other_voices": 0, "low_score": 0, "noisy": 0,
+               "unchecked": 0}
+        looked: set[str] = set()
         candidates = []
         for p in mine:
             episode_dir = bank.path.parent / p["episode"]
             if not (episode_dir / "audio.wav").exists() or not (episode_dir / "subs.en.json").exists():
                 continue
+            looked.add(p["episode"])
             records = json.loads((episode_dir / "subs.en.json").read_text(encoding="utf-8"))
             if p["episode"] not in audio_cache:
                 audio_cache[p["episode"]] = sf.read(str(episode_dir / "audio.wav"), dtype="float32")
@@ -454,14 +573,22 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
             offset = float(json.loads(source.read_text(encoding="utf-8")).get("start") or 0.0) if source.exists() else 0.0
             for sample in reference_samples(p["speaker"], records, limit=None):
                 if (p["episode"], round(sample["start"], 2)) in rejected:
+                    why["stretches"] += 1
+                    why["rejected"] += 1
                     continue
                 start, end = sample["start"] - offset, sample["end"] - offset
-                if start < 0 or other_voice_seconds(episode_dir, p["speaker"], start, end) > MAX_OTHER_VOICE_S:
+                if start < 0:
+                    continue
+                why["stretches"] += 1
+                if other_voice_seconds(episode_dir, p["speaker"], start, end) > MAX_OTHER_VOICE_S:
+                    why["other_voices"] += 1
                     continue
                 vector = embed(audio[int(start * sr):int(end * sr)], sr)
                 candidates.append({**sample, "episode": p["episode"], "speaker": p["speaker"],
                                    "score": round(max(float(vector @ q) for q in prints), 3)})
+        why["episodes"] = len(looked)
         candidates.sort(key=lambda c: -c["score"])
+        why["low_score"] = sum(1 for c in candidates if c["score"] < MIN_SAMPLE_SCORE)
         best: dict[str, Any] | None = None
         for c in candidates[:SEPARATE_TOP]:
             if c["score"] < MIN_SAMPLE_SCORE:
@@ -472,39 +599,61 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
             mono16 = soxr.resample(vocals.mean(0), separate.rate, 16_000)
             windows = _window_scores(embed, mono16, 16_000, prints)
             if min(windows) < MIN_WINDOW_SCORE:
+                why["noisy"] += 1
                 continue
             c = {**c, "music_db": music_db, "min_window": round(min(windows), 3), "_vocals": vocals}
             if best is None or (c["music_db"] < MUSIC_DB, c["score"]) > (best["music_db"] < MUSIC_DB, best["score"]):
                 best = c
         if best is None:
-            log.info("%s: no clean reference among %d candidates", person["name"], len(candidates))
+            why["unchecked"] = max(0, len(candidates) - why["low_score"] - why["noisy"])
+            why_missing[person["name"]] = why
+            log.info("%s: no clean reference among %d candidates (%s)", person["name"], len(candidates),
+                     reason_text(why))
             (out_dir / f"{_safe_name(person['name'])}.wav").unlink(missing_ok=True)
             continue
-        voice = soxr.resample(best.pop("_vocals").mean(0), separate.rate, CLONE_RATE).astype(np.float32)
-        fade = int(0.05 * CLONE_RATE)
-        voice[:fade] *= np.linspace(0, 1, fade, dtype=np.float32)
-        voice[-2 * fade:] *= np.linspace(1, 0, 2 * fade, dtype=np.float32)
-        voice = np.concatenate([voice, np.zeros(CLONE_RATE, dtype=np.float32)])
+        why_missing.pop(person["name"], None)
+        voice = _finish_voice(soxr.resample(best.pop("_vocals").mean(0), separate.rate, CLONE_RATE))
         stem = _safe_name(person["name"])
         sf.write(str(out_dir / f"{stem}.wav"), voice, CLONE_RATE, subtype="PCM_16")
         if transcriber is None:  # what is actually said in the clip: its edges may cut a word of the cue
-            from stt.asr import create_backend
-
-            transcriber = create_backend("whisper-large-v3", device=device)
-            transcriber.load()
-        heard = " ".join(seg.text for seg in transcriber.transcribe(
-            soxr.resample(voice, CLONE_RATE, 16_000).astype(np.float32), [(0.0, len(voice) / CLONE_RATE)]))
-        text = heard.strip() or _words(bank.path.parent / best["episode"], best["start"], best["end"]) or best["text"]
-        (out_dir / f"{stem}.txt").write_text(text + "\n", encoding="utf-8")
+            transcriber = load_transcriber(device)
+        heard = transcribe_clip(transcriber, voice)
+        text = heard or _words(bank.path.parent / best["episode"], best["start"], best["end"]) or best["text"]
+        write_text_atomic(out_dir / f"{stem}.txt", text + "\n")
         index.append({"name": person["name"], "label_ru": person.get("label_ru"), "gender": person.get("gender"),
                       "wav": f"{stem}.wav", "text": text, "candidates": len(candidates),
                       **{k: best[k] for k in ("episode", "speaker", "start", "end", "score", "min_window", "music_db")}})
         log.info("%-24s %s %.1f-%.1fs score %.2f, windows >= %.2f, music %+.0f dB (%d candidates)", person["name"],
                  short(best["episode"]), best["start"], best["end"], best["score"], best["min_window"],
                  best["music_db"], len(candidates))
-    index.sort(key=lambda r: r["name"])
-    write_if_changed(index_path, json.dumps(index, ensure_ascii=False, indent=1) + "\n")
-    return index
+    write_text_atomic(out_dir / "missing.json", json.dumps(dict(sorted(why_missing.items())), ensure_ascii=False,
+                                                           indent=1) + "\n")
+    return write_index(out_dir, index)
+
+
+def _finish_voice(voice: np.ndarray) -> np.ndarray:
+    """A reference clip's last touches: 50 ms fade in, 100 ms fade out, 1 s of silence at the end."""
+    voice = np.array(voice, dtype=np.float32)
+    fade = int(0.05 * CLONE_RATE)
+    voice[:fade] *= np.linspace(0, 1, fade, dtype=np.float32)[:len(voice)]
+    voice[-2 * fade:] *= np.linspace(1, 0, 2 * fade, dtype=np.float32)[-len(voice):]
+    return np.concatenate([voice, np.zeros(CLONE_RATE, dtype=np.float32)])
+
+
+def load_transcriber(device: str) -> Any:
+    from stt.asr import create_backend
+
+    transcriber = create_backend("whisper-large-v3", device=device)
+    transcriber.load()
+    return transcriber
+
+
+def transcribe_clip(transcriber: Any, voice: np.ndarray) -> str:
+    """What is said in a finished clip (24 kHz), by Whisper."""
+    import soxr
+
+    return " ".join(seg.text for seg in transcriber.transcribe(
+        soxr.resample(voice, CLONE_RATE, 16_000).astype(np.float32), [(0.0, len(voice) / CLONE_RATE)])).strip()
 
 
 def write_if_changed(path: Path, text: str) -> bool:
@@ -512,7 +661,7 @@ def write_if_changed(path: Path, text: str) -> bool:
     the episodes voiced with these clips are not voiced again (stt.run compares the times)."""
     if path.exists() and path.read_text(encoding="utf-8") == text:
         return False
-    path.write_text(text, encoding="utf-8")
+    write_text_atomic(path, text)
     return True
 
 
@@ -531,6 +680,22 @@ def main(argv: list[str] | None = None) -> int:
                         help="With --export: only people without a clip yet (a person keeps one voice)")
     parser.add_argument("--reject", action="store_true",
                         help="With --export and --person: reject the current clip and pick another")
+    parser.add_argument("--manual-clip", action="store_true",
+                        help="Make a person's clip by hand from --media and --range (needs --person)")
+    parser.add_argument("--remove-manual", action="store_true", help="Delete the person's hand-made clip")
+    parser.add_argument("--media", type=Path, default=None, help="With --manual-clip: the episode's video")
+    parser.add_argument("--range", action="append", default=[],
+                        help="With --manual-clip: a stretch where only the person speaks, 12:30-12:41 (repeatable)")
+    parser.add_argument("--text", default=None, help="With --manual-clip: the clip's transcript (else Whisper)")
+    parser.add_argument("--gender", choices=["female", "male"], default=None,
+                        help="With --manual-clip: for a person who is not in the bank")
+    parser.add_argument("--preview", type=Path, default=None,
+                        help="With --manual-clip: only write the clip here and show text and warnings")
+    parser.add_argument("--json", action="store_true",
+                        help="With --manual-clip: print the clip as one JSON line ({wav, duration, text, warnings, "
+                             "similarity, pieces}), or {error} on failure (for the UI)")
+    parser.add_argument("--refs", type=Path, default=None,
+                        help="With --manual-clip/--remove-manual: the clips folder (default: next to the bank)")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--recheck", action="store_true", help="List prints other episodes know by another name")
     parser.add_argument("--write-overrides", action="store_true",
@@ -538,6 +703,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     bank = VoiceBank.load(args.bank)
+    if args.manual_clip or args.remove_manual:
+        from stt.manual_clip import run_cli
+
+        return run_cli(args, bank)
     if args.export:
         if args.reject and args.person:
             reject_reference(args.export, args.person)

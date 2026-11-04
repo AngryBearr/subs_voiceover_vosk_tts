@@ -107,8 +107,10 @@ All commands below are run from the repository root. `uv run -m ...` and
 `subs_env/bin/python -m ...` are equivalent.
 
 **Trained speaker weights are not in git.** The file `models/speaker/resnet293-ft/avg_model.pt`
-(115 MB) is not part of the repository. Without it the pipeline logs a warning and uses the plain
-`resnet293` model, which is slightly less accurate (section 10). See
+(115 MB) is not part of the repository; it is on
+[Hugging Face](https://huggingface.co/AngryBear9019/wespeaker-resnet293-survivor-ft). The tick on the processing tab
+downloads it once before the work starts (`stt.run --download-voice-model` from the command line). Without it the
+pipeline logs a warning and uses the plain `resnet293` model, which is slightly less accurate (section 10). See
 [section 19](#19-training-the-speaker-model) for how it was made.
 
 ## 4. Keys and personal settings
@@ -142,9 +144,12 @@ shared config into this file. Do not paste keys or tokens anywhere else.
 bash scripts/run_ui.sh        # opens http://127.0.0.1:7861 (PORT=... for another port)
 ```
 
-On the tab "Обработка" choose the folder with your episodes, tick the episodes, pick a preset
+At the top of the page pick a season ("＋ Новый сезон": the folder with the original episodes; the results folder
+`STT_<season>` next to it is suggested and holds everything). On the tab "Обработка" tick the episodes, pick a preset
 and press "Начать". The browser can be closed; the job goes on. If you stop it, the next run
-continues where it stopped.
+continues where it stopped. To pick a folder, "📁 Выбрать…" opens the desktop's own folder dialog (`zenity`) when the
+page runs on a computer with a desktop; otherwise a small folder browser opens on the page. Every tab has a line at
+the top saying what it writes where.
 
 ### Through the command line
 
@@ -300,6 +305,8 @@ is involved.
 - An episode that already has `subs.ru.json` is left alone, so a re-run never repeats the
   translation and the voice-over. `--force speakers` assigns it again.
 - The first-pass files are kept as `*.before_voices.json`; `season_voices.json` records what moved.
+- The button "Уточнить, кто говорит" on the "Голоса сезона" tab counts them again for the chosen season without
+  processing anything else (`stt.run <videos> --season-voices-only`). Translated episodes stay as they are.
 - By hand: `subs_env/bin/python -m stt.season_voices /path/to/work/season [--episodes "*S51E0[23]*"] [--dry-run]`.
 
 Measured benefit, through the real pipeline with the trained model (`docs/experiments.md`):
@@ -335,7 +342,7 @@ changed. With `voiceover.parallel_cpu` (default) Vosk runs beside the GPU engine
 test piece of S29E05 in all three engines took 25.4 minutes one after another and 16.4 minutes in
 two lanes with the CPU cap.
 
-The voice bank (`stt.voice_bank`, UI tab "Банк голосов") keeps a voice print and reference clips
+The voice bank (`stt.voice_bank`, UI tab "Голоса сезона") keeps a voice print and reference clips
 for each named person of a season.
 
 ## 12. Sound level
@@ -379,19 +386,48 @@ It never changes the input; the result is `<stem>.small.mkv` next to it (a sampl
 
 `bash scripts/run_ui.sh`, address http://127.0.0.1:7861. Tabs:
 
-- **Обработка** - pick a folder, episodes, a preset, engines and options; start and stop; stage
-  progress per episode, the log and the finished files. "Пробный отрывок" voices a few minutes
+- **Season bar** (above the tabs) - the season picker and "＋ Новый сезон" (both folders have a "📁 Выбрать…" button:
+  the desktop dialog when there is a desktop and `zenity`, else a folder browser on the page; the results folder
+  `STT_<source folder>` is suggested and made on "Сохранить сезон"); one season drives every tab, remembered in the UI
+  state file `ui.local.json` (not in git; older versions kept it in `stt_config.local.json` under `ui.seasons`, which
+  is still read once). Seasons next to the configured folders are found on the first start. When a season is
+  picked that has no settings of its own while the previous one had some that differ from the global ones, the page
+  asks which to take. The first line of every tab says what the tab writes where.
+- **Обработка** - pick episodes (with a table of their states), a preset, engines and options; start and stop; a
+  status line in words (what runs now, how far, time left), a progress table (shared stages and
+  one column per engine), "Контрольные точки" (what is saved and whether stopping now is safe),
+  a readable log "Ход работы" (the raw log is under "Подробный лог") and the finished files.
+  The last job is kept in `output/ui_last_job.json`: after a restart of the page or the computer
+  it shows up again (still running: it can be watched and stopped; gone: "прервано"), and
+  "▶ Продолжить" runs the same command with the same settings file, so finished stages, voiced
+  lines and paid answers are not redone. "Пробный отрывок" voices a few minutes
   from a chosen minute into a `_проба` folder, to try settings fast.
-- **Банк голосов** - people of the season and their voice samples; listen, ask for another
-  sample, re-check names across the season.
+- **Голоса сезона** - the people of the season and the voice clips ESpeech clones (✅ found automatically,
+  ✋ given by hand, ❌ none, with the reason). Listen to a clip, find another automatically, or give a stretch by
+  hand: pick an episode, write ranges like `12:30-12:41`, press "Вырезать и послушать" (the piece is cut, cleaned of
+  music, the text recognised and editable), then save it as the person's clip; an automatic search never replaces it.
+  After a clip changes a banner offers "Переозвучить ESpeech (N серий)": only that person's lines are voiced again.
+  Also "Пересобрать все образцы", "Уточнить, кто говорит" (count the season's voices again) and the names check.
+- **Status strip** (under the season bar, on every tab) - the one long task that runs now (processing, clips, re-voice,
+  compression, re-mix) with its time and last progress line and an "Остановить" button; after the end "✅ Готово" or
+  "❌ Не получилось" with the reason. One long task at a time; a second button press says which one runs. Every
+  button answers at once: long actions start a task, medium ones show "⏳ ..." on the button and a line of what
+  happens, quick ones show a message.
 - **Проверка и правка реплик** - every Russian line, filters for the lines the program flagged,
   the original and the voice-over of a line, editing, the Subtitle Edit round trip, and
   re-voicing only what changed.
 - **Звук и размер видео** - hear a 45 s piece with chosen levels beside the current mix, find
   the loudest place, save settings, re-mix an episode without voicing again, compression
   settings, shrink a finished video, a 60 s sample.
-- **Настройки** - folders, engines, models, voices, checks, mix. Saved into
-  `stt_config.local.json` as differences only; "Сбросить" removes them. Also the TTS cache cleanup.
+- **Настройки** - engines, models, voices, checks, mix. Global settings: `stt_config.local.json` unless another
+  file is chosen on the tab (created as a copy when new; kept in `ui.local.json`); saved as differences only. Settings
+  of a season: `<results>/season_settings.json`, a snapshot of all the tab's values that applies to that season only;
+  the radio "Сохранять изменения в" picks where "Сохранить" writes, "Убрать настройки сезона" deletes the file.
+  "Сбросить" puts the standard values into the chosen file. Also the TTS cache cleanup.
+  Fields are laid out so every label is readable. Vosk voices are picked by name (number, name,
+  gender), and "▶ Послушать" next to every voice plays a sample phrase in the voice chosen now
+  (made in a separate process on the CPU, kept in `output/voice_previews/`; the first Vosk
+  sample takes about 45 s, TeraTTS about 12 s, later listens are instant).
 - **Справка** - the help text in Russian (`ui/help.md`).
 
 One job runs at a time. The UI text is Russian.
@@ -450,7 +486,10 @@ changed lines are synthesised), checks and mix. A stress typed as `+` before the
 - `voiceover_config.json` - details of voice synthesis and timeline fitting (`voiceover.config`
   points to it).
 
-Order: `stt_config.json` < `stt_config.local.json` < preset < UI form or command-line flags.
+Order: `stt_config.json` < `stt_config.local.json` < preset < UI form or command-line flags. In the UI the
+global settings file (`stt_config.local.json` by default) is followed by the settings of the season
+(`<results>/season_settings.json`, if it exists), then the preset and the form; `stt.run` on the command line reads
+`stt_config.local.json` only.
 Language models: one switch, `llm.model` (default `openai/gpt-6-luna`), sets every step;
 `llm.stages.<step>` overrides one step. Per-step prices measured on one 64-minute episode are in
 `docs/stt_local.md`.

@@ -5,6 +5,27 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan of 3.11.2026: the UI built around a season (agreed with the user)
+
+The user found the UI confusing: four different "folder" fields (two hard-coded to `output/stt`), long actions with no
+feedback, "season voices" (who speaks) and the voice bank (ESpeech clips) under similar names, and no way to give a
+person's clip by hand. Agreed: rebuild it step by step; after each step the agent clicks through it in the built-in
+browser (a spare port, never the user's UI on 7861), then the user tries it.
+
+1. **Season and folders.** A season is two folders: the original episodes, and the results folder suggested next to
+   it (`STT_<season>`, editable) that holds everything (episode work folders, season files, finished videos). Seasons
+   are remembered; one season picker on top drives every tab; no other folder fields.
+2. **Feedback for every action.** Quick actions answer at once; long ones run as a background job with stage,
+   percent and "Остановить", and their button waits while they run.
+3. **Tab "Голоса сезона"** (replaces "Банк голосов"): the people of the season, lines, clip yes/no with a plain
+   reason; listen, find another automatically, give a clip by hand (episode + one or more `mm:ss-mm:ss` ranges; cut,
+   cleaned, Whisper text shown and editable, silence added; never replaced by the automatic pick); then "re-voice
+   ESpeech in N episodes" for only those people. Also "rebuild all clips" and "who speaks: assign again" with plain
+   descriptions.
+4. **Help** rewritten as the order of work.
+
+Status: all four steps done 3.11.2026. Step 1: season bar, `ui/seasons.py`; folder dialog `ui/folder_pick.py` (zenity with a desktop, an in-page browser otherwise); a line on every tab saying what it writes where; settings per season in `<results>/season_settings.json` over one global settings file, `ui/season_settings.py`, UI state in `ui.local.json`. Steps 2-3: one task runner with Russian titles and a status strip under the season bar on every tab (`ui/dub_app.py` `Job`/`start_task`); every button answers (long ones are tasks, medium ones show "⏳ ..." on the button, quick ones a message); tab "Голоса сезона" (`ui/voices.py`): people table with the reason a clip is missing (`missing.json`), hand-made clips (`stt/manual_clip.py`, cut in a subprocess through `stt.voice_bank --manual-clip --preview --json`, kept in `manual.json`), re-voice banner derived from `speaker_voices.f5.json`, rebuild all clips, season voices recount, names check. Step 4: `ui/help.md` rewritten as the order of work. Checked by clicking through on a temp copy of season 48.
+
 ## Plan of 1.11.2026: train the voice model, use existing subtitles, the season's voices
 
 Asked by the user after the voice-sample experiments closed. Scripts and logs: `output/exp_spk/`; data: `training_data_sdh/subs_train/` on

@@ -38,42 +38,20 @@ def test_videos_and_progress(tmp_path: Path) -> None:
     log.write_text("INFO stt.run: [a] speakers ...\n")
     job = dub_app.Job(files=[tmp_path / "a.mp4"], out_root=out, engines=["vosk", "teratts"],
                       config_path=tmp_path / "c.json", log_path=log, engine="vosk")
-    assert dub_app.progress_rows(job) == [["a", "⏳ 3/9: спикеры", "⏳ 2/9: спикеры"]]  # shared stage
-    log.write_text("INFO stt.run: [a] speakers ...\nINFO stt.run: [a] voiceover (vosk) ...\n")
-    assert dub_app.progress_rows(job) == [["a", "⏳ 3/9: озвучка", "⏳ 2/9: спикеры"]]
+    assert dub_app.progress_view(job) == (["Серия", "Общие этапы", "Vosk", "TeraTTS"], [["a", "✔ 2 из 5", "✔ 1 из 4", "—"]])
     for mark in ("speakers", "translate", "stress", "voiceover.vosk", "check.vosk", "mix.vosk"):
         (stages / mark).write_text("")
     (out / "a" / "a.ru.vosk.mkv").write_text("")
     job.state = "готово"
-    assert dub_app.progress_rows(job)[0][1] == "✅ готово"
-    assert dub_app.results_rows(job) == [["a", "vosk", str(out / "a" / "a.ru.vosk.mkv")]]
+    assert dub_app.progress_rows(job)[0][1:] == ["✅ готово", "✅ готово", "—"]
+    assert dub_app.results_rows(job) == [["a", "Vosk", str(out / "a" / "a.ru.vosk.mkv")]]
     # one video with every voice-over, in the folder of finished videos (paths.finished/<season folder>)
     done = tmp_path / "done" / f"STT_{tmp_path.name}"
     done.mkdir(parents=True)
     (done / "a.ru.mkv").write_text("")
     (out / "a" / "a.ru.vosk.m4a").write_text("")
     job.config_path.write_text(json.dumps({"paths": {"finished": str(tmp_path / "done"), "finished_folder": "STT_{season}"}}))
-    assert dub_app.results_rows(job) == [["a", "vosk", str(done / "a.ru.mkv")]]
-
-
-def test_voice_bank_rows(tmp_path: Path) -> None:
-    import json
-
-    from stt.voice_bank import VoiceBank
-
-    bank = VoiceBank(tmp_path / "S1.voices.json")
-    bank.add_episode("ep1", [{"id": "S01", "name": "Julie McGee", "label_ru": "Джули", "gender": "female",
-                              "speech_s": 120.0, "llm_confidence": 0.9, "embedding": [1.0, 0.0]}], [])
-    bank.save()
-    assert dub_app.list_banks(str(tmp_path)) == ["S1.voices.json"]
-    assert dub_app.people_rows(str(tmp_path), "S1.voices.json") == [["Julie McGee", "Джули", "female", 1, 2.0, "нет"]]
-    refs = dub_app.refs_dir(str(tmp_path), "S1.voices.json")
-    refs.mkdir()
-    (refs / "references.json").write_text(json.dumps([{"name": "Julie McGee", "wav": "Julie_McGee.wav",
-                                                        "episode": "S29E01x", "start": 1.0, "end": 9.0, "score": 0.93,
-                                                        "music_db": -10.0, "text": "I'm dating John Rocker"}]))
-    audio, info = dub_app.person_view(str(tmp_path), "S1.voices.json", "Julie McGee")
-    assert audio.endswith("Julie_McGee.wav") and "S29E01" in info and "0.93" in info
+    assert dub_app.results_rows(job) == [["a", "Vosk", str(done / "a.ru.mkv")]]
 
 
 def test_edit_tab_rows_form_save_and_round_trip(tmp_path: Path) -> None:

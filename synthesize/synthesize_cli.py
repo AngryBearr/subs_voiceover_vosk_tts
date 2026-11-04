@@ -7,8 +7,9 @@ Single-line mode (default): provide --text. Batch mode: provide --json.
 import argparse
 import logging
 import sys
+from pathlib import Path
 
-from .synthesize import synthesize_text, SynthesisError  # type: ignore
+from .synthesize import create_synth, synthesize_text, SynthesisError  # type: ignore
 from .synthesize_batch import synthesize_json_lines  # type: ignore
 
 
@@ -28,6 +29,12 @@ def main() -> None:
     # Single-line specific
     parser.add_argument("--output", "-o", default=None, help="Output .wav path (single mode)")
     parser.add_argument("--prefix", "-p", default=None, help="Filename prefix when --output omitted (single mode)")
+    parser.add_argument(
+        "--voices",
+        default=None,
+        help="Single mode: say the text in several voices with one model load ('all' or '0,5,49'); "
+        "writes <output-folder>/<file-prefix><voice>.wav",
+    )
 
     # Batch specific
     parser.add_argument("--output-folder", default="./tts_out", help="Folder for batch outputs")
@@ -80,6 +87,18 @@ def main() -> None:
                 text_key=args.text_key,
                 output_sample_rate=args.output_sample_rate,
             )
+        elif args.voices:
+            # One text in several voices: the model and its dictionary load once (~45 s), each voice ~1 s
+            synth = create_synth(args.model, device=args.device)
+            count = len(synth.model.config["speaker_id_map"]) if args.voices == "all" else 0
+            voices = list(range(count)) if args.voices == "all" else [int(v) for v in args.voices.split(",") if v.strip()]
+            folder = Path(args.output_folder)
+            folder.mkdir(parents=True, exist_ok=True)
+            for voice in voices:
+                out = synthesize_text(text=args.text, voice=voice, speech_rate=args.speech_rate, synth=synth,
+                                      output_path=str(folder / f"{args.file_prefix}{voice}.wav"),
+                                      output_sample_rate=args.output_sample_rate)
+                print(str(out))
         else:
             # Single-line mode
             out = synthesize_text(

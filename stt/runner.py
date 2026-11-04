@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from utils.atomic_io import write_text_atomic
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 log = logging.getLogger(__name__)
@@ -19,9 +21,7 @@ def load_json(path: Path) -> Any:
 
 
 def save_json(path: Path, data: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def env_python(env: str) -> Path:

@@ -22,6 +22,8 @@ from typing import Any, Protocol
 import numpy as np
 import soundfile as sf
 
+from stt import progress
+from utils.atomic_io import fsync_file, write_text_atomic
 from utils.reduce_silence import reduce_silence_audio
 from utils.vosk_text import normalize_vosk_text
 from voiceover.text import join_lines
@@ -90,6 +92,25 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def read_cache_entry(meta: Path, wav: Path) -> dict[str, Any] | None:
+    """The per-line cache record next to its WAV, or None when either is missing, empty or unreadable
+    (a file half written when the computer stopped): such a line is simply synthesised again."""
+    try:
+        if wav.stat().st_size <= 44:  # a WAV header alone is no audio
+            return None
+        entry = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def write_cache_entry(meta: Path, entry: dict[str, Any]) -> None:
+    """Keep a line's record after its WAV is on disk; the record appears whole or not at all."""
+    if entry.get("path"):
+        fsync_file(entry["path"])
+    write_text_atomic(meta, json.dumps(entry, ensure_ascii=False, indent=1))
+
+
 def _dbfs_to_amp(dbfs: float) -> float:
     return float(10.0 ** (dbfs / 20.0))
 
@@ -123,7 +144,10 @@ def postprocess_wav(path: Path, trim: dict[str, Any]) -> tuple[float, float, int
         data, reduced = reduce_silence_audio(data, sr, silence_dbfs=float(trim.get("silence_dbfs", -35.0)),
                                              threshold_sec=float(trim.get("threshold_sec", 0.5)),
                                              target_sec=float(trim.get("target_sec", 0.2)))
-    sf.write(str(path), data, sr)
+    tmp = path.with_name(f".{path.name}.tmp")  # the clip is replaced whole: a stop here keeps the unprocessed one
+    sf.write(str(tmp), data, sr, format="WAV")
+    fsync_file(tmp)
+    os.replace(tmp, path)
     return raw_sec, data.shape[0] / sr, edge_ms, reduced
 
 
@@ -395,25 +419,26 @@ class VoskEngine:
             if key in cached or key in jobs:
                 continue
             meta, wav = cache_dir / f"{key}.json", cache_dir / f"{key}.wav"
-            if meta.exists() and wav.exists():
-                entry = json.loads(meta.read_text(encoding="utf-8"))
-                if entry.get("tts_text") == row.tts_text and not entry.get("error"):
-                    cached[key] = entry
-                    continue
+            entry = read_cache_entry(meta, wav)
+            if entry is not None and entry.get("tts_text") == row.tts_text and not entry.get("error"):
+                cached[key] = entry
+                continue
             jobs[key] = {"cue_id": key, "tts_text": row.tts_text, "path": str(wav),
                          "voice": voice, "base_rate": self.base_rate, "trim": self.trim}
         log.info("synthesis: %d distinct texts, %d cached, %d to synthesize", len(cached) + len(jobs),
                  len(cached), len(jobs))
         job_list = list(jobs.values())
+        total = len(cached) + len(jobs)
+        progress.tick(len(cached), total, "lines")
 
         def store(job: dict[str, Any], result: dict[str, Any]) -> None:
             key = job["cue_id"]
             entry = {**result, "tts_text": job["tts_text"]}
             entry.pop("cue_id", None)
             if not entry.get("error"):
-                (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1),
-                                                       encoding="utf-8")
+                write_cache_entry(cache_dir / f"{key}.json", entry)
             cached[key] = entry
+            progress.tick(len(cached), total)
 
         cores = cpu_threads()
         if job_list and workers <= 1:
@@ -482,7 +507,7 @@ class VoskEngine:
             retry.unlink(missing_ok=True)
             still += bool(wrong_words(heard))
             entry["stress"] = record(listen, heard)
-            (cache_dir / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
+            write_cache_entry(cache_dir / f"{key}.json", entry)
         log.info("stress heard in %d lines: %d taken again, %d still with another stress", len(todo), retaken, still)
 
 
