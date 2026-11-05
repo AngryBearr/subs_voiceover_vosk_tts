@@ -5,6 +5,34 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan of 5.11.2026: one episode in about an hour; preparing a season; one subtitle base
+
+Measured (S48, 64-min episodes, nothing cached): about 75 min per episode. Transcribe 12 (OCR 5,
+diarization 2), glossary + speakers 3.5, translate + proofread + on-screen text 8.5, stress 3, ESpeech (F5)
+voice-over 31, its check + mix 4.3, then TeraTTS voice-over + check + mix 10.5 (after F5, same GPU lane);
+Vosk runs alongside on the CPU (20). Reviewed together with an independent GPT-6 Astra analysis (5.11).
+
+1. **Faster without losing quality** (in progress, branch `perf/pipeline-speed`): find why F5 now takes
+   1.94 s per line (1.16 s measured 28.10 with the same 32 steps: stress listening on every take, retries,
+   reference reloading?) and win it back without dropping checks; start OCR at the beginning of transcribe,
+   beside diarization/ASR/fusion; translate on-screen text beside the voice-over instead of before it;
+   overlap stress screening with the whole-text proofreading; one Demucs separation of the original per
+   episode and one final mux instead of one per engine; TeraTTS starts while F5 is mixed, not after;
+   calibration of the voices cached across episodes. Expected 75 -> 62-66 min; measured stage by stage.
+2. **F5 at 16 steps** (needs the user's ear): 16 steps measured 0.71 s/line against 1.16 at 32, character
+   errors 0.76% vs 0.83%, by ear almost the same (28.10). A 10-min A/B piece for listening; if accepted,
+   about 55 min per episode.
+3. **Prepare a whole season first** (user's idea, 5.11): a separate command and a UI button "recognise the
+   whole season" (first pass of every episode: transcription, OCR, diarization, glossary, naming, season
+   voices) with a clear message why: the season voices then use every episode and each later episode run
+   only translates and voices (about 16 min less per episode). Then, optionally, overlap episodes: while the
+   GPU voices episode N, the LLM stages of N+1 (translate, proofread, stress) run.
+4. **One subtitle base for all seasons** (user's idea, 5.11, after 1-3): a subtitles stage with its own UI
+   setting (a season subtitle folder can be given); pick the best file per episode from the hunt archive
+   `/media/angrybear/new_large_storage/Survivor/subtitles_hunt` (names of speakers > `>>` marks > plain text,
+   timing that matches the video) into one curated base, used by every season run (who speaks, captions,
+   names).
+
 ## Plan of 3.11.2026: the UI built around a season (agreed with the user)
 
 The user found the UI confusing: four different "folder" fields (two hard-coded to `output/stt`), long actions with no
