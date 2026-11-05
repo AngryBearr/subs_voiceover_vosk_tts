@@ -672,9 +672,11 @@ def test_next_episode_is_translated_while_the_current_is_voiced(monkeypatch: pyt
     run.run_lanes(files, tmp_path / "out", _args(), {}, ["f5"])
     order = [(m, s) for m, s, _ in calls]
     assert order.count(("e2", "translate")) == 1 and order.count(("e3", "translate")) == 1
-    # e2 is translated after e1's engine stages began and before e2's own voicing
-    assert order.index(("e1", "dub")) < order.index(("e2", "translate")) < order.index(("e2", "dub"))
-    assert order.index(("e2", "dub")) < order.index(("e3", "translate")) < order.index(("e3", "dub"))
+    # e2 is translated once e1's shared stages are done (the lane is starting e1's engines; which of the two threads
+    # records its call first is not fixed) and before e2's own voicing; e3 likewise after e2's
+    assert order.index(("e1", "translate")) < order.index(("e2", "translate")) < order.index(("e2", "dub"))
+    assert order.index(("e2", "translate")) < order.index(("e3", "translate")) < order.index(("e3", "dub"))
+    assert order.index(("e1", "voiceover")) < order.index(("e3", "translate"))  # one episode ahead at most
 
 
 def test_lane_waits_for_the_lookahead(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
