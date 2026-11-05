@@ -287,6 +287,11 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   line is voiced. With `on_screen.track` off, `text` falls back to `neutral` (logged warning), so the
   captioned lines are not lost. S51E01: 138 captions, 29 of them under other speech (mostly whispers
   under a confessional) only ever shown as text.
+- In `text` mode a line with at least 30% of its time under a caption on screen (±0.4 s) is not voiced either
+  (`stt.dub.under_captions`): when the ASR and the caption disagree, the ASR line is usually the caption's own
+  speech misheard (S48E01 1:21: "I don't like being in the snow bathroom" under "I really needed this so badly").
+  A long line that only touches a caption (a confessional over a whispered exchange) stays voiced. S48E01: 75 such
+  lines silenced, 64 touching a caption kept.
 - `onscreen.json` (written by the transcribe stage): captions, name cards (+ descriptor) and lower
   thirds with their screen box; `python -m stt.onscreen translate <folder>` (run in the translate
   stage) writes `onscreen.ru.json` with the cast's Russian names and the glossary, cached per text and

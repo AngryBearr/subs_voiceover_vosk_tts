@@ -65,6 +65,30 @@ def parse_voices(spec: str) -> dict[str, int | str]:
     return voices
 
 
+CAPTION_PAD_S = 0.4  # a burned-in caption is shown a little before and after its speech
+UNDER_CAPTION_SHARE = 0.3  # "text" mode: a line this much under captions on screen is not voiced
+
+
+def caption_spans(folder: Path) -> list[tuple[float, float]]:
+    """(start, end) seconds of the burned-in captions of ``onscreen.json`` (episode timeline, like the cues)."""
+    path = folder / "onscreen.json"
+    if not path.exists():
+        return []
+    data = load_json(path)
+    items = data.get("items", []) if isinstance(data, dict) else data
+    return [(float(i["start"]), float(i["end"])) for i in items if i.get("kind") == "caption"]
+
+
+def under_captions(start_ms: float, end_ms: float, captions: list[tuple[float, float]],
+                   share: float = UNDER_CAPTION_SHARE) -> bool:
+    """Whether at least ``share`` of a line falls while a caption is on screen: then it is the caption's own speech as
+    the ASR heard it (often garbled: "I don't like being in the snow bathroom" under "I really needed this so badly")
+    or talk over it. A long line that only touches a caption (a confessional over a whispered exchange) is not."""
+    start, end = start_ms / 1000, end_ms / 1000
+    covered = sum(max(0.0, min(end, ce + CAPTION_PAD_S) - max(start, cs - CAPTION_PAD_S)) for cs, ce in captions)
+    return covered > 0 and covered / max(end - start, 1e-3) >= share
+
+
 def plan(
     records: list[dict[str, Any]],
     voices: dict[str, int | str],
@@ -76,11 +100,13 @@ def plan(
     on_screen_voice: str = "text",
     neutral_gender: str = "male",
     corrected: set[int] | frozenset[int] = frozenset(),
+    captions: list[tuple[float, float]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return (voiced lines, skipped lines with reasons).
 
     `corrected`: line numbers with a manual speaker/gender fix; these keep the voice that fix implies even
-    when the line is captioned on screen.
+    when the line is captioned on screen. `captions`: (start, end) seconds of the burned-in captions; in "text" mode a
+    line mostly under them (`under_captions`) is not voiced either: the caption's Russian text shows that moment.
     """
     voiced: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -91,6 +117,9 @@ def plan(
             reason = "skipped in corrections.json"
         elif rec.get("on_screen") and on_screen_voice == "text" and rec["index"] not in corrected:
             reason = "on-screen caption: shown as Russian text"
+        elif (captions and on_screen_voice == "text" and rec["index"] not in corrected
+              and under_captions(rec["start"], rec["end"], captions)):
+            reason = "under an on-screen caption: shown as Russian text"
         elif not " ".join(rec["text"]).strip():
             reason = "empty"
         elif interjections != "keep" and is_interjection(text_en):
@@ -159,7 +188,7 @@ def main(argv: list[str] | None = None) -> None:
     speaker_voices = load_json(Path(args.speaker_voices)) if args.speaker_voices else None
     voiced, skipped = plan(records, voices, interjections=args.interjections, skip=skip, speaker_voices=speaker_voices,
                            on_screen_voice=args.on_screen_voice, neutral_gender=args.neutral_gender,
-                           corrected=corrected)
+                           corrected=corrected, captions=caption_spans(folder))
     save_json(folder / args.output, voiced)
     save_json(folder / "dub.report.json", {"voices": voices, "interjections": args.interjections,
                                            "on_screen_voice": args.on_screen_voice, "neutral_gender": args.neutral_gender,

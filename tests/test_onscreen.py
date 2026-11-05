@@ -498,3 +498,27 @@ def test_onscreen_ru_is_written_without_the_dub_translation(tmp_path: Path) -> N
     result = onscreen.translate_folder(tmp_path, client)
     assert (tmp_path / "onscreen.ru.json").exists() and result[0]["text_ru"]
     assert "context" not in client.prompts[0] and "context_hash" not in result[0]
+
+
+def test_dub_text_mode_silences_lines_mostly_under_captions() -> None:
+    """S48E01 1:21: the ASR heard "I don't like being in the snow bathroom" while the screen says "I really needed
+    this so badly": a line mostly under a caption is not voiced; a long line that only touches one still is."""
+    from stt.dub import plan
+
+    voices = {"male": 56, "female": 49, "unknown": 56}
+
+    def rec(index: int, start: float, end: float, text: str) -> dict:
+        return {"index": index, "start": start * 1000, "end": end * 1000, "text": [text], "text_en": [text],
+                "speaker": "S01", "gender": "female"}
+
+    records = [rec(1, 81.8, 88.2, "Не люблю ходить в туалет на снегу."),  # caption 83.4-85.5: 0.45 of the line
+               rec(2, 100.0, 107.0, "Я пришла сюда, чтобы выиграть, и я это сделаю."),  # caption 106.5-107.5
+               rec(3, 120.0, 122.0, "Обычная реплика без подписи на экране.")]
+    captions = [(83.4, 85.5), (106.5, 107.5)]
+    voiced, skipped = plan(records, voices, captions=captions)
+    assert [r["source_index"] for r in voiced] == [2, 3]
+    assert skipped[0]["reason"] == "under an on-screen caption: shown as Russian text"
+    voiced, _ = plan(records, voices, captions=captions, on_screen_voice="neutral")  # only "text" mode silences them
+    assert len(voiced) == 3
+    voiced, _ = plan(records, voices, captions=captions, corrected={1})  # a person's fix wins
+    assert [r["source_index"] for r in voiced] == [1, 2, 3]
