@@ -358,3 +358,36 @@ def test_aliases_come_from_the_cast_list_beside_the_voices(tmp_path: Path) -> No
     (tmp_path / "Season_51.cast.json").write_text(json.dumps({"cast": [{"name": "Angelica Loblack", "aliases": ["Jelly"]}]}), encoding="utf-8")
     assert sv.cast_aliases(path) == {"jelly": "Angelica Loblack"}
     assert sv.cast_aliases(tmp_path / "Other.season_voices.npz") == {}
+
+
+def test_prepare_embeddings_recomputes_embeddings_of_an_earlier_transcript(tmp_path, monkeypatch) -> None:
+    """A rebuilt transcript (other words) makes the stored word embeddings stale: they are computed again, not skipped."""
+    import json as _json
+
+    import numpy as _np
+
+    from stt import audio as stt_audio, boundaries, refine_speakers, season_voices
+
+    folder = tmp_path / "ep"
+    folder.mkdir()
+    words = [{"start": 1.0, "end": 1.4, "text": "hi", "speaker": "S01"},
+             {"start": 2.0, "end": 2.5, "text": "there", "speaker": "S01"}]
+    (folder / "words.json").write_text(_json.dumps(words), encoding="utf-8")
+    (folder / "speakers.json").write_text("[]", encoding="utf-8")
+    (folder / "subs.en.json").write_text("[]", encoding="utf-8")
+    (folder / "audio.wav").write_bytes(b"")
+    path = season_voices.embedding_path(folder, "resnet293")
+    _np.savez(path, starts=_np.array([0.5]), ends=_np.array([0.9]), emb=_np.zeros((1, 4), _np.float32),
+              window_s=_np.float64(1.0))  # one word of an older transcript
+    calls: list[int] = []
+    monkeypatch.setattr(refine_speakers, "make_embedder", lambda model, device: object())
+    monkeypatch.setattr(stt_audio, "read_wav", lambda p: _np.zeros(16000 * 3, _np.float32))
+    monkeypatch.setattr(boundaries, "word_windows", lambda w, audio, window: _np.zeros((len(w), 16000), _np.float32))
+    monkeypatch.setattr(boundaries, "embed_windows", lambda windows, embedder: (calls.append(len(windows)),
+                                                                                 _np.ones((len(windows), 4)))[1])
+    season_voices.prepare_embeddings([folder], "resnet293")
+    assert calls == [2]
+    with _np.load(path) as data:
+        assert list(data["starts"]) == [1.0, 2.0] and data["emb"].shape == (2, 4)
+    season_voices.prepare_embeddings([folder], "resnet293")  # up to date now: nothing computed
+    assert calls == [2]

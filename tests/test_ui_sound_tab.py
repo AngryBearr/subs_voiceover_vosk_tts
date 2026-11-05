@@ -246,8 +246,11 @@ def test_mux_burns_the_onscreen_text_into_the_compressed_video(monkeypatch: pyte
     monkeypatch.setattr(video_compress, "encode_video", fake_encode)
     monkeypatch.setattr(stt_mix, "mux_tracks", fake_mux)
     episode.mux()
-    assert encoded["name"] == "video.hevc_nvenc.3811k.onscreen.mkv" and len(encoded["overlays"]) == 1
-    assert muxed["video_source"] == episode.out / "video.hevc_nvenc.3811k.onscreen.mkv"
+    import hashlib as _hashlib
+
+    tag = _hashlib.sha256((episode.out / "onscreen.ru.json").read_bytes()).hexdigest()[:8]
+    assert encoded["name"] == f"video.hevc_nvenc.3811k.onscreen-{tag}.mkv" and len(encoded["overlays"]) == 1
+    assert muxed["video_source"] == episode.out / f"video.hevc_nvenc.3811k.onscreen-{tag}.mkv"
     assert muxed["onscreen_ass"] is None  # burned in: no second copy as a track
 
 

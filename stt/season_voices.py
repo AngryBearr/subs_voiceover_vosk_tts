@@ -225,13 +225,27 @@ def load_episode(folder: Path, model: str) -> EpisodeData | None:
     except (OSError, KeyError, ValueError) as error:
         log.warning("[%s] word embeddings unreadable (%s)", folder.name, error)
         return None
-    if (len(emb) != len(words) or len(starts) != len(words)
-            or not np.allclose(starts, [w.start for w in words], atol=2e-3)
-            or not np.allclose(ends, [w.end for w in words], atol=2e-3)):
+    if not _times_match(starts, ends, words) or len(emb) != len(words):
         log.warning("[%s] %s does not belong to words.json (different words); skipped", folder.name, emb_path.name)
         return None
     return EpisodeData(folder, words, raw, load_json(sources["speakers"]), load_json(sources["subs.en"]), offset,
                        emb.astype(np.float64), original, sources)
+
+
+def _times_match(starts: np.ndarray, ends: np.ndarray, words: list[Word]) -> bool:
+    """Whether stored word embeddings (their word start/end times) belong to these words."""
+    return (len(starts) == len(words) and len(ends) == len(words)
+            and bool(np.allclose(starts, [w.start for w in words], atol=2e-3))
+            and bool(np.allclose(ends, [w.end for w in words], atol=2e-3)))
+
+
+def _stale_embeddings(path: Path, words: list[Word]) -> bool:
+    """True when ``path`` holds word embeddings of other words (the transcript was rebuilt since): recompute them."""
+    try:
+        with np.load(path) as data:
+            return not _times_match(data["starts"], data["ends"], words) or len(data["emb"]) != len(words)
+    except (OSError, KeyError, ValueError):
+        return True
 
 
 def find_diarization(folder: Path, cards: list[dict[str, Any]]) -> Diarization | None:
@@ -583,10 +597,14 @@ def prepare_embeddings(folders: list[Path], model: str, device: str = "cuda") ->
     for folder in folders:
         sources, _ = first_pass_files(folder)
         path, audio = embedding_path(folder, model), folder / "audio.wav"
-        if path.exists() or not sources["words"].exists() or not audio.exists():
+        if not sources["words"].exists() or not audio.exists():
             continue
         offset = _offset(folder)
         words = [Word(w["start"] - offset, w["end"] - offset, w["text"]) for w in load_json(sources["words"])]
+        if path.exists():
+            if not _stale_embeddings(path, words):
+                continue
+            log.info("[%s] %s belongs to an earlier transcript: computed again", folder.name, path.name)
         embedder = embedder or make_embedder(model, device)
         emb = embed_windows(word_windows(words, read_wav(audio), window), embedder)
         np.savez(path, starts=_times(words, "start"), ends=_times(words, "end"), emb=emb.astype(np.float32),

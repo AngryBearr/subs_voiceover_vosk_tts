@@ -750,7 +750,9 @@ class Episode:
 
             overlays = onscreen_render.render_overlays(onscreen_render.load_items(self.out / "onscreen.ru.json"),
                                                        int(info["width"]), int(info["height"]))
-        burned = ".onscreen" if overlays else ""
+        # the burned-in text is part of the picture: a changed translation needs a new video
+        burned = (f".onscreen-{hashlib.sha256((self.out / 'onscreen.ru.json').read_bytes()).hexdigest()[:8]}"
+                  if overlays else "")
         small = self.out / f"video.{codec}.{bitrate}k{burned}.mkv"
         if not small.exists():
             try:
