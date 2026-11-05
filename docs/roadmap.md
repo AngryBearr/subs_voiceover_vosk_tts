@@ -19,6 +19,12 @@ Vosk runs alongside on the CPU (20). Reviewed together with an independent GPT-6
    overlap stress screening with the whole-text proofreading; one Demucs separation of the original per
    episode and one final mux instead of one per engine; TeraTTS starts while F5 is mixed, not after;
    calibration of the voices cached across episodes. Expected 75 -> 62-66 min; measured stage by stage.
+   Measured on S48E07 (64 min, nothing cached, 5.11): 65.7 min. Transcribe 470 s (was 709; OCR 322 s fully
+   hidden), translate 254 s (was 513; on-screen text in the background), stress 142 s (was 191), F5 1761 s,
+   TeraTTS started while F5 mixed. The deferred mux put the 312-s video compression at the end (mux 378 s):
+   now started in the background when voicing starts (expected ~60 min). F5 per phase (869 lines): sampling
+   1.04 s per attempt, 1.25 attempts per line (142 lines retried), GigaAM check 0.20 s, stress listening 0.31 s
+   per line (326 lines): the extra time since 28.10 is the added checks, not slower synthesis.
 2. **F5 at 16 steps** (needs the user's ear): 16 steps measured 0.71 s/line against 1.16 at 32, character
    errors 0.76% vs 0.83%, by ear almost the same (28.10). A 10-min A/B piece for listening; if accepted,
    about 55 min per episode.

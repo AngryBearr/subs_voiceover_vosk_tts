@@ -385,3 +385,124 @@ def test_separate_mode_removes_the_cache_after_the_last_planned_engine(
     assert cache.exists()
     _episode(tmp_path, tracks="separate", planned=["f5", "vosk"], engine="vosk").mix()
     assert not cache.exists()
+
+
+# ---- the compressed video is made beside the voicing
+
+def _video_episode(tmp_path: Path, name: str = "ep01", *, burn: bool = False, engine: str = "f5",
+                   compress: bool = True) -> run.Episode:
+    episode = _episode(tmp_path, engine=engine)
+    episode.media = tmp_path / "S" / f"{name}.mkv"
+    episode.out = tmp_path / "out" / name
+    episode.out.mkdir(parents=True, exist_ok=True)
+    episode.config["mix"]["video"] = {"compress": compress, "target_gb": 2.0, "codec": "hevc_nvenc",
+                                      "original_audio_kbps": 160}
+    episode.config["on_screen"] = {"burn_in_when_compressing": burn}
+    return episode
+
+
+@pytest.fixture
+def encodes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    from stt import video_compress
+
+    state: dict[str, Any] = {"calls": [], "running": 0, "max_running": 0, "release": threading.Event(),
+                             "started": threading.Event(), "fail": False}
+    lock = threading.Lock()
+    state["release"].set()
+
+    def encode(src: Path, out: Path, bitrate: int, codec: str, overlays: Any = None, **_: Any) -> Path:
+        with lock:
+            state["calls"].append((src.name, out.name))
+            state["running"] += 1
+            state["max_running"] = max(state["max_running"], state["running"])
+        state["started"].set()
+        assert state["release"].wait(5)
+        with lock:
+            state["running"] -= 1
+        if state["fail"]:
+            raise RuntimeError("nvenc failed")
+        out.touch()
+        return out
+
+    monkeypatch.setattr(video_compress, "probe", lambda _: {"duration": 3600.0, "video_kbps": 9000.0,
+                                                           "width": 1920, "height": 1080})
+    monkeypatch.setattr(video_compress, "encode_video", encode)
+    run._COMPRESS_JOBS.clear()
+    return state
+
+
+def test_compression_starts_with_the_voicing_and_the_mux_awaits_it_encoding_once(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, encodes: dict[str, Any]) -> None:
+    episode = _video_episode(tmp_path)
+    encodes["release"].clear()
+    muxed: list[Any] = []
+    monkeypatch.setattr(stt_mix, "mux_tracks", lambda *a, **k: muxed.append(k["video_source"]))
+    started_order: list[str] = []
+    monkeypatch.setattr(run.Episode, "start_compression", lambda self, orig=run.Episode.start_compression:
+                        (started_order.append("compress"), orig(self))[1])
+    for name in ("transcribe", "glossary", "speakers", "translate", "stress", "voiceover", "check", "mix"):
+        monkeypatch.setattr(run.Episode, name, lambda self, n=name: None)
+    monkeypatch.setattr(run.Episode, "dub", lambda self: started_order.append("dub"))
+    episode.args.until = "dub"
+    episode.forced_from = 0  # every stage is needed
+    episode.run()
+    assert started_order == ["compress", "dub"]  # started at the first voicing stage, before it
+    assert encodes["started"].wait(5)
+    for engine in ("f5", "teratts", "vosk"):
+        episode.track(engine).touch()
+    result: list[Path | None] = []
+    waiter = threading.Thread(target=lambda: result.append(episode.small_video(episode.config["mix"]["video"], 3)))
+    waiter.start()
+    waiter.join(0.3)
+    assert waiter.is_alive() and result == []  # the mux waits for the running encoding
+    encodes["release"].set()
+    waiter.join(5)
+    assert result == [episode.out / "video.hevc_nvenc.3619k.mkv"]
+    assert episode.small_video(episode.config["mix"]["video"], 3) == result[0]
+    assert len(encodes["calls"]) == 1  # one encoding in all
+
+
+def test_failed_background_compression_falls_back_to_copying(tmp_path: Path, encodes: dict[str, Any]) -> None:
+    episode = _video_episode(tmp_path)
+    encodes["fail"] = True
+    episode.start_compression()
+    assert episode.small_video(episode.config["mix"]["video"], 3) is None  # today's fallback: the video is copied
+    assert len(encodes["calls"]) == 1  # no second try
+
+
+def test_burn_in_off_switches_background_compression_off(tmp_path: Path, encodes: dict[str, Any]) -> None:
+    episode = _video_episode(tmp_path, burn=True)
+    episode.start_compression()
+    assert run._COMPRESS_JOBS == {} and encodes["calls"] == []
+    piece = _video_episode(tmp_path, "piece")
+    piece.args.start, piece.args.duration = 60.0, 30.0
+    piece.start_compression()
+    off = _video_episode(tmp_path, "off", compress=False)
+    off.start_compression()
+    assert run._COMPRESS_JOBS == {} and encodes["calls"] == []
+
+
+def test_burn_in_path_still_encodes_lazily_in_the_mux(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, encodes: dict[str, Any]) -> None:
+    from stt import onscreen_render
+
+    episode = _video_episode(tmp_path, burn=True)
+    (episode.out / "onscreen.ru.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(run.Episode, "translate_onscreen", lambda self: self.out / "onscreen.ru.json")
+    monkeypatch.setattr(onscreen_render, "load_items", lambda path: [])
+    monkeypatch.setattr(onscreen_render, "render_overlays", lambda items, w, h: ["overlay"])
+    small = episode.small_video(episode.config["mix"]["video"], 3)
+    assert small is not None and ".onscreen-" in small.name and len(encodes["calls"]) == 1
+
+
+def test_a_season_encodes_one_video_at_a_time(tmp_path: Path, encodes: dict[str, Any]) -> None:
+    encodes["release"].clear()
+    first, second = _video_episode(tmp_path, "ep01"), _video_episode(tmp_path, "ep02")
+    first.start_compression()
+    assert encodes["started"].wait(5)
+    second.start_compression()  # its job waits for the first
+    threading.Event().wait(0.3)
+    assert [c[0] for c in encodes["calls"]] == ["ep01.mkv"] and encodes["max_running"] == 1
+    encodes["release"].set()
+    assert second.small_video(second.config["mix"]["video"], 3) is not None
+    assert [c[0] for c in encodes["calls"]] == ["ep01.mkv", "ep02.mkv"] and encodes["max_running"] == 1

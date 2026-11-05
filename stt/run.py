@@ -156,6 +156,10 @@ class Background:
 # On-screen translation of an episode running in the background (``Episode.start_onscreen``), by episode folder
 _ONSCREEN_JOBS: dict[Path, Future[Path | None]] = {}
 _ONSCREEN_GUARD = threading.Lock()
+# Compressed videos being made in the background (``Episode.start_compression``), by the file they become
+_COMPRESS_JOBS: dict[Path, Future[Path | None]] = {}
+_COMPRESS_GUARD = threading.Lock()
+_COMPRESS_GATE = threading.Lock()  # one video encoding at a time, whichever episode it is for
 # What the combined video of an episode was last muxed from (the tracks and their times), by episode folder
 _MUXED: dict[Path, tuple[tuple[str, int], ...]] = {}
 
@@ -300,6 +304,8 @@ class Episode:
                 if not self.needed(stage, outputs, STAGES[position - 1] if position else None, *inputs):
                     log.info("[%s] %s: done earlier", self.media.stem, stage)
                     continue
+                if stage == "dub":
+                    self.start_compression()  # the first stage of the voicing: the picture is made beside it
                 if stage == "mix" and background is not None:
                     # the lane goes on with its next engine's dub / voiceover meanwhile; it joins this thread at its end
                     background.start(f"mix-{self.engine}", functools.partial(self._execute, stage, func))
@@ -816,9 +822,8 @@ class Episode:
             return engines
         return list(dict.fromkeys([*engines, *getattr(self.args, "planned_engines", [])]))
 
-    def small_video(self, video_cfg: dict[str, Any], tracks: int) -> Path | None:
-        """The episode's video with a smaller picture for ``mix.video.target_gb`` (made once, shared by the engines'
-        videos); None when the picture is already small enough or the encoding failed (the video is copied then)."""
+    def _small_target(self, video_cfg: dict[str, Any], tracks: int) -> tuple[dict[str, Any], int, Path] | None:
+        """(probe, bitrate, file) of the compressed video; None when the picture is already small enough."""
         from stt import video_compress
 
         codec = str(video_cfg.get("codec", "hevc_nvenc"))
@@ -827,25 +832,88 @@ class Episode:
         bitrate = video_compress.video_bitrate(info["duration"], float(video_cfg.get("target_gb", 2.0)),
                                                tracks * 192 + original_kbps, info["video_kbps"])
         if bitrate is None:
+            return None
+        return info, bitrate, self.out / f"video.{codec}.{bitrate}k.mkv"
+
+    def _encode_small(self, small: Path, bitrate: int, codec: str, overlays: Any = None) -> Path | None:
+        """Make ``small`` (one encoding at a time); None when the encoding failed (the video is copied then)."""
+        from stt import video_compress
+
+        with _COMPRESS_GATE:
+            if small.exists():
+                return small
+            started = time.monotonic()
+            try:
+                video_compress.encode_video(self.media, small, bitrate, codec, overlays=overlays)
+            except Exception as error:  # noqa: BLE001 - a big video is better than no video
+                log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
+                return None
+            log.info("[%s] compressed video made in %d s", self.media.stem, round(time.monotonic() - started))
+        return small
+
+    def start_compression(self) -> None:
+        """Start the compressed video in the background, once per file, as soon as the episode's voicing starts, so
+        the final mux finds it ready. Not for a test piece, nor with the on-screen text burned in (that picture needs
+        the final translation: ``small_video`` makes it then). The bitrate counts the tracks of this run."""
+        cfg = self.config.get("mix") or {}
+        video_cfg = cfg.get("video") or {}
+        if not (cfg.get("mux") and video_cfg.get("compress")) or self.args.start or self.args.duration \
+                or self.on_screen()["burn_in_when_compressing"]:
+            return
+        existing = [e for e in self.config.get("voiceover", {}).get("engines", {}) if self.track(e).exists()]
+        try:
+            target = self._small_target(video_cfg, len(self.planned_tracks([*existing, self.engine])))
+        except Exception as error:  # noqa: BLE001 - the mux tries again and falls back to copying
+            log.warning("[%s] could not prepare the compressed video (%s)", self.media.stem, error)
+            return
+        if target is None:
+            return
+        _, bitrate, small = target
+        job: Future[Path | None] = Future()
+        with _COMPRESS_GUARD:
+            if small in _COMPRESS_JOBS or small.exists():
+                return
+            _COMPRESS_JOBS[small] = job
+
+        def work() -> None:
+            try:
+                job.set_result(self._encode_small(small, bitrate, str(video_cfg.get("codec", "hevc_nvenc"))))
+            except BaseException as error:  # noqa: BLE001
+                log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
+                job.set_result(None)
+
+        log.info("[%s] compressing the video in the background (%d kbps)", self.media.stem, bitrate)
+        threading.Thread(target=work, name=f"compress-{self.media.stem}", daemon=True).start()
+
+    def small_video(self, video_cfg: dict[str, Any], tracks: int) -> Path | None:
+        """The episode's video with a smaller picture for ``mix.video.target_gb`` (made once, shared by the engines'
+        videos; the background one of ``start_compression`` is awaited, never made twice); None when the picture is
+        already small enough or the encoding failed (the video is copied then)."""
+        target = self._small_target(video_cfg, tracks)
+        if target is None:
             log.info("[%s] the video is already close to the target size: copied as it is", self.media.stem)
             return None
+        info, bitrate, small = target
+        with _COMPRESS_GUARD:
+            job = _COMPRESS_JOBS.get(small)
+        if job is not None:
+            if not job.done():
+                log.info("[%s] waiting for the compressed video", self.media.stem)
+            result = job.result()
+            if result is None or result.exists():
+                return result
         overlays = None
         if self.burn_onscreen():
             from stt import onscreen_render
 
             overlays = onscreen_render.render_overlays(onscreen_render.load_items(self.out / "onscreen.ru.json"),
                                                        int(info["width"]), int(info["height"]))
-        # the burned-in text is part of the picture: a changed translation needs a new video
-        burned = (f".onscreen-{hashlib.sha256((self.out / 'onscreen.ru.json').read_bytes()).hexdigest()[:8]}"
-                  if overlays else "")
-        small = self.out / f"video.{codec}.{bitrate}k{burned}.mkv"
-        if not small.exists():
-            try:
-                video_compress.encode_video(self.media, small, bitrate, codec, overlays=overlays)
-            except Exception as error:  # noqa: BLE001 - a big video is better than no video
-                log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
-                return None
-        return small
+            # the burned-in text is part of the picture: a changed translation needs a new video
+            digest = hashlib.sha256((self.out / "onscreen.ru.json").read_bytes()).hexdigest()[:8]
+            small = small.with_name(small.stem + f".onscreen-{digest}" + small.suffix) if overlays else small
+        if small.exists():
+            return small
+        return self._encode_small(small, bitrate, str(video_cfg.get("codec", "hevc_nvenc")), overlays)
 
     def mix(self) -> None:
         from stt import mix
