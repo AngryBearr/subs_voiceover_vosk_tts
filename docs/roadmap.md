@@ -39,6 +39,18 @@ Vosk runs alongside on the CPU (20). Reviewed together with an independent GPT-6
    timing that matches the video) into one curated base, used by every season run (who speaks, captions,
    names).
 
+### Status and queue (5.11 night)
+- Done and in develop (1ab39c8): speed-up (S48E07 65.7 min, S01E01 34.5 min for 44 min), GPU fallback
+  (`gpu.parallel: auto`), subtitle labels -> cast names, bank prints for every named person.
+- To check: background video compression on a real 2 GB episode (S48, preset upload): log line
+  "compressing the video in the background", mux without the 5-min encode.
+- Now: (a) the narrator (host voice-over, 22% of S01E01, unnamed; the naming LLM marked the host card "same as S02");
+  (b) a "Кто это?" panel per season with an episode filter: unnamed groups with audio snippets, pick a cast name;
+  best used after preparing the season and before voicing; (c) a blind A/B piece of F5 at 32 vs 16 steps.
+- Queue: season prepare command + UI button (item 3 above); references for new seasons (one episode rarely has a
+  clean 5-9 s solo stretch: more episodes, or a relaxed rule for people without any clip); audio-LLM speaker
+  experiment with references (output/exp_audio_llm/, incl. qwen3.8-omni-flash); one subtitle base (item 4).
+
 ## Plan of 3.11.2026: the UI built around a season (agreed with the user)
 
 The user found the UI confusing: four different "folder" fields (two hard-coded to `output/stt`), long actions with no
