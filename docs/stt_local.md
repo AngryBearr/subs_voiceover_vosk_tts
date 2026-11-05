@@ -303,8 +303,9 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   `stt.onscreen_render` turns it into an ASS track muxed as "Надписи на экране" (default, forced,
   DejaVu fonts attached): every Russian item sits on a dark box (about 85% opaque, a little larger than the
   English text it translates) that covers the English: a caption, a card (name in bold, job and tribe
-  below) and a lower third alike. The box may grow slightly for a longer Russian text, overlapping items are stacked. When the video is compressed (`mix.video.compress`, preset `upload`)
-  the same text is burned into the picture instead (`on_screen.burn_in_when_compressing`). Off:
+  below) and a lower third alike. The box may grow slightly for a longer Russian text, overlapping items are stacked. The track is never burned into the picture by default, so a viewer can turn it off;
+  `on_screen.burn_in_when_compressing: true` burns the same text in when the video is compressed anyway
+  (`mix.video.compress`, preset `upload`), for players without subtitle tracks. Off:
   `"on_screen": {"track": false}`.
 - Name cards, titles and caption labels ("Shonee: …") become `on_screen` evidence for the
   speaker that talks most while they are shown (a card shown in a pause goes to the speaker of most

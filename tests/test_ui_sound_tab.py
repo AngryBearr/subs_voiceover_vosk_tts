@@ -225,8 +225,38 @@ def test_mux_adds_the_onscreen_track_when_the_video_is_copied(monkeypatch: pytes
     assert "Там лодка." in muxed["onscreen_ass"].read_text(encoding="utf-8")
 
 
+def test_mux_keeps_the_onscreen_text_a_track_when_compressing_by_default(monkeypatch: pytest.MonkeyPatch,
+                                                                        tmp_path: Path) -> None:
+    """Burning in is off by default: the compressed picture stays clean and the Russian on-screen text is a track
+    (on by default, can be turned off in the player)."""
+    episode = _episode(tmp_path, {"compress": True, "target_gb": 2.0, "codec": "hevc_nvenc", "original_audio_kbps": 160})
+    _with_onscreen(episode)
+    encoded: dict[str, Any] = {}
+    muxed: dict[str, Any] = {}
+
+    def fake_encode(src: Path, out: Path, bitrate: int, codec: str, overlays: Any = None) -> Path:
+        encoded.update(name=out.name, overlays=overlays)
+        out.touch()
+        return out
+
+    def fake_mux(media: Path, tracks: list[Any], out: Path, srt: Any, start: float, duration: Any, **kwargs: Any) -> None:
+        muxed.update(kwargs)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.touch()
+
+    monkeypatch.setattr(video_compress, "probe", lambda _: {"duration": 3600.0, "video_kbps": 9000.0, "width": 1920,
+                                                            "height": 1080})
+    monkeypatch.setattr(video_compress, "encode_video", fake_encode)
+    monkeypatch.setattr(stt_mix, "mux_tracks", fake_mux)
+    episode.mux()
+    assert encoded == {"name": "video.hevc_nvenc.3811k.mkv", "overlays": None}
+    assert muxed["video_source"] == episode.out / "video.hevc_nvenc.3811k.mkv"
+    assert muxed["onscreen_ass"] == episode.out / "onscreen.ass"
+
+
 def test_mux_burns_the_onscreen_text_into_the_compressed_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     episode = _episode(tmp_path, {"compress": True, "target_gb": 2.0, "codec": "hevc_nvenc", "original_audio_kbps": 160})
+    episode.config["on_screen"] = {"burn_in_when_compressing": True}  # opt-in
     _with_onscreen(episode)
     encoded: dict[str, Any] = {}
     muxed: dict[str, Any] = {}

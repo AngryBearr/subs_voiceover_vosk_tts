@@ -79,9 +79,12 @@ SETTINGS: list[Setting] = [
     Setting(("on_screen", "neutral_gender"), "Нейтральный голос", "choice", "Озвучка",
             {"Мужской голос дорожки": "male", "Женский голос дорожки": "female"}),
     Setting(("on_screen", "track"), "Русский перевод надписей на экране (подписи, имена, места)", "bool", "Сведение",
-            info="Отдельная дорожка субтитров, включена по умолчанию; русский текст закрывает английскую надпись"),
+            info="Отдельная дорожка субтитров «Надписи на экране», включена в плеере по умолчанию, но её можно "
+                 "выключить; русский текст закрывает английскую надпись. Полные русские субтитры всех реплик — "
+                 "отдельная дорожка, по умолчанию выключена"),
     Setting(("on_screen", "burn_in_when_compressing"), "При сжатии видео вшивать перевод надписей в картинку", "bool",
-            "Сведение"),
+            "Сведение", info="Обычно не нужно: вшитый текст нельзя выключить. Включайте, только если плеер не "
+                             "показывает дорожки субтитров"),
     Setting(("cast", "enabled"), "Искать состав участников в интернете", "bool", "Распознавание"),
     Setting(("voice_bank", "enabled"), "Банк голосов сезона (узнавать героев между сериями)", "bool",
             "Распознавание"),
@@ -133,7 +136,7 @@ FALLBACKS: dict[tuple[str, ...], Any] = {("line_gender", "enabled"): True, ("lin
                                          ("voiceover", "listen_stress"): True, ("voiceover", "season_stress"): True,
                                          ("voiceover", "parallel_cpu"): True, ("on_screen", "voice"): "text",
                                          ("on_screen", "neutral_gender"): "male", ("on_screen", "track"): True,
-                                         ("on_screen", "burn_in_when_compressing"): True}
+                                         ("on_screen", "burn_in_when_compressing"): False}
 
 
 def teratts_styles() -> set[str]:

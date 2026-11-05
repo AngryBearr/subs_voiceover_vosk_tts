@@ -383,7 +383,7 @@ class Episode:
         """``on_screen`` settings: the voice of captioned lines and the Russian on-screen text.
         Voice ``text`` (captions only shown as Russian text) needs the track: without it the voice becomes
         ``neutral`` so the captioned lines are not lost."""
-        settings = {"voice": "text", "neutral_gender": "male", "track": True, "burn_in_when_compressing": True,
+        settings = {"voice": "text", "neutral_gender": "male", "track": True, "burn_in_when_compressing": False,
                     **(self.config.get("on_screen") or {})}
         if settings["voice"] == "text" and not settings["track"]:
             log.warning("[%s] on_screen.voice is 'text' but on_screen.track is off: captioned lines get the "
