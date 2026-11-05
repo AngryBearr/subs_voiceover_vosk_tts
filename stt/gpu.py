@@ -36,15 +36,16 @@ class VramPeak:
     unlike `torch.cuda.max_memory_allocated`.
     """
 
-    def __init__(self, interval_s: float = 0.05, device_index: int = 0) -> None:
+    def __init__(self, interval_s: float = 0.05, device_index: int = 0, pid: int | None = None) -> None:
         self.interval_s = interval_s
         self.device_index = device_index
+        self.pid = pid  # a process to watch instead of this one (e.g. a child that runs a stage)
         self.peak_mb: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def _used_mb(self, nvml: object, handle: object) -> float | None:
-        pid = os.getpid()
+        pid = self.pid or os.getpid()
         for proc in nvml.nvmlDeviceGetComputeRunningProcesses(handle):  # type: ignore[attr-defined]
             if proc.pid == pid and proc.usedGpuMemory is not None:
                 return proc.usedGpuMemory / 2**20

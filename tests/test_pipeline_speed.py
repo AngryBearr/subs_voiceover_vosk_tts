@@ -506,3 +506,104 @@ def test_a_season_encodes_one_video_at_a_time(tmp_path: Path, encodes: dict[str,
     encodes["release"].set()
     assert second.small_video(second.config["mix"]["video"], 3) is not None
     assert [c[0] for c in encodes["calls"]] == ["ep01.mkv", "ep02.mkv"] and encodes["max_running"] == 1
+
+
+# ---- overlaps only when the card has room (gpu.parallel)
+
+def _card(monkeypatch: pytest.MonkeyPatch, total_gb: float | None, free_gb: float | None = None) -> None:
+    from stt import gpu_budget
+
+    found = None if total_gb is None else (total_gb * 1024, (total_gb if free_gb is None else free_gb) * 1024)
+    monkeypatch.setattr(gpu_budget, "query_vram", lambda: found)
+    gpu_budget.reset_cache()
+
+
+def _run_with_mix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **config: Any) -> tuple[run.Episode, run.Background, list[str]]:
+    episode = _episode(tmp_path, engine="f5")
+    episode.config.update(config)
+    background = run.Background()
+    episode.args.mix_background = background
+    order: list[str] = []
+    out, vo = episode.out, episode.vo_dir
+
+    def stage(name: str, *outputs: Path) -> Any:
+        def work(self: run.Episode) -> None:
+            order.append(name)
+            for output in outputs:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.touch()
+        return work
+
+    for name, outputs in {"transcribe": [out / "subs.en.json"], "glossary": [out / "glossary.json"],
+                          "speakers": [out / "speakers.llm.json"], "translate": [out / "subs.ru.json"],
+                          "dub": [out / "dub.ru.f5.json"], "stress": [out / "stress.json"],
+                          "voiceover": [vo / "export" / "track.wav"], "check": [vo / "speech_check.json"],
+                          "mix": [episode.track("f5")]}.items():
+        monkeypatch.setattr(run.Episode, name, stage(name, *outputs))
+    return episode, background, order
+
+
+@pytest.mark.parametrize("total_gb, mode, in_background", [
+    (16, "auto", True), (12, "auto", True), (8, "auto", False), (None, "auto", False),
+    (8, "on", True), (16, "off", False)])
+def test_mix_runs_beside_the_next_engine_only_when_allowed(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, total_gb: float | None, mode: str, in_background: bool) -> None:
+    _card(monkeypatch, total_gb)
+    episode, background, order = _run_with_mix(monkeypatch, tmp_path, gpu={"parallel": mode})
+    episode.run()
+    assert bool(background._threads) is in_background
+    background.join()
+    assert order[-1] == "mix" and episode.stamp("mix").exists()  # the same stages and marks either way
+    assert order == ["transcribe", "glossary", "speakers", "translate", "dub", "stress", "voiceover", "check", "mix"]
+
+
+def test_mix_stays_in_the_foreground_when_the_card_is_busy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _card(monkeypatch, 16, free_gb=1.0)
+    episode, background, _ = _run_with_mix(monkeypatch, tmp_path)  # no gpu section: auto
+    episode.run()
+    assert not background._threads and episode.stamp("mix").exists()
+
+
+def test_mix_is_given_the_peak_file_and_transcribe_the_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from stt import transcribe
+
+    episode = _episode(tmp_path, engine="f5")
+    episode.config.update(gpu={"parallel": "off"}, ocr={"enabled": True}, modes={"fast": {"asr": "w", "fuse": []}},
+                          diarizer="x")
+    episode.config["mix"].update(duck="voices")
+    episode.args.mode = "fast"
+    monkeypatch.setattr(episode, "subtitle_source", lambda: None)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(transcribe, "main", lambda argv: seen.append(argv))
+    episode.transcribe()
+    assert seen[0][seen[0].index("--gpu-parallel") + 1] == "off"
+    mixed: list[list[str]] = []
+    monkeypatch.setattr(stt_mix, "main", lambda argv: (mixed.append(argv), Path(argv[argv.index("--out") + 1]).touch()))
+    monkeypatch.setattr(stt_mix, "encode_track", lambda wav, out, *a, **k: out.touch())
+    monkeypatch.setattr(run.Episode, "mux_when_ready", lambda self: None)
+    episode.mix()
+    assert mixed[0][mixed[0].index("--vram-peaks") + 1] == str(episode.out / "logs" / "vram_peaks.json")
+
+
+@pytest.mark.parametrize("total_gb, mode, starts", [(16, "auto", True), (12, "auto", True), (8, "auto", False),
+                                                    (None, "auto", False), (8, "on", True), (16, "off", False)])
+def test_compression_starts_early_only_when_allowed_else_in_the_mux(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, encodes: dict[str, Any], total_gb: float | None, mode: str,
+        starts: bool) -> None:
+    _card(monkeypatch, total_gb)
+    episode = _video_episode(tmp_path)
+    episode.config["gpu"] = {"parallel": mode}
+    episode.start_compression()
+    assert bool(run._COMPRESS_JOBS) is starts
+    small = episode.small_video(episode.config["mix"]["video"], 3)  # the mux
+    assert small == episode.out / "video.hevc_nvenc.3619k.mkv" and small.exists()
+    assert len(encodes["calls"]) == 1  # the same video, encoded once, early or lazily
+
+
+def test_compression_is_not_held_back_by_the_card_when_the_encoder_is_software(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, encodes: dict[str, Any]) -> None:
+    _card(monkeypatch, None)
+    episode = _video_episode(tmp_path)
+    episode.config["mix"]["video"]["codec"] = "libx265"
+    episode.start_compression()
+    assert len(run._COMPRESS_JOBS) == 1

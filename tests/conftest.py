@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -30,3 +31,14 @@ def _ui_state_in_tmp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pyte
     from ui import state
 
     monkeypatch.setattr(state, "PATH", tmp_path_factory.mktemp("state") / "ui.local.json")
+
+
+@pytest.fixture(autouse=True)
+def _sixteen_gb_card(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Tests never ask the real card: it is a 16 GB one with plenty free (a test sets its own with ``gpu_budget``)."""
+    from stt import gpu_budget
+
+    gpu_budget.reset_cache()
+    monkeypatch.setattr(gpu_budget, "query_vram", lambda: (16384.0, 15000.0))
+    yield
+    gpu_budget.reset_cache()

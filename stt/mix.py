@@ -170,10 +170,12 @@ def separation_path(cache_dir: Path, media: Path, start: float, duration: float 
     return cache_dir / f"voices.{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}.npy"
 
 
-def separated_voices(original: np.ndarray, sample_rate: int, cache: Path | None) -> np.ndarray:
+def separated_voices(original: np.ndarray, sample_rate: int, cache: Path | None,
+                     peaks_file: Path | None = None) -> np.ndarray:
     """The original's vocal stem (Hybrid Demucs) at ``sample_rate``, same shape as ``original``. With ``cache`` (a file
     from ``separation_path``) it is computed once: engines mixing at the same time wait for the first one and read its
-    result; the file is written whole or not at all."""
+    result; the file is written whole or not at all. If the card runs out of memory the separation is tried once more
+    and then done on the CPU. The peak VRAM goes to ``peaks_file`` (see ``stt.gpu_budget``)."""
     with _SEPARATION_GUARD:
         lock = _SEPARATION_LOCKS.setdefault(cache, threading.Lock()) if cache else None
     with lock or nullcontext():
@@ -186,12 +188,19 @@ def separated_voices(original: np.ndarray, sample_rate: int, cache: Path | None)
             except (OSError, ValueError):
                 pass
             log.warning("Cached voices %s unreadable or of another shape: separating again", cache.name)
+        from stt import gpu_budget
+        from stt.gpu import VramPeak
         from stt.separate import VocalSeparator
 
+        def separate(device: str) -> tuple[int, np.ndarray]:
+            separator = VocalSeparator(device=device)
+            return separator.rate, separator.separate_long(_resample(original, sample_rate, separator.rate).T)
+
         started = time.monotonic()
-        separator = VocalSeparator()
-        stem = separator.separate_long(_resample(original, sample_rate, separator.rate).T)
-        voices = _resample(stem.T, separator.rate, sample_rate)[: len(original)]
+        with VramPeak(interval_s=0.25) as peak:
+            rate, stem = gpu_budget.run_with_cpu_fallback(separate, "Voice separation")
+        gpu_budget.record_peak(peaks_file, "demucs", peak.peak_mb)
+        voices = _resample(stem.T, rate, sample_rate)[: len(original)]
         log.info("Separated the original voices (%.1f min) in %.1f s", len(original) / sample_rate / 60,
                  time.monotonic() - started)
         if cache is not None and voices.shape == original.shape:
@@ -322,6 +331,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--separation-cache", default=None, metavar="DIR",
                         help="With --duck-voices-only: keep the separated voices in this folder and reuse them "
                              "(other engines of the same episode, a rerun)")
+    parser.add_argument("--vram-peaks", default=None, metavar="FILE",
+                        help="With --duck-voices-only: JSON file that gets the peak video memory of the separation")
     parser.add_argument("--voice-gain-db", type=float, default=0.0, help="Raise (or lower) the voice-over, dB")
     parser.add_argument("--loudness-lufs", type=float, default=None,
                         help="Bring the whole mix to this integrated loudness (default: leave the level as mixed)")
@@ -359,7 +370,8 @@ def main(argv: list[str] | None = None) -> None:
         cache = separation_path(Path(args.separation_cache), Path(args.media), args.start,
                                 None if args.full_duration else duration, args.sample_rate) \
             if args.separation_cache else None
-        voices = separated_voices(original, args.sample_rate, cache)
+        voices = separated_voices(original, args.sample_rate, cache,
+                                  Path(args.vram_peaks) if args.vram_peaks else None)
     t_separated = time.monotonic()
     out = mix(original, voice, args.sample_rate, duck_db=args.duck_db, voice_gain_db=args.voice_gain_db,
               extra=layers, voices=voices, rest_duck_db=args.rest_duck_db)

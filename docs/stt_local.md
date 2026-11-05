@@ -111,6 +111,18 @@ other, 19.6 min in two lanes without the CPU cap, 16.4 min with it (a third less
 of the clips the same). The stress check is no longer redone for each engine (the lines are the
 same: `stress.json` records them).
 
+Parallel work on the graphics card (`"gpu": {"parallel": "auto"}`, UI: "Параллельная работа на видеокарте"). Three
+speed-ups overlap GPU work: the on-screen text scan beside diarization and recognition, the mix of one engine
+(voice separation) beside the voicing of the next, and the video compression beside the voicing. They were
+measured on a 16 GB card. `auto` (default) first asks `nvidia-smi` how much video memory the card has and runs an
+overlap only if the card holds the heaviest job it meets, the job itself and a 1.5 GB margin
+(`stt/gpu_budget.py`: about 10.4 GB for the scan, 9.8 GB for the mix, 8.4 GB for the compression) and that much is free
+at the moment; otherwise the jobs go one after another (the scan after the alignment, the mix before the next engine,
+the compression in the final mux): slower, same result. An unknown card counts as too small. `on` always overlaps,
+`off` never. If the voice separation itself runs out of memory it waits 30 s, tries again, and then runs on the
+processor. The peak video memory of the jobs we had no number for (ESpeech, separation, compression, each stage's
+process) is written to `logs/vram_peaks.json` of the episode and to `f5_timing.json`.
+
 ## Stopping and continuing
 
 A run can be stopped at any time (Ctrl+C, "Стоп" in the UI, or the computer restarting) and started

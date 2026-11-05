@@ -44,6 +44,9 @@ ENGINES = {"Vosk": "vosk", "TeraTTS": "teratts", "ESpeech (голоса геро
 MODES = {"Точный: Cohere + Whisper + LLM": "accurate", "Быстрый: только Whisper": "fast"}
 VIDEO_CODECS = {"H.265 (меньше размер, новые плееры)": "hevc_nvenc",
                 "H.264 (играет везде, качество ниже при том же размере)": "h264_nvenc"}
+GPU_PARALLEL = {"Авто: только если видеопамяти хватает с запасом": "auto",
+                "Всегда параллельно (нужна карта от 16 ГБ)": "on",
+                "Никогда: всё по очереди": "off"}
 MODELS = {"luna: дешевле, качество хорошее": "openai/gpt-6-luna", "Sol: лучше перевод, дороже": "openai/gpt-6.1-sol"}
 
 
@@ -58,6 +61,10 @@ SETTINGS: list[Setting] = [
     Setting(("ui", "engines"), "Движки, отмеченные при запуске", "engines", "Запуск", ENGINES),
     Setting(("voiceover", "parallel_cpu"), "Vosk одновременно с TeraTTS и ESpeech (Vosk на процессоре)", "bool",
             "Запуск"),
+    Setting(("gpu", "parallel"), "Параллельная работа на видеокарте", "choice", "Запуск", GPU_PARALLEL,
+            info="Авто: надписи на экране, сведение звука и сжатие видео идут рядом с другими задачами только если "
+                 "видеопамяти хватает с запасом (сначала смотрим, сколько её на карте и сколько свободно); иначе "
+                 "задачи идут по очереди (медленнее, но без сбоев)"),
     Setting(("mode",), "Распознавание", "choice", "Распознавание", MODES),
     Setting(("diarizer",), "Кто когда говорит", "choice", "Распознавание",
             {"DiariZen v2 (точнее; окружение diarizen_env)": "diarizen-v2",
@@ -134,7 +141,8 @@ FALLBACKS: dict[tuple[str, ...], Any] = {("line_gender", "enabled"): True, ("lin
                                          ("translate", "proofread"): True,
                                          ("review",): True, ("ui", "engines"): ["vosk"],
                                          ("voiceover", "listen_stress"): True, ("voiceover", "season_stress"): True,
-                                         ("voiceover", "parallel_cpu"): True, ("on_screen", "voice"): "text",
+                                         ("voiceover", "parallel_cpu"): True, ("gpu", "parallel"): "auto",
+                                         ("on_screen", "voice"): "text",
                                          ("on_screen", "neutral_gender"): "male", ("on_screen", "track"): True,
                                          ("on_screen", "burn_in_when_compressing"): False}
 

@@ -135,6 +135,10 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     timed = [r for r in results if "timing" in r]
     if timed:
         summary = summarize([r["timing"] for r in timed])
+        if torch.cuda.is_available():  # the largest video memory this worker held (PyTorch's allocator), for stt.gpu_budget
+            summary["peak_vram_mb"] = {"allocated": round(torch.cuda.max_memory_allocated() / 2**20),
+                                       "reserved": round(torch.cuda.max_memory_reserved() / 2**20)}
+            log.info("f5 peak video memory: %s MB", summary["peak_vram_mb"])
         log.info(format_summary(summary))
         if job.get("stats_path"):
             write_text_atomic(job["stats_path"], json.dumps({"summary": summary, "lines": [

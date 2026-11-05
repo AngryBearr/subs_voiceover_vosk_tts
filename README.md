@@ -352,6 +352,11 @@ changed. With `voiceover.parallel_cpu` (default) Vosk runs beside the GPU engine
 test piece of S29E05 in all three engines took 25.4 minutes one after another and 16.4 minutes in
 two lanes with the CPU cap.
 
+Parallel work on the graphics card is `gpu.parallel` (`auto` by default, UI: "Параллельная работа на видеокарте"): the
+on-screen text scan, the mix and the video compression run beside other GPU jobs only if the card has enough video
+memory with a 1.5 GB margin (checked with `nvidia-smi`); on a smaller or unknown card they go one after another
+(slower, never a failure). `on` always overlaps, `off` never.
+
 The voice bank (`stt.voice_bank`, UI tab "Голоса сезона") keeps a voice print and reference clips
 for each named person of a season.
 

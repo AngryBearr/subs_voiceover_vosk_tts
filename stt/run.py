@@ -59,7 +59,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from stt import progress
+from stt import gpu_budget, progress
+from stt.gpu import VramPeak
 from stt.runner import REPO_ROOT, load_json, save_json
 from utils.llm_route import split_route, with_route
 
@@ -306,7 +307,7 @@ class Episode:
                     continue
                 if stage == "dub":
                     self.start_compression()  # the first stage of the voicing: the picture is made beside it
-                if stage == "mix" and background is not None:
+                if stage == "mix" and background is not None and self.gpu_overlap("mix"):
                     # the lane goes on with its next engine's dub / voiceover meanwhile; it joins this thread at its end
                     background.start(f"mix-{self.engine}", functools.partial(self._execute, stage, func))
                 else:
@@ -329,6 +330,15 @@ class Episode:
             log.info("[%s] %s (%s): finished in %d s", self.media.stem, stage, engine, seconds)
         else:
             log.info("[%s] %s: finished in %d s", self.media.stem, stage, seconds)
+
+    def gpu_overlap(self, name: str, *, uses_gpu: bool = True) -> bool:
+        """May the GPU job ``name`` run beside others (``gpu.parallel``: auto looks at the card, see stt.gpu_budget)?"""
+        return gpu_budget.allow_overlap(name, (self.config.get("gpu") or {}).get("parallel", "auto"), uses_gpu=uses_gpu)
+
+    @property
+    def vram_peaks(self) -> Path:
+        """Peak video memory of the jobs of this episode (stt.gpu_budget.record_peak)."""
+        return self.out / "logs" / "vram_peaks.json"
 
     # ---- stages
     def transcribe(self) -> None:
@@ -357,6 +367,7 @@ class Episode:
             argv += ["--diar-ahc-threshold", str(diar_options["ahc_threshold"])]
         ocr = self.config.get("ocr", {})
         argv += ["--ocr-fps", str(ocr.get("fps", 2.0))] if ocr.get("enabled", True) else ["--no-ocr"]
+        argv += ["--gpu-parallel", gpu_budget.normalize_mode((self.config.get("gpu") or {}).get("parallel", "auto"))]
         refine = self.config.get("speaker_refine") or {}
         if refine.get("model", "none") != "none":
             argv += ["--refine-speakers", refine["model"], "--refine-margin", str(refine.get("margin", 0.1))]
@@ -539,6 +550,8 @@ class Episode:
         from stt.voice_bank import same_person
 
         if self.voice_bank.exists():  # people new in this episode get a clip; others keep theirs
+            # prints for everyone the final speakers name (subtitles, season voices), not only the LLM-sure first pass
+            self._module("voices_refresh", "stt.voice_bank", [str(self.voice_bank), "--refresh-episode", str(self.out)])
             self._module("voices", "stt.voice_bank", [str(self.voice_bank), "--export", str(self.references),
                                                        "--missing"])
         index = self.references / "references.json"
@@ -615,7 +628,7 @@ class Episode:
                     code = subprocess.run(command, cwd=REPO_ROOT, env=env, stdout=log_file,
                                           stderr=subprocess.STDOUT).returncode
                 else:
-                    code = self._run_watched(command, env, log_file, tracker)
+                    code = self._run_watched(command, env, log_file, tracker, name)
             if code == 0:
                 return
             log_text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -628,20 +641,25 @@ class Episode:
         raise SystemExit(f"{name} failed (exit {code}), see {log_path}")
 
     def _run_watched(self, command: list[str], env: dict[str, str], log_file: Any,
-                     tracker: progress.Tracker) -> int:
+                     tracker: progress.Tracker, name: str = "") -> int:
         """Run ``command`` (output to ``log_file``) and return its exit code; while it runs, copy its progress
         (``[<episode>] voiceover (f5): 25/640 lines``) into this log every ``PROGRESS_LOG_LINES`` lines."""
         process = subprocess.Popen(command, cwd=REPO_ROOT, env=env, stdout=log_file, stderr=subprocess.STDOUT)
         last = 0
+        code: int | None = None
         try:
-            while True:
-                try:
-                    return process.wait(timeout=PROGRESS_POLL_S)
-                except subprocess.TimeoutExpired:
-                    last = self._log_progress(tracker, last)
+            with VramPeak(interval_s=0.5, pid=process.pid) as peak:  # the module's own process (not its children)
+                while code is None:
+                    try:
+                        code = process.wait(timeout=PROGRESS_POLL_S)
+                    except subprocess.TimeoutExpired:
+                        last = self._log_progress(tracker, last)
         except BaseException:  # Ctrl+C or an error here: do not leave the module running on its own
             process.terminate()
             raise
+        if name:
+            gpu_budget.record_peak(self.vram_peaks, name, peak.peak_mb)
+        return code
 
     def _log_progress(self, tracker: progress.Tracker | None, last: int) -> int:
         """Log the stage's progress if it moved far enough since ``last`` was logged; returns the new ``last``."""
@@ -844,7 +862,9 @@ class Episode:
                 return small
             started = time.monotonic()
             try:
-                video_compress.encode_video(self.media, small, bitrate, codec, overlays=overlays)
+                with VramPeak(interval_s=0.5) as peak:  # this process's total: includes a voice separation at the time
+                    video_compress.encode_video(self.media, small, bitrate, codec, overlays=overlays)
+                gpu_budget.record_peak(self.vram_peaks, "nvenc", peak.peak_mb)
             except Exception as error:  # noqa: BLE001 - a big video is better than no video
                 log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
                 return None
@@ -869,6 +889,9 @@ class Episode:
         if target is None:
             return
         _, bitrate, small = target
+        gpu_encoder = str(video_cfg.get("codec", "hevc_nvenc")).endswith("_nvenc")
+        if small.exists() or not self.gpu_overlap("compress", uses_gpu=gpu_encoder):
+            return  # not enough video memory beside the voicing: the final mux compresses it (small_video)
         job: Future[Path | None] = Future()
         with _COMPRESS_GUARD:
             if small in _COMPRESS_JOBS or small.exists():
@@ -926,7 +949,8 @@ class Episode:
             argv.append("--full-duration")
         if cfg.get("duck") == "voices":  # lower only the original voices, keep music and effects
             argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 6.0)),
-                     "--separation-cache", str(self.out / "separation")]  # one separation for all engines
+                     "--separation-cache", str(self.out / "separation"),  # one separation for all engines
+                     "--vram-peaks", str(self.vram_peaks)]
         argv += ["--voice-gain-db", str(cfg.get("voice_gain_db", 3.0))]
         if cfg.get("loudness_lufs") is not None:  # the whole mix to this level, peaks limited (null: leave as mixed)
             argv += ["--loudness-lufs", str(cfg["loudness_lufs"])]

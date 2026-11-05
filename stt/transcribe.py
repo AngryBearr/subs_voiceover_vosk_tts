@@ -32,7 +32,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from stt import progress
+from stt import gpu_budget, progress
 from stt.refine_speakers import REDIMNET2, WESPEAKER, model_cache_key
 from stt.runner import load_json, save_json
 
@@ -211,17 +211,27 @@ def transcribe(args: argparse.Namespace) -> Path:
     log.info("Audio: %.1f min", duration / 60)
     audio, chunks = str(out / "audio.wav"), str(out / "chunks.json")
 
-    # On-screen text needs only the video: scan it in the background while the GPU models run in turn.
+    # On-screen text needs only the video: scan it in the background while the GPU models run in turn, if the card
+    # has room for it beside them (gpu.parallel); otherwise it runs after the alignment, as before.
     ocr_job: BackgroundStage | None = None
+    ocr_inline: Callable[[], dict[str, Any]] | None = None
+    ocr_overlapped = False
     if args.ocr:
         ocr_path = out / "ocr.json"
         ocr_args = ["ocr", "--media", str(media.resolve()), "--out", str(ocr_path), "--device", args.device,
                     "--start", str(args.start), "--fps", str(args.ocr_fps)]
         ocr_args += ["--duration", str(args.duration)] if args.duration else []
-        ocr_job = BackgroundStage("ocr", "subs_env", ocr_args, ocr_path, logs, all_forced or "ocr" in stages)
+        ocr_forced = all_forced or "ocr" in stages
+        # a cached scan costs nothing: it is simply read; the card is asked only when the scan has to run
+        ocr_overlapped = (ocr_path.exists() and not ocr_forced) or gpu_budget.allow_overlap(
+            "ocr", getattr(args, "gpu_parallel", "auto"), uses_gpu=args.device != "cpu")
+        if ocr_overlapped:
+            ocr_job = BackgroundStage("ocr", "subs_env", ocr_args, ocr_path, logs, ocr_forced)
+        else:
+            ocr_inline = lambda: run_stage("ocr", "subs_env", ocr_args, ocr_path, logs, ocr_forced)  # noqa: E731
     try:
         return _transcribe_steps(args, media, out, logs, duration, audio, chunks, stages, all_forced,
-                                 ocr_job, wall0)
+                                 ocr_job, wall0, ocr_inline)
     finally:
         if ocr_job is not None:
             ocr_job.wait()  # never leave the scan running after a failure elsewhere
@@ -229,8 +239,9 @@ def transcribe(args: argparse.Namespace) -> Path:
 
 def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Path, duration: float, audio: str,
                       chunks: str, stages: set[str], all_forced: bool, ocr_job: BackgroundStage | None,
-                      wall0: float) -> Path:
-    """Everything after the audio is decoded and the background scan has started."""
+                      wall0: float, ocr_inline: Callable[[], dict[str, Any]] | None = None) -> Path:
+    """Everything after the audio is decoded and the background scan has started (or, with ``ocr_inline``, is to run
+    after the alignment)."""
     from stt.asr import ASR_MODELS
     from stt.ocr import reclassify
     from stt.assemble import (
@@ -349,13 +360,16 @@ def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Pa
         asr_data = run_stage("align", "subs_env" if args.aligner == "ctc" else "stt_qwen_env", align_args,
                              aligned_path, logs, realign)
 
+    ocr_data: dict[str, Any] | None = ocr_inline() if ocr_inline is not None else None  # one at a time
+
     voice_path = out / f"voice.{args.diarizer}.json"
     voice_args = ["voice", "--audio", audio, "--diarization", str(diar_path), "--out", str(voice_path),
                   "--device", args.device, "--threshold", str(args.gender_threshold)]
     voice_data = run_stage("voice", "subs_env", voice_args, voice_path, logs,
                            all_forced or "voice" in stages or diar_forced)
 
-    ocr_data: dict[str, Any] | None = ocr_job.join() if ocr_job is not None else None
+    if ocr_job is not None:
+        ocr_data = ocr_job.join()
 
     # ---- assemble
     diarization = Diarization.from_dict(diar_data)
@@ -482,6 +496,7 @@ def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Pa
         "ocr_s": ocr_s,
         "voice_s": voice_data.get("run_s"),
         "ocr_hidden_s": round(ocr_job.hidden_s, 1) if ocr_job is not None else 0.0,  # OCR time behind other steps
+        "ocr_parallel": ocr_job is not None,  # False: after the alignment (gpu.parallel, or no OCR)
         "transcribe_wall_s": round(time.perf_counter() - wall0, 1),
         "vram_mb": {"diarize": diar_data.get("peak_vram_mb"),
                     "asr": max((m["peak_vram_mb"] or 0 for m in asr_models.values()), default=0) or None,
@@ -549,6 +564,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="Word times for text-only ASR/fusion: wav2vec2 CTC (default) or Qwen3-ForcedAligner")
     parser.add_argument("--no-ocr", dest="ocr", action="store_false",
                         help="Skip on-screen text (captions for hard-to-hear speech, name cards)")
+    parser.add_argument("--gpu-parallel", choices=list(gpu_budget.MODES), default="auto",
+                        help="Scan on-screen text beside the GPU models: auto = only if the card has room for it "
+                             "(else one at a time), on = always, off = never")
     parser.add_argument("--ocr-fps", type=float, default=2.0, help="Frames per second scanned for on-screen text")
     parser.add_argument("--max-gap", type=float, default=0.8, help="Pause (s) after a sentence that starts a new cue")
     parser.add_argument("--max-gap-mid", type=float, default=1.0, help="Pause (s) inside a sentence that starts a new cue")
