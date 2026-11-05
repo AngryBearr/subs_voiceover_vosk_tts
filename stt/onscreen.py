@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from collections.abc import Iterable
 from pathlib import Path
@@ -652,7 +653,7 @@ def add_speaker_genders(items: list[dict[str, Any]], cues: list[dict[str, Any]],
 
 def translate_items(items: list[dict[str, Any]], speakers: list[dict[str, Any]], client: Any, *,
                     glossary: str = "", batch_size: int = 80, cached: list[dict[str, Any]] | None = None,
-                    cues: list[dict[str, Any]] | None = None,
+                    workers: int = 4, cues: list[dict[str, Any]] | None = None,
                     cues_ru: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Items with `text_ru` (and `descriptor_ru`). Identical texts by the same kind of speaker are translated
     once; `cached` (the previous `onscreen.ru.json`) supplies translations of unchanged items.
@@ -685,15 +686,20 @@ def translate_items(items: list[dict[str, Any]], speakers: list[dict[str, Any]],
     for _attempt in range(3):
         if not pending:
             break
-        for start in range(0, len(pending), batch_size):
-            batch = pending[start : start + batch_size]
+        batches = [pending[start : start + batch_size] for start in range(0, len(pending), batch_size)]
+
+        def ask(batch: list[dict[str, Any]]) -> Any:
             lines = [{"i": it["id"], "kind": it["kind"], "en": it["text"],
                       **({"descriptor": it["descriptor"]} if it.get("descriptor") else {}),
                       **({"label": it["label"]} if it.get("label") else {}),
                       **({"gender": it["gender"]} if it.get("gender") else {}),
                       **({"speaker": it["speaker_ru"]} if it.get("speaker_ru") else {}),
                       **({"context": contexts[it["id"]]} if it["id"] in contexts else {})} for it in batch]
-            answer = client.chat_json(SYSTEM_PROMPT, _prompt(cards, glossary, lines))
+            return client.chat_json(SYSTEM_PROMPT, _prompt(cards, glossary, lines))
+
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(batches)))) as pool:  # independent requests
+            answers = list(pool.map(ask, batches))  # in batch order; the first error is raised
+        for batch, answer in zip(batches, answers):
             rows = answer.get("items", []) if isinstance(answer, dict) else answer
             by_id = {r["i"]: r for r in rows if isinstance(r, dict) and str(r.get("ru", "")).strip()}
             for it in batch:

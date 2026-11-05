@@ -13,6 +13,10 @@ was checked) is also heard by TeraAnaly (``voiceover.stress_listen``) and taken 
 said another stress; ``take_wav`` (a cached take not yet heard) is judged as the first take and
 the new seeds follow its ``take_seed``. One model load for the whole job. Each finished line also
 gets ``<key>.take.json`` next to its WAV, so an interrupted job is resumed by the engine, not redone.
+
+Every result also has ``attempts_run`` (attempts executed; ``takes`` is the winner's number) and ``timing``
+(seconds per phase, see ``voiceover.f5_stats``); the summary goes to the log and, with ``stats_path`` in the job,
+to that JSON file. Reference loading happens inside ``infer_process`` and is counted in ``sampling``.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import numpy as np
 import soundfile as sf
 
 from utils.atomic_io import fsync_file, write_text_atomic
+from voiceover.f5_stats import LineTimer, format_summary, summarize
 
 log = logging.getLogger("voiceover.f5_worker")
 
@@ -57,9 +62,10 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     listener = StressListener(job.get("device", "cuda")) if recognizer and any(i.get("listen") for i in job["items"]) \
         else None
     ref_seconds: dict[str, float] = {}
-    results = []
+    results: list[dict[str, Any]] = []
     t0 = time.time()
     for n, item in enumerate(job["items"], 1):
+        timer = LineTimer()
         ref = item["ref_wav"]
         if ref not in ref_seconds:
             ref_seconds[ref] = sf.info(ref).duration
@@ -69,29 +75,36 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
         try:
             for attempt in range(int(job.get("attempts", 3))):
                 if attempt == 0 and item.get("take_wav"):  # the cached take, heard before any new one
-                    wav, rate = sf.read(item["take_wav"], dtype="float32")
+                    with timer.phase("take_read"):
+                        wav, rate = sf.read(item["take_wav"], dtype="float32")
                 else:
                     torch.manual_seed(first_seed + attempt)
-                    wav, rate, _ = infer_process(ref, item["ref_text"], prefix + item["text"], model, vocoder,
-                                                 nfe_step=int(job.get("nfe", 32)), show_info=quiet,
-                                                 fix_duration=ref_seconds[ref] + float(item["duration"]) + slack)
+                    nfe, fix = int(job.get("nfe", 32)), ref_seconds[ref] + float(item["duration"]) + slack
+                    timer.attempts += 1
+                    with timer.phase("sampling"):
+                        wav, rate, _ = infer_process(ref, item["ref_text"], prefix + item["text"], model, vocoder,
+                                                     nfe_step=nfe, show_info=quiet, fix_duration=fix)
                 wav = np.asarray(wav, dtype=np.float32)
                 check = None
                 if recognizer:
-                    heard, words = recognizer(wav, rate)
-                    check = check_clip({"tts_text": item["text"]}, heard, words, len(wav) / rate)
-                    cut = leading_extra(item["text"], words)
-                    if cut and cut > 0.15:  # the end of the reference spoken before the line: cut it off,
-                        # unless that checks worse (the ASR split the first word: "Кортни" -> "корт ни")
-                        cut_wav = wav[int((cut - 0.05) * rate):]
-                        cut_check = check_audio(recognizer, item["text"], cut_wav, rate)
-                        if clip_score(cut_check) <= clip_score(check):
-                            wav, check = cut_wav, cut_check
+                    with timer.phase("check"):
+                        heard, words = recognizer(wav, rate)
+                        check = check_clip({"tts_text": item["text"]}, heard, words, len(wav) / rate)
+                        cut = leading_extra(item["text"], words)
+                        if cut and cut > 0.15:  # the end of the reference spoken before the line: cut it off,
+                            # unless that checks worse (the ASR split the first word: "Кортни" -> "корт ни")
+                            cut_wav = wav[int((cut - 0.05) * rate):]
+                            cut_check = check_audio(recognizer, item["text"], cut_wav, rate)
+                            timer.cut_rechecks += 1
+                            if clip_score(cut_check) <= clip_score(check):
+                                wav, check = cut_wav, cut_check
                 lost = missing_words(plain_words(item["text"]), plain_words(check["heard"])) if check else 0
                 score = (clip_score(check) + (LOST_WORD_SCORE * lost if retry_lost else 0.0)) if check else 0.0
                 stress: list[dict[str, Any]] = []
                 if listen:
-                    stress = hear(listener, wav, rate, item["text"], listen)  # type: ignore[arg-type]
+                    timer.stress_listened = True
+                    with timer.phase("stress"):
+                        stress = hear(listener, wav, rate, item["text"], listen)  # type: ignore[arg-type]
                     score += STRESS_SCORE * wrong_words(stress)
                 if best is None or score < best[0]:
                     best = (score, wav, attempt, check, stress)
@@ -100,22 +113,33 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
                     break
             assert best is not None
             wav_tmp = Path(item["out_wav"]).with_name(f".{Path(item['out_wav']).name}.tmp")
-            sf.write(str(wav_tmp), best[1], rate, subtype="PCM_16", format="WAV")  # whole or not at all
-            fsync_file(wav_tmp)
-            os.replace(wav_tmp, item["out_wav"])
+            with timer.phase("write"):
+                sf.write(str(wav_tmp), best[1], rate, subtype="PCM_16", format="WAV")  # whole or not at all
+                fsync_file(wav_tmp)
+                os.replace(wav_tmp, item["out_wav"])
             entry: dict[str, Any] = {"key": item["key"], "seed": first_seed + best[2], "takes": best[2] + 1,
                                      "error": None}
             if best[3]:
                 entry["check"] = {k: best[3][k] for k in ("cer", "stretch", "flags", "heard")}
             if listen:
                 entry["stress"] = record(item["listen"], best[4])
+            entry.update(attempts_run=timer.attempts, timing=timer.record())
             # written after the WAV: an interrupted job leaves its finished lines for the next run
             write_text_atomic(Path(item["out_wav"]).with_suffix(".take.json"), json.dumps(entry, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001 - recorded per line, never hidden
-            entry = {"key": item["key"], "error": f"{type(exc).__name__}: {exc}"[:500]}
+            entry = {"key": item["key"], "error": f"{type(exc).__name__}: {exc}"[:500], "attempts_run": timer.attempts,
+                     "timing": timer.record()}
         results.append(entry)
         if n % 50 == 0:
             log.info("f5: %d/%d lines, %.1f s per line", n, len(job["items"]), (time.time() - t0) / n)
+    timed = [r for r in results if "timing" in r]
+    if timed:
+        summary = summarize([r["timing"] for r in timed])
+        log.info(format_summary(summary))
+        if job.get("stats_path"):
+            write_text_atomic(job["stats_path"], json.dumps({"summary": summary, "lines": [
+                {"key": r["key"], "error": r.get("error"), "takes": r.get("takes"), **r["timing"]} for r in timed]},
+                ensure_ascii=False, indent=1))
     return results
 
 

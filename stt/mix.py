@@ -11,11 +11,17 @@ and optional Russian subtitles; it needs an `ffmpeg` binary (PATH or `imageio-ff
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +31,12 @@ from stt.audio import load_audio
 from utils.ffmpeg import ffmpeg_exe
 
 log = logging.getLogger("stt.mix")
+
+# Part of the key of a cached vocal stem: change it with the separator, its chunking or the resampling
+SEPARATION_VERSION = 1
+SEPARATOR_ID = "torchaudio.HDEMUCS_HIGH_MUSDB_PLUS;chunk=30;overlap=1"
+_SEPARATION_LOCKS: dict[Path, threading.Lock] = {}
+_SEPARATION_GUARD = threading.Lock()
 
 
 def _resample(audio: np.ndarray, src: int, dst: int) -> np.ndarray:
@@ -147,6 +159,53 @@ def finish_mix(audio: np.ndarray, sample_rate: int, loudness_lufs: float | None,
     return limit_peaks(audio, sample_rate, ceiling), measured, gain_db
 
 
+def separation_path(cache_dir: Path, media: Path, start: float, duration: float | None, sample_rate: int) -> Path:
+    """File of the cached vocal stem of an interval of ``media`` (decoded at ``sample_rate``): the key holds the media's
+    identity (path, size, time), the interval, the rate, the separator and ``SEPARATION_VERSION``."""
+    media = Path(media).resolve()
+    stat = media.stat()
+    key = json.dumps([str(media), stat.st_size, stat.st_mtime_ns, round(start, 3),
+                      None if duration is None else round(duration, 3), sample_rate, SEPARATOR_ID,
+                      SEPARATION_VERSION])
+    return cache_dir / f"voices.{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}.npy"
+
+
+def separated_voices(original: np.ndarray, sample_rate: int, cache: Path | None) -> np.ndarray:
+    """The original's vocal stem (Hybrid Demucs) at ``sample_rate``, same shape as ``original``. With ``cache`` (a file
+    from ``separation_path``) it is computed once: engines mixing at the same time wait for the first one and read its
+    result; the file is written whole or not at all."""
+    with _SEPARATION_GUARD:
+        lock = _SEPARATION_LOCKS.setdefault(cache, threading.Lock()) if cache else None
+    with lock or nullcontext():
+        if cache is not None and cache.exists():
+            try:
+                voices = np.load(cache, mmap_mode="r")
+                if voices.shape == original.shape and voices.dtype == np.float32:
+                    log.info("Original voices: reused %s", cache.name)
+                    return voices
+            except (OSError, ValueError):
+                pass
+            log.warning("Cached voices %s unreadable or of another shape: separating again", cache.name)
+        from stt.separate import VocalSeparator
+
+        started = time.monotonic()
+        separator = VocalSeparator()
+        stem = separator.separate_long(_resample(original, sample_rate, separator.rate).T)
+        voices = _resample(stem.T, separator.rate, sample_rate)[: len(original)]
+        log.info("Separated the original voices (%.1f min) in %.1f s", len(original) / sample_rate / 60,
+                 time.monotonic() - started)
+        if cache is not None and voices.shape == original.shape:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            partial = cache.with_name(f"{cache.stem}.{os.getpid()}.{threading.get_ident()}.partial")
+            try:
+                with partial.open("wb") as file:
+                    np.save(file, np.ascontiguousarray(voices, dtype=np.float32))
+                partial.replace(cache)
+            finally:
+                partial.unlink(missing_ok=True)
+        return voices
+
+
 def encode_track(wav: Path, out: Path, bitrate: str = "192k") -> None:
     """A mixed WAV as an AAC track (``.m4a``): a tenth of the size, muxed into videos without re-encoding.
     The file appears only when complete (another engine's lane may be muxing the episode's video)."""
@@ -260,6 +319,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="Lower only the original voices (Hybrid Demucs), keep music and effects")
     parser.add_argument("--rest-duck-db", type=float, default=3.0,
                         help="With --duck-voices-only: how much music and effects go down under speech")
+    parser.add_argument("--separation-cache", default=None, metavar="DIR",
+                        help="With --duck-voices-only: keep the separated voices in this folder and reuse them "
+                             "(other engines of the same episode, a rerun)")
     parser.add_argument("--voice-gain-db", type=float, default=0.0, help="Raise (or lower) the voice-over, dB")
     parser.add_argument("--loudness-lufs", type=float, default=None,
                         help="Bring the whole mix to this integrated loudness (default: leave the level as mixed)")
@@ -275,6 +337,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
+    t0 = time.monotonic()
     voice, voice_sr = sf.read(args.voice, dtype="float32", always_2d=False)
     if voice.ndim == 2:
         voice = voice.mean(axis=1)
@@ -290,17 +353,19 @@ def main(argv: list[str] | None = None) -> None:
         layer, layer_sr = sf.read(path, dtype="float32", always_2d=False)
         layers.append((_resample(layer.mean(axis=1) if layer.ndim == 2 else layer, layer_sr, args.sample_rate),
                        float(gain or 0.0)))
+    t_load = time.monotonic()
     voices = None
     if args.duck_voices_only:
-        from stt.separate import VocalSeparator
-
-        separator = VocalSeparator()
-        stem = separator.separate_long(_resample(original, args.sample_rate, separator.rate).T)
-        voices = _resample(stem.T, separator.rate, args.sample_rate)[: len(original)]
-        log.info("Separated the original voices (%.1f min)", len(original) / args.sample_rate / 60)
+        cache = separation_path(Path(args.separation_cache), Path(args.media), args.start,
+                                None if args.full_duration else duration, args.sample_rate) \
+            if args.separation_cache else None
+        voices = separated_voices(original, args.sample_rate, cache)
+    t_separated = time.monotonic()
     out = mix(original, voice, args.sample_rate, duck_db=args.duck_db, voice_gain_db=args.voice_gain_db,
               extra=layers, voices=voices, rest_duck_db=args.rest_duck_db)
+    t_mixed = time.monotonic()
     out, measured, gain_db = finish_mix(out, args.sample_rate, args.loudness_lufs)
+    t_finished = time.monotonic()
     if measured is not None:
         log.info("Loudness %.1f LUFS -> gain %+.1f dB to reach %.1f LUFS (peaks limited at 0.97)", measured, gain_db,
                  args.loudness_lufs)
@@ -310,6 +375,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.mp3:
         sf.write(str(out_path.with_suffix(".mp3")), out, args.sample_rate, format="MP3")
     log.info("Mixed %.1f s -> %s", len(out) / args.sample_rate, out_path)
+    log.info("Mix timing: load %.0f s, separation %.0f s, mixing %.0f s, loudness+limiter %.0f s, wav write %.0f s",
+             t_load - t0, t_separated - t_load, t_mixed - t_separated, t_finished - t_mixed,
+             time.monotonic() - t_finished)
     if args.mux:
         fonts: list[Path] = []
         if args.onscreen_ass:

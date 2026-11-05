@@ -7,6 +7,8 @@ line ``syl_per_sec = a * rate + b`` is fitted, and the rate for the target speed
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -138,6 +140,42 @@ def calibrate(engine_config: dict[str, Any], target_syl_per_sec: float, cache_di
     return Calibration(calibration_version=CALIBRATION_VERSION, engine=engine_identity(engine_config),
                        target_syl_per_sec=target_syl_per_sec, samples=samples, rate=rate,
                        measured_syl_per_sec=sample.syl_per_sec, within_tolerance=within)
+
+
+def probe_texts(engine_config: dict[str, Any]) -> list[str]:
+    """The calibration corpus as the engine will say it (normalized, with stress): part of the shared cache key."""
+    engine: Any = build_engine(engine_config)
+    prepared = engine.prepare([{"cue_id": f"cal-{i}", "index": i + 1, "text": sentence}
+                               for i, sentence in enumerate(CALIBRATION_SENTENCES)])
+    return [row.tts_text for row in prepared]
+
+
+def shared_calibration_path(cache_dir: Path, inputs: dict[str, Any], texts: list[str]) -> Path:
+    """Where a finished calibration lives in the cross-episode TTS cache (``<cache_dir>/calibration``): keyed by
+    ``inputs`` (engine identity with model, reference clip hash, trim, device; target; version; probe rates) and the
+    normalized probe texts."""
+    payload = json.dumps({"inputs": inputs, "probe_texts": texts}, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False)
+    return cache_dir / "calibration" / f"{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:24]}.json"
+
+
+def load_shared_calibration(path: Path, inputs: dict[str, Any], texts: list[str]) -> Calibration | None:
+    """The stored calibration when its recorded inputs and texts equal the requested ones, else ``None``."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("inputs") != inputs or data.get("probe_texts") != texts:
+            return None
+        return Calibration.from_dict(data["calibration"])
+    except (OSError, ValueError, KeyError, TypeError):  # missing or damaged: calibrate again
+        return None
+
+
+def store_shared_calibration(path: Path, inputs: dict[str, Any], texts: list[str], result: Calibration) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"schema": "voiceover-calibration-shared-v1", "inputs": inputs, "probe_texts": texts,
+                               "calibration": result.to_dict()}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 SYL_KEYS = ("base_syl_per_sec", "comfort_syl_per_sec", "ceiling_syl_per_sec")

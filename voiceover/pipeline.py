@@ -21,7 +21,8 @@ from typing import Any, Callable
 
 from utils.srt_to_json import parse_srt_file
 from voiceover.calibrate import (CALIBRATION_VERSION, Calibration, calibrate, derive_timeline_policy,
-                                 engine_identity)
+                                 engine_identity, load_shared_calibration, probe_texts, shared_calibration_path,
+                                 store_shared_calibration)
 from voiceover.compress import (Annotation, CompressionPolicy, annotate_scenes, build_jobs, run_compression,
                                 shortening_jobs, summarize)
 from voiceover.export import export_final
@@ -154,8 +155,23 @@ def stage_calibrate(engine_config: dict[str, Any], policy_config: dict[str, Any]
         if existing.get("inputs") == inputs:
             log.info("calibrate: artifact matches, skipping")
             return Calibration.from_dict(existing["calibration"])
+    shared: Path | None = None
+    texts: list[str] = []
+    try:  # the same voice, model, settings and probe texts give the same rate in any episode
+        texts = probe_texts(engine_config)
+        shared = shared_calibration_path(cache_dir, inputs, texts)
+        cached = load_shared_calibration(shared, inputs, texts)
+        if cached is not None:
+            log.info("calibrate: reused from the shared cache %s (rate %.3f)", shared.name, cached.rate)
+            write_json(path, {"schema": "voiceover-calibration-v1", "inputs": inputs, "calibration": cached.to_dict()})
+            return cached
+    except Exception as exc:  # noqa: BLE001 - no shared cache this time, the calibration is measured
+        log.warning("calibrate: shared cache not used (%s)", str(exc)[:160])
+        shared = None
     result = calibrate(engine_config, target, cache_dir, workers, probe_rates=PROBE_RATES)
     write_json(path, {"schema": "voiceover-calibration-v1", "inputs": inputs, "calibration": result.to_dict()})
+    if shared is not None and result.within_tolerance:  # an off-target result is measured again next time
+        store_shared_calibration(shared, inputs, texts, result)
     log.info("calibrate: voice %s target %.2f syl/s -> rate %.3f, measured %.2f syl/s (%d probes + %d refinement%s)",
              engine_config.get("voice"), target, result.rate, result.measured_syl_per_sec, len(PROBE_RATES),
              len(result.samples) - len(PROBE_RATES), "" if len(result.samples) - len(PROBE_RATES) == 1 else "s")

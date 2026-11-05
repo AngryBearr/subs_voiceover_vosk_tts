@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import functools
 import glob
 import hashlib
 import json
@@ -52,6 +53,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -116,6 +119,53 @@ def finished_folder(config: dict[str, Any], media: Path) -> Path | None:
         return None
     return Path(paths["finished"]).expanduser() / str(paths.get("finished_folder") or "{season}").format(
         season=media.parent.name)
+
+
+class Background:
+    """Stage runs a lane hands to threads (the previous engine's mix) so it can go on; ``join`` waits for all of them and
+    raises the first error. Every thread is named after its engine, as the stages' log lines are."""
+
+    def __init__(self) -> None:
+        self._threads: list[threading.Thread] = []
+        self._errors: list[BaseException] = []
+
+    def start(self, name: str, func: Callable[[], None]) -> None:
+        def work() -> None:
+            try:
+                func()
+            except BaseException as error:  # noqa: BLE001 - raised by join in the lane's thread
+                log.error("%s failed: %s", name, error)
+                self._errors.append(error)
+
+        thread = threading.Thread(target=work, name=name)
+        self._threads.append(thread)
+        thread.start()
+
+    def failed(self) -> bool:
+        return bool(self._errors)
+
+    def join(self) -> None:
+        for thread in self._threads:
+            thread.join()
+        self._threads.clear()
+        if self._errors:
+            error, self._errors = self._errors[0], []
+            raise error
+
+
+# On-screen translation of an episode running in the background (``Episode.start_onscreen``), by episode folder
+_ONSCREEN_JOBS: dict[Path, Future[Path | None]] = {}
+_ONSCREEN_GUARD = threading.Lock()
+# What the combined video of an episode was last muxed from (the tracks and their times), by episode folder
+_MUXED: dict[Path, tuple[tuple[str, int], ...]] = {}
+
+
+def wait_onscreen() -> None:
+    """Wait for every on-screen translation started in the background (their errors are logged, never raised)."""
+    with _ONSCREEN_GUARD:
+        jobs = list(_ONSCREEN_JOBS.values())
+    for job in jobs:
+        job.result()
 
 
 class Episode:
@@ -243,27 +293,36 @@ class Episode:
             "check": (self.check, [self.vo_dir / "speech_check.json"]),
             "mix": (self.mix, [self.track(self.engine)]),
         }
+        background: Background | None = getattr(self.args, "mix_background", None)
         for position, stage in enumerate(STAGES[: until + 1]):
             func, outputs, *inputs = steps[stage]
             with self.lock if self.lock and stage in SHARED_STAGES else nullcontext():
                 if not self.needed(stage, outputs, STAGES[position - 1] if position else None, *inputs):
                     log.info("[%s] %s: done earlier", self.media.stem, stage)
                     continue
-                engine = self.engine if stage in ENGINE_STAGES else None
-                log.info("[%s] %s ...", self.media.stem, f"{stage} ({engine})" if engine else stage)
-                started = time.monotonic()
-                with progress.track(self.out, stage, engine):  # .progress/<stage>[.<engine>].json for the UI
-                    func()
-                    progress.clear_partial(self.out, stage, engine)  # paid answers kept for a restart are not needed now
-                    self.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
-                    self.stamp(stage).touch()
-                seconds = round(time.monotonic() - started)
-                if engine:
-                    log.info("[%s] %s (%s): finished in %d s", self.media.stem, stage, engine, seconds)
+                if stage == "mix" and background is not None:
+                    # the lane goes on with its next engine's dub / voiceover meanwhile; it joins this thread at its end
+                    background.start(f"mix-{self.engine}", functools.partial(self._execute, stage, func))
                 else:
-                    log.info("[%s] %s: finished in %d s", self.media.stem, stage, seconds)
+                    self._execute(stage, func)
             if self.forced_from is None or position < self.forced_from:
                 self.forced_from = position + 1  # later stages depend on fresh output
+
+    def _execute(self, stage: str, func: Callable[[], None]) -> None:
+        """Run one stage that is needed: progress file, finish mark, timing log."""
+        engine = self.engine if stage in ENGINE_STAGES else None
+        log.info("[%s] %s ...", self.media.stem, f"{stage} ({engine})" if engine else stage)
+        started = time.monotonic()
+        with progress.track(self.out, stage, engine):  # .progress/<stage>[.<engine>].json for the UI
+            func()
+            progress.clear_partial(self.out, stage, engine)  # paid answers kept for a restart are not needed now
+            self.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
+            self.stamp(stage).touch()
+        seconds = round(time.monotonic() - started)
+        if engine:
+            log.info("[%s] %s (%s): finished in %d s", self.media.stem, stage, engine, seconds)
+        else:
+            log.info("[%s] %s: finished in %d s", self.media.stem, stage, seconds)
 
     # ---- stages
     def transcribe(self) -> None:
@@ -377,7 +436,7 @@ class Episode:
         if cfg.get("proofread", True):  # a second reader looks for misspelt words and broken grammar
             argv += ["--proofread-model", self.llm("translate_proofread")]
         translate.main(argv)
-        self.translate_onscreen()
+        self.start_onscreen()  # the dub does not need it: only the finished video does
 
     def on_screen(self) -> dict[str, Any]:
         """``on_screen`` settings: the voice of captioned lines and the Russian on-screen text.
@@ -391,9 +450,33 @@ class Episode:
             settings["voice"] = "neutral"
         return settings
 
+    def start_onscreen(self) -> None:
+        """Translate the on-screen text in a background thread; ``translate_onscreen`` (the video) waits for it."""
+        job: Future[Path | None] = Future()
+        with _ONSCREEN_GUARD:
+            _ONSCREEN_JOBS[self.out] = job
+
+        def work() -> None:
+            try:
+                job.set_result(self._translate_onscreen())
+            except BaseException as error:  # noqa: BLE001 - a failed translation only costs the track
+                log.warning("[%s] on-screen text not translated (%s): no Russian on-screen track", self.media.stem,
+                            error)
+                job.set_result(None)
+
+        threading.Thread(target=work, name=f"onscreen-{self.media.stem}").start()
+
     def translate_onscreen(self) -> Path | None:
         """``onscreen.ru.json``: on-screen captions, name cards and lower thirds in Russian (cached per text).
-        None without OCR results or with the on-screen track off; a failed translation only costs the track."""
+        None without OCR results or with the on-screen track off; a failed translation only costs the track.
+        Waits for the background translation of this episode (``start_onscreen``) instead of asking again."""
+        with _ONSCREEN_GUARD:
+            job = _ONSCREEN_JOBS.get(self.out)
+        if job is not None:
+            return job.result()
+        return self._translate_onscreen()
+
+    def _translate_onscreen(self) -> Path | None:
         source, target = self.out / "onscreen.json", self.out / "onscreen.ru.json"
         if not source.exists() or not self.on_screen()["track"]:
             return None
@@ -403,12 +486,14 @@ class Episode:
             return target
         from stt import onscreen
 
+        started = time.monotonic()
         try:
             onscreen.main(["translate", str(self.out), "--glossary", str(self.out / "glossary.txt"),
                            "--model", self.llm("translate")])
         except Exception as error:  # noqa: BLE001 - the video is still made, without the on-screen track
             log.warning("[%s] on-screen text not translated (%s): no Russian on-screen track", self.media.stem, error)
             return None
+        log.info("[%s] on-screen text translated in %d s", self.media.stem, round(time.monotonic() - started))
         return target if target.exists() else None
 
     def _engine(self) -> dict[str, Any]:
@@ -772,7 +857,8 @@ class Episode:
         if not self.args.start and not self.args.duration:
             argv.append("--full-duration")
         if cfg.get("duck") == "voices":  # lower only the original voices, keep music and effects
-            argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 6.0))]
+            argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 6.0)),
+                     "--separation-cache", str(self.out / "separation")]  # one separation for all engines
         argv += ["--voice-gain-db", str(cfg.get("voice_gain_db", 3.0))]
         if cfg.get("loudness_lufs") is not None:  # the whole mix to this level, peaks limited (null: leave as mixed)
             argv += ["--loudness-lufs", str(cfg["loudness_lufs"])]
@@ -785,12 +871,49 @@ class Episode:
             crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 3))])
             argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -4.0)}"]
         mix.main(argv)
+        started = time.monotonic()
         mix.encode_track(out_wav, self.track(self.engine))
+        log.info("[%s] mix (%s): AAC encode %.0f s", self.media.stem, self.engine, time.monotonic() - started)
         if not cfg.get("keep_wav"):  # ~0.5 GB per episode and engine; the AAC track is what the video gets
             out_wav.unlink()
         if cfg.get("mux"):  # a test piece gets a short re-encoded video of the piece
-            with self.lock or nullcontext():  # one video for all engines: one writer at a time
-                self.mux()
+            self.mux_when_ready()
+
+    def mux_when_ready(self) -> None:
+        """Mux the finished video. ``combined``: once, by the engine whose track is the last of this run's engines
+        (the others only log that the mux waits); ``separate``: this engine's own video."""
+        combined = (self.config.get("mix") or {}).get("tracks", "combined") == "combined"
+        with self.lock or nullcontext():  # one video for all engines: one writer at a time
+            signature: tuple[tuple[str, int], ...] = ()
+            if combined:
+                planned = self.planned_tracks([self.engine])
+                waiting = [e for e in planned if not self.track(e).exists()]
+                if waiting:
+                    log.info("[%s] mix (%s): mux deferred until %s finish", self.media.stem, self.engine,
+                             ", ".join(waiting))
+                    return
+                signature = tuple(sorted((e, self.track(e).stat().st_mtime_ns) for e in planned))
+                if _MUXED.get(self.out) == signature and self.finished_video().exists():
+                    log.info("[%s] mix (%s): the video with these tracks is already made", self.media.stem, self.engine)
+                    return
+            started = time.monotonic()
+            self.mux()
+            log.info("[%s] mix (%s): mux %.0f s", self.media.stem, self.engine, time.monotonic() - started)
+            if combined:
+                _MUXED[self.out] = signature
+            self._clear_separation()
+
+    def _clear_separation(self) -> None:
+        """Delete the cached voice separation (~1.5 GB per hour) once the video is made and every engine of this run
+        has its track; before that (or after a failed mux, which never gets here) a rerun reuses it.
+        Done whatever ``mix.keep_wav`` says: that setting is about the mixed WAVs."""
+        cache = self.out / "separation"
+        engines = dict.fromkeys([self.engine, *getattr(self.args, "planned_engines", [])])
+        waiting = [e for e in engines if not self.track(e).exists()]
+        if waiting or not cache.exists():
+            return
+        shutil.rmtree(cache, ignore_errors=True)
+        log.info("[%s] mix (%s): voice separation cache removed (%s)", self.media.stem, self.engine, cache)
 
 
 PROGRESS_POLL_S = 2.0  # how often a running module's progress file is looked at
@@ -824,6 +947,7 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
         for media in files:
             if errors:
                 return
+            background = Background()  # this lane's mixes running while its next engine dubs and voices
             try:
                 if first and len(groups) > 1:
                     try:
@@ -833,11 +957,23 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
                 elif not first:
                     shared[media].wait()
                 for engine in group:
-                    episode(media, engine).run()
+                    if background.failed():
+                        break
+                    ep = episode(media, engine)
+                    ep.args.mix_background = background
+                    ep.run()
             except BaseException as error:  # noqa: BLE001 - stop both lanes, report after they end
                 errors.append(error)
                 for event in shared.values():
                     event.set()
+            finally:
+                try:
+                    background.join()
+                except BaseException as error:  # noqa: BLE001
+                    errors.append(error)
+                    for event in shared.values():
+                        event.set()
+            if errors:
                 return
 
     if len(groups) == 1:
@@ -855,6 +991,7 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
             thread.start()
         for thread in threads:
             thread.join()
+    wait_onscreen()  # a run that ends at the translation still gets onscreen.ru.json
     if errors:
         raise errors[0]
 

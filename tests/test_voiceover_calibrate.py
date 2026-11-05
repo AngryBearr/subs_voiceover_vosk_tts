@@ -118,3 +118,53 @@ def test_stage_calibrate_is_none_for_legacy_policy(tmp_path: Path) -> None:
     legacy = {"base_rate": 1.4, "tempo_comfort_total": 1.6, "tempo_ceiling_total": 1.7}
     assert pipeline.stage_calibrate({"voice": 8}, legacy, tmp_path / "cache", 1, tmp_path) is None
     assert not (tmp_path / "calibration.json").exists()
+
+
+def _shared_setup(monkeypatch: pytest.MonkeyPatch, texts: list[str]) -> list[int]:
+    runs: list[int] = []
+
+    def fake(engine_config: dict[str, Any], target: float, cache_dir: Path, workers: int, **kwargs: Any) -> Calibration:
+        runs.append(1)
+        return make_calibration(1.2)
+
+    monkeypatch.setattr(pipeline, "calibrate", fake)
+    monkeypatch.setattr(pipeline, "engine_identity", lambda config: {"voice": config["voice"]})
+    monkeypatch.setattr(pipeline, "probe_texts", lambda config: texts)
+    return runs
+
+
+def test_stage_calibrate_reuses_the_shared_cache_across_episodes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runs = _shared_setup(monkeypatch, ["Н+у что?"])
+    policy = {"base_syl_per_sec": 5.5, "comfort_syl_per_sec": 6.3, "ceiling_syl_per_sec": 6.7}
+    cache = tmp_path / "cache"
+    first = pipeline.stage_calibrate({"voice": 49}, policy, cache, 1, tmp_path / "ep1")
+    assert len(runs) == 1 and len(list((cache / "calibration").glob("*.json"))) == 1
+    second = pipeline.stage_calibrate({"voice": 49}, policy, cache, 1, tmp_path / "ep2")  # another episode folder
+    assert second == first and len(runs) == 1 and (tmp_path / "ep2" / "calibration.json").exists()
+    pipeline.stage_calibrate({"voice": 56}, policy, cache, 1, tmp_path / "ep3")  # another voice
+    pipeline.stage_calibrate({"voice": 49}, {**policy, "base_syl_per_sec": 5.0}, cache, 1, tmp_path / "ep4")  # target
+    assert len(runs) == 3
+
+
+def test_shared_cache_is_keyed_by_probe_texts_and_ignores_damage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runs = _shared_setup(monkeypatch, ["Н+у что?"])
+    policy = {"base_syl_per_sec": 5.5, "comfort_syl_per_sec": 6.3, "ceiling_syl_per_sec": 6.7}
+    cache = tmp_path / "cache"
+    pipeline.stage_calibrate({"voice": 49}, policy, cache, 1, tmp_path / "ep1")
+    monkeypatch.setattr(pipeline, "probe_texts", lambda config: ["Ну чт+о?"])  # other stress: other audio
+    pipeline.stage_calibrate({"voice": 49}, policy, cache, 1, tmp_path / "ep2")
+    assert len(runs) == 2
+    for path in (cache / "calibration").glob("*.json"):
+        path.write_text("{broken", encoding="utf-8")
+    pipeline.stage_calibrate({"voice": 49}, policy, cache, 1, tmp_path / "ep3")
+    assert len(runs) == 3
+
+
+def test_shared_cache_skips_off_target_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runs = _shared_setup(monkeypatch, ["Н+у что?"])
+    off = Calibration(1, {"voice": 49}, 5.5, [sample(1.0, 5.0)], 1.0, 5.0, False)
+    monkeypatch.setattr(pipeline, "calibrate", lambda *a, **k: (runs.append(1), off)[1])
+    policy = {"base_syl_per_sec": 5.5, "comfort_syl_per_sec": 6.3, "ceiling_syl_per_sec": 6.7}
+    pipeline.stage_calibrate({"voice": 49}, policy, tmp_path / "cache", 1, tmp_path / "ep1")
+    pipeline.stage_calibrate({"voice": 49}, policy, tmp_path / "cache", 1, tmp_path / "ep2")
+    assert len(runs) == 2

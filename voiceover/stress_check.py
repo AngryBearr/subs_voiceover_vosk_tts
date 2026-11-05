@@ -502,6 +502,21 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
     siblings: set[tuple[str, str]] = set()  # other sentences of a proposed plain word, voted on too
     proof_suspects: dict[str, Suspect] = {}
     proof_info: dict[str, Any] | None = None
+    # every question shows the word as it is stressed in that sentence (a homograph may differ between sentences)
+    marked_texts = {text.replace("+", ""): text for text in texts}
+
+    def in_sentence(items: list[tuple[Suspect, str]]) -> list[tuple[Suspect, str]]:
+        return [(replace(x, accented=here) if (here := stress_in(marked_texts.get(c, ""), x.word)) and here != x.accented
+                 else x, c) for x, c in items]
+
+    # The screener's questions are the base ones (they do not depend on the proofreader's proposals, which only add
+    # pairs after them): it answers while the whole-text proofreading runs, and the vote waits for both.
+    screener = screen_pool = screen_future = None
+    if screen:
+        screener = _client(llm_config, str(screen["model"]), env_file,
+                           **{k: v for k, v in screen.items() if k != "model"})
+        screen_pool = ThreadPoolExecutor(1)
+        screen_future = screen_pool.submit(ask, in_sentence(base_pairs), screener)
     if proofreader:
         proofreader_client = _client(llm_config, proofreader, env_file)
         report: dict[str, int] = {}
@@ -545,17 +560,12 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
                     siblings.add((word, context))
                     pairs.append((suspect, context))
         proof_info = {"model": proofreader, "proposals": report.get("proposals", 0), "valid": len(proposals), "corrected": 0}
-    # every question shows the word as it is stressed in that sentence (a homograph may differ between sentences)
-    marked_texts = {text.replace("+", ""): text for text in texts}
-    pairs = [(replace(x, accented=here) if (here := stress_in(marked_texts.get(c, ""), x.word)) and here != x.accented
-              else x, c) for x, c in pairs]
-    base_pairs = pairs[:len(base_pairs)]
+    pairs = in_sentence(pairs)
     screened: list[str | None] = [None] * len(pairs)
     if screen:  # the cheap model proposes, the strong ones vote only on its proposals
-        screener = _client(llm_config, str(screen["model"]), env_file,
-                           **{k: v for k, v in screen.items() if k != "model"})
-        screened[:len(base_pairs)] = ask(base_pairs, screener)
-        stats[f"screen:{screen['model']}"] = screener.stats()
+        screened[:len(base_pairs)] = screen_future.result()  # type: ignore[union-attr]
+        screen_pool.shutdown()  # type: ignore[union-attr]
+        stats[f"screen:{screen['model']}"] = screener.stats()  # type: ignore[union-attr]
         todo = [n for n, (s, context) in enumerate(pairs)  # names, disputed and proofread sentences: always
                 if s.source == "name" or context in s.disputed or (s.word, context) in proposed or (s.word, context) in siblings
                 or (screened[n] and screened[n] != s.accented)]

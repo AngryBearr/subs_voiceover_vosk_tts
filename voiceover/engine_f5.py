@@ -224,7 +224,8 @@ class F5Engine(VoskEngine):
             job, out = Path(tmp) / "job.json", Path(tmp) / "results.json"
             job.write_text(json.dumps({"model": self.repo, "nfe": self.nfe, "attempts": self.attempts,
                                        "device": self.device, "prefix": self.prefix, "slack_s": self.slack_s,
-                                       "retry_lost_words": self.retry_lost_words, "items": items},
+                                       "retry_lost_words": self.retry_lost_words, "items": items,
+                                       "stats_path": str(cache_dir / "f5_timing.json")},
                                       ensure_ascii=False), encoding="utf-8")
             with log_path.open("w", encoding="utf-8") as worker_log:
                 process = subprocess.Popen([str(self.python), "-m", "voiceover.f5_worker", str(job), str(out)],

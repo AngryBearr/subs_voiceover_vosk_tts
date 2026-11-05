@@ -274,3 +274,50 @@ def test_each_sentence_is_voted_against_its_own_stress(monkeypatch) -> None:
     proposals = [{"id": 1, "word": "Дом+а", "stressed": "д+ома"}]
     result = _check(monkeypatch, texts, voters, FakeClient(proposals), omographs={"дома": ["д+ома", "дом+а"]})
     assert result["sentences"] == {"Дома, в моём царстве.": {"дома": "д+ома"}}
+
+
+def test_screener_runs_while_the_text_is_proofread_with_the_same_questions(monkeypatch) -> None:
+    import threading
+
+    asked_by_screener = threading.Event()
+    texts = ["Дом+а, в моём царств+е.", "Мы д+ома.", "Это Само+а."]
+    omographs = {"дома": ["д+ома", "дом+а"]}
+
+    class Screener(FakeClient):
+        def complete_json(self, system, user, prompt_version, tag):  # noqa: ANN001
+            asked_by_screener.set()
+            return super().complete_json(system, user, prompt_version, tag)
+
+    class Reader(FakeClient):
+        def complete_json(self, system, user, prompt_version, tag):  # noqa: ANN001
+            # the proofreading waits for the screener: it fails to see it when the two run one after the other
+            self.overlap = getattr(self, "overlap", True) and asked_by_screener.wait(timeout=5)
+            return super().complete_json(system, user, prompt_version, tag)
+
+    def run(use_reader: bool) -> tuple[dict, Screener, Reader]:
+        class Engine:
+            def prepare(self, items):  # noqa: ANN001
+                return [SimpleNamespace(tts_text=t) for t in texts]
+
+        engine = Engine()
+        engine._accentizer = SimpleNamespace(custom_dict={}, omographs=omographs, accents={"самоа": "сам+оа"})
+        monkeypatch.setattr(stress_check, "build_engine", lambda config: engine)
+        screener = Screener(votes={"дом+а": "д+ома"}, only="Мы дома.")
+        reader = Reader([{"id": 2, "word": "Само+а", "stressed": "сам+оа"}])
+        voters = iter([FakeClient(votes={"само+а": "сам+оа", "д+ома": "дом+а"}) for _ in range(3)])
+        monkeypatch.setattr(stress_check, "_client", lambda cfg, model, env, **k:
+                            screener if model == "scr" else reader if model == "sol" else next(voters))
+        lines = [{"text": t.replace("+", "")} for t in texts]
+        result = stress_check.check(lines, {}, {}, ["a", "b", "c"], second=False, screen={"model": "scr"},
+                                    proofreader="sol" if use_reader else None)
+        return result, screener, reader
+
+    result, screener, reader = run(True)
+    assert reader.overlap  # the screener was asked before the proofreading finished
+    plain, plain_screener, _ = run(False)
+    # the screener got the same questions (the base ones) with and without the proofreader
+    assert screener.seen_sentences == plain_screener.seen_sentences == {"Дома, в моём царстве.", "Мы дома.", "Это Самоа."}
+    screens = {c["sentence"]: c["screen"] for v in result["verdicts"] if v["word"] == "дома" for c in v["contexts"]}
+    plain_screens = {c["sentence"]: c["screen"] for v in plain["verdicts"] if v["word"] == "дома" for c in v["contexts"]}
+    assert screens == plain_screens and screens["Мы дома."] == "д+ома"
+    assert result["proofread"]["valid"] == 1 and "screen:scr" in result["llm"]

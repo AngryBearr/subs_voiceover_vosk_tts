@@ -25,6 +25,7 @@ import argparse
 import logging
 import re
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict
@@ -113,8 +114,9 @@ def prepare_audio(media: Path, out: Path, start: float, duration: float | None, 
     return len(audio) / SAMPLE_RATE, True
 
 
-def run_stage(name: str, env: str, args: list[str], out_path: Path, log_dir: Path, force: bool) -> dict[str, Any]:
-    """Run a cached worker stage; returns its JSON."""
+def run_stage(name: str, env: str, args: list[str], out_path: Path, log_dir: Path, force: bool,
+              *, count_step: bool = True) -> dict[str, Any]:
+    """Run a cached worker stage; returns its JSON (`count_step=False`: the caller reports the progress step)."""
     from stt.worker import call
 
     if out_path.exists() and not force:
@@ -125,7 +127,8 @@ def run_stage(name: str, env: str, args: list[str], out_path: Path, log_dir: Pat
         t0 = time.perf_counter()
         data = call(env, args, out_path, log_dir / f"{name}.log")
         log.info("[%s] done in %.1fs", name, time.perf_counter() - t0)
-    _step_done()
+    if count_step:
+        _step_done()
     return data
 
 
@@ -137,22 +140,57 @@ def _step_done() -> None:
         progress.tick(done, max(done, tracker.total or 0), "steps")
 
 
+class BackgroundStage:
+    """A cached worker stage in a background thread; `join` returns its JSON or re-raises its failure.
+
+    The worker is a subprocess with its own log file (`logs/<name>.log`), so a stage running next to the
+    others never shares a log with them. Progress steps are counted by `join` in the calling thread.
+    """
+
+    def __init__(self, name: str, env: str, args: list[str], out_path: Path, log_dir: Path, force: bool) -> None:
+        self.name = name
+        self.cached = out_path.exists() and not force
+        self.run_s = 0.0  # wall time of the run in the thread (0 when cached)
+        self.wait_s = 0.0  # how long `join` blocked the caller
+        self._data: dict[str, Any] | None = None
+        self._error: BaseException | None = None
+
+        def target() -> None:
+            t0 = time.perf_counter()
+            try:
+                self._data = run_stage(name, env, args, out_path, log_dir, force, count_step=False)
+            except BaseException as exc:  # re-raised in join(), as if the stage had run inline
+                self._error = exc
+            self.run_s = 0.0 if self.cached else time.perf_counter() - t0
+
+        self._thread = threading.Thread(target=target, name=f"stage-{name}", daemon=True)
+        self._thread.start()
+
+    def wait(self) -> None:
+        """Block until the thread ends, without looking at the result."""
+        t0 = time.perf_counter()
+        self._thread.join()
+        self.wait_s += time.perf_counter() - t0
+
+    def join(self) -> dict[str, Any]:
+        self.wait()
+        if self._error is not None:
+            raise self._error
+        assert self._data is not None
+        _step_done()
+        return self._data
+
+    @property
+    def hidden_s(self) -> float:
+        """Seconds of the stage that ran behind other work (not waited for)."""
+        return max(0.0, self.run_s - self.wait_s)
+
+
 def transcribe(args: argparse.Namespace) -> Path:
     from stt.asr import ASR_MODELS
-    from stt.ocr import reclassify
-    from stt.assemble import (
-        CueOptions,
-        assign_speakers,
-        collect_words,
-        merge_captions,
-        on_screen_hints,
-        smooth_speakers,
-        snap_speaker_boundaries,
-    )
-    from stt.diarize import DIARIZER_OPTION_DEFAULTS, DIARIZERS, Diarization, local_model_dir, non_default_options
-    from stt.textfix import collapse_repeats
-    from stt.types import Segment
+    from stt.diarize import DIARIZERS
 
+    wall0 = time.perf_counter()
     media, out = Path(args.media), Path(args.out)
     if not media.is_file():
         raise SystemExit(f"Media not found: {media}")
@@ -172,6 +210,41 @@ def transcribe(args: argparse.Namespace) -> Path:
     all_forced = all_forced or decoded
     log.info("Audio: %.1f min", duration / 60)
     audio, chunks = str(out / "audio.wav"), str(out / "chunks.json")
+
+    # On-screen text needs only the video: scan it in the background while the GPU models run in turn.
+    ocr_job: BackgroundStage | None = None
+    if args.ocr:
+        ocr_path = out / "ocr.json"
+        ocr_args = ["ocr", "--media", str(media.resolve()), "--out", str(ocr_path), "--device", args.device,
+                    "--start", str(args.start), "--fps", str(args.ocr_fps)]
+        ocr_args += ["--duration", str(args.duration)] if args.duration else []
+        ocr_job = BackgroundStage("ocr", "subs_env", ocr_args, ocr_path, logs, all_forced or "ocr" in stages)
+    try:
+        return _transcribe_steps(args, media, out, logs, duration, audio, chunks, stages, all_forced,
+                                 ocr_job, wall0)
+    finally:
+        if ocr_job is not None:
+            ocr_job.wait()  # never leave the scan running after a failure elsewhere
+
+
+def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Path, duration: float, audio: str,
+                      chunks: str, stages: set[str], all_forced: bool, ocr_job: BackgroundStage | None,
+                      wall0: float) -> Path:
+    """Everything after the audio is decoded and the background scan has started."""
+    from stt.asr import ASR_MODELS
+    from stt.ocr import reclassify
+    from stt.assemble import (
+        CueOptions,
+        assign_speakers,
+        collect_words,
+        merge_captions,
+        on_screen_hints,
+        smooth_speakers,
+        snap_speaker_boundaries,
+    )
+    from stt.diarize import DIARIZER_OPTION_DEFAULTS, DIARIZERS, Diarization, local_model_dir, non_default_options
+    from stt.textfix import collapse_repeats
+    from stt.types import Segment
 
     diar_path = out / f"diarization.{args.diarizer}.json"
     diar_args = ["diarize", "--audio", audio, "--model", args.diarizer, "--out", str(diar_path),
@@ -197,10 +270,12 @@ def transcribe(args: argparse.Namespace) -> Path:
         log.info("[diarize] options differ from the cached ones; re-running with %s", non_default_options(wanted))
     diar_forced = all_forced or "diarize" in stages or options_changed
     diar_data = run_stage("diarize", DIARIZERS[args.diarizer].env, diar_args, diar_path, logs, diar_forced)
+    diarize_s, prints_s, refine_s = diar_data.get("diarize_s"), None, None
     if diar_data["turns"] and not diar_data.get("embeddings"):  # DiariZen: prints for speakers.json / the bank
         prints_args = ["prints", "--audio", audio, "--diarization", str(diar_path), "--out", str(diar_path),
                        "--device", args.device]
         diar_data = run_stage("prints", "subs_env", prints_args, diar_path, logs, True)
+        prints_s = diar_data.get("prints_s")
     if args.refine_speakers != "none":
         refined_path = out / f"diarization.{args.diarizer}.refined.{model_cache_key(args.refine_speakers)}.json"
         refine_args = ["refine", "--audio", audio, "--diarization", str(diar_path), "--out", str(refined_path),
@@ -210,6 +285,7 @@ def transcribe(args: argparse.Namespace) -> Path:
             or refined_path.stat().st_mtime < diar_path.stat().st_mtime)
         diar_data = run_stage("refine", "subs_env", refine_args, refined_path, logs,
                               diar_forced or "refine" in stages or stale)
+        refine_s = diar_data.get("refine_s")
         log.info("[refine] %s", diar_data.get("refined"))
 
     hotwords = None
@@ -227,6 +303,13 @@ def transcribe(args: argparse.Namespace) -> Path:
         return path, run_stage(f"asr.{model}", ASR_MODELS[model].env, stage_args, path, logs, asr_forced)
 
     asr_path, asr_data = asr_stage(args.asr)
+    asr_models: dict[str, dict[str, Any]] = {}  # per model: times from its own json (the fused/aligned one has none)
+
+    def note_asr(model: str, data: dict[str, Any]) -> None:
+        asr_models[model] = {k: data.get(k) for k in ("load_s", "warmup_s", "transcribe_s", "peak_vram_mb")}
+
+    note_asr(args.asr, asr_data)
+    fuse_s: float | None = None
     reference_path = asr_path if any(seg.get("words") for seg in asr_data["segments"]) else None  # timed words anchor CTC times
     if args.fuse:
         from stt.fusion import fuse
@@ -236,6 +319,7 @@ def transcribe(args: argparse.Namespace) -> Path:
         for model in [m.strip() for m in args.fuse.split(",") if m.strip()]:
             model_path, model_data = asr_stage(model)
             hypotheses[model] = [Segment.from_dict(s) for s in model_data["segments"]]
+            note_asr(model, model_data)
             if reference_path is None and any(seg.get("words") for seg in model_data["segments"]):
                 reference_path = model_path  # Whisper: the first recognition with word times
         asr_path = out / "asr.fused.json"
@@ -252,6 +336,7 @@ def transcribe(args: argparse.Namespace) -> Path:
                                  "segments": [seg.to_dict() for seg in fused]})
             log.info("[fuse] %s -> %d chunks, %s", ", ".join(hypotheses), len(fused), client.usage.to_dict())
         asr_data = load_json(asr_path)
+        fuse_s = asr_data.get("fuse_s")
     if asr_data["segments"] and not any(seg.get("words") for seg in asr_data["segments"]):
         # Text-only output (model or fusion): get word times from forced alignment.
         aligned_path = asr_path.with_name(asr_path.stem + f".aligned.{args.aligner}.json")
@@ -264,19 +349,13 @@ def transcribe(args: argparse.Namespace) -> Path:
         asr_data = run_stage("align", "subs_env" if args.aligner == "ctc" else "stt_qwen_env", align_args,
                              aligned_path, logs, realign)
 
-    ocr_data: dict[str, Any] | None = None
-    if args.ocr:
-        ocr_path = out / "ocr.json"
-        ocr_args = ["ocr", "--media", str(media.resolve()), "--out", str(ocr_path), "--device", args.device,
-                    "--start", str(args.start), "--fps", str(args.ocr_fps)]
-        ocr_args += ["--duration", str(args.duration)] if args.duration else []
-        ocr_data = run_stage("ocr", "subs_env", ocr_args, ocr_path, logs, all_forced or "ocr" in stages)
-
     voice_path = out / f"voice.{args.diarizer}.json"
     voice_args = ["voice", "--audio", audio, "--diarization", str(diar_path), "--out", str(voice_path),
                   "--device", args.device, "--threshold", str(args.gender_threshold)]
     voice_data = run_stage("voice", "subs_env", voice_args, voice_path, logs,
                            all_forced or "voice" in stages or diar_forced)
+
+    ocr_data: dict[str, Any] | None = ocr_job.join() if ocr_job is not None else None
 
     # ---- assemble
     diarization = Diarization.from_dict(diar_data)
@@ -389,14 +468,24 @@ def transcribe(args: argparse.Namespace) -> Path:
         )
     save_json(out / "speakers.json", speakers)
 
+    ocr_s = ocr_data.get("ocr_s") if ocr_data else None
+    transcribe_s = [m["transcribe_s"] for m in asr_models.values() if m["transcribe_s"] is not None]
     timings = {
         "audio_s": round(duration, 1),
-        "diarize_s": diar_data.get("diarize_s"),
-        "asr_s": asr_data.get("transcribe_s"),
+        "diarize_s": diarize_s,
+        "prints_s": prints_s,
+        "refine_s": refine_s,
+        "asr_s": round(sum(transcribe_s), 3) if transcribe_s else None,  # inference of all models, loading apart
+        "asr_models": asr_models,
+        "fuse_s": fuse_s,
         "align_s": asr_data.get("align_s"),
+        "ocr_s": ocr_s,
         "voice_s": voice_data.get("run_s"),
-        "vram_mb": {"diarize": diar_data.get("peak_vram_mb"), "asr": asr_data.get("peak_vram_mb"),
-                    "voice": voice_data.get("peak_vram_mb")},
+        "ocr_hidden_s": round(ocr_job.hidden_s, 1) if ocr_job is not None else 0.0,  # OCR time behind other steps
+        "transcribe_wall_s": round(time.perf_counter() - wall0, 1),
+        "vram_mb": {"diarize": diar_data.get("peak_vram_mb"),
+                    "asr": max((m["peak_vram_mb"] or 0 for m in asr_models.values()), default=0) or None,
+                    "voice": voice_data.get("peak_vram_mb"), "ocr": ocr_data.get("peak_vram_mb") if ocr_data else None},
     }
     save_json(out / "timings.json", timings)
     unassigned = sum(1 for r in records if r["speaker"] is None)
