@@ -649,9 +649,19 @@ def _season(tmp_path: Path, n: int = 3, *, ready: bool = True) -> list[Path]:
 
 
 def _guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A deadlock fails fast: every Event wait in run_lanes gets a limit."""
+    """A deadlock fails fast: an Event wait without a limit that is not set within 10 s fails the test."""
     original = threading.Event.wait
-    monkeypatch.setattr(threading.Event, "wait", lambda self, timeout=None: original(self, 10 if timeout is None else timeout))
+    timeouts: list[str] = []
+
+    def wait(self: threading.Event, timeout: float | None = None) -> bool:
+        if timeout is not None:
+            return original(self, timeout)
+        if not original(self, 10):
+            timeouts.append(threading.current_thread().name)
+            raise TimeoutError("an event of run_lanes was never set")
+        return True
+
+    monkeypatch.setattr(threading.Event, "wait", wait)
 
 
 def test_next_episode_is_translated_while_the_current_is_voiced(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -795,3 +805,35 @@ def test_force_of_an_engine_stage_still_applies_per_engine(monkeypatch: pytest.M
     calls.clear()
     run.run_lanes(files, tmp_path / "out", _args(until="mix", force="dub"), {}, ["f5", "teratts"])
     assert {(s, e) for _, s, e in calls if s == "dub"} == {("dub", "f5"), ("dub", "teratts")}
+
+
+def test_a_failure_before_the_lanes_start_releases_the_lookahead(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import sys
+
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    _stage_fakes(monkeypatch, calls)
+    files = _season(tmp_path)
+    monkeypatch.setitem(sys.modules, "voiceover.engine", None)  # the two-lane setup fails at its import
+    with pytest.raises(ImportError):
+        run.run_lanes(files, tmp_path / "out", _args(), {"voiceover": {"parallel_cpu": True}}, ["f5", "vosk"])
+    assert not any(t.name == "lookahead" and t.is_alive() for t in threading.enumerate())
+
+
+def test_no_new_engine_starts_after_the_lookahead_failed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    failed = threading.Event()
+
+    def gate(episode: run.Episode, stage: str) -> None:
+        if episode.media.stem == "e2" and stage == "translate":
+            failed.set()
+            raise RuntimeError("translation exploded")
+        if episode.media.stem == "e1" and stage == "mix" and episode.engine == "f5":
+            failed.wait(5)  # f5 of e1 ends only after the lookahead failed
+
+    _stage_fakes(monkeypatch, calls, gate=gate)
+    files = _season(tmp_path)
+    with pytest.raises(RuntimeError, match="translation exploded"):
+        run.run_lanes(files, tmp_path / "out", _args(until="mix"), {"voiceover": {"parallel_cpu": False}}, ["f5", "teratts"])
+    assert not [c for c in calls if c[2] == "teratts" and c[1] in ("dub", "voiceover")]

@@ -1076,6 +1076,8 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
     translate_stage = STAGES[min(STAGES.index(args.until), STAGES.index("translate"))]
     shared_forced: set[Path] = set()  # episodes whose forced shared stages have run already
     forced_guard = threading.Lock()
+    # A forced shared stage up to the translation runs once per episode; the finish marks make every engine's later stages
+    # run. The stress check of an engine whose dubbing lines did not change then keeps its result (same lines, same marks).
     force_shared = bool(getattr(args, "force", None)) and STAGES.index(args.force) <= STAGES.index("translate")
 
     def release_all() -> None:
@@ -1117,7 +1119,7 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
                     return
                 voicing[media].set()
                 for engine in group:
-                    if background.failed():
+                    if background.failed() or errors:  # another thread failed: no new engine starts
                         break
                     ep = episode(media, engine)
                     ep.args.mix_background = background
@@ -1153,26 +1155,31 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
 
     ahead_done[files[0]].set()  # nothing runs before the first episode
     helper = threading.Thread(target=lookahead, name="lookahead") if ahead else None
+    threads: list[threading.Thread] = []
     if helper:
         helper.start()
-    if len(groups) == 1:
-        lane(groups[0], True)
-    else:
-        from voiceover.engine import CPU_THREADS_ENV
+    try:
+        if len(groups) == 1:
+            lane(groups[0], True)
+        else:
+            from voiceover.engine import CPU_THREADS_ENV
 
-        # Vosk on all cores starved the GPU engines' own CPU work (10-min piece: ESpeech 7.5 -> 12.3 min)
-        os.environ.setdefault(CPU_THREADS_ENV, str(max(2, (os.cpu_count() or 4) // 2)))
-        log.info("engines in two lanes: %s on the GPU, %s on the CPU alongside (%s CPU threads)", ", ".join(groups[0]),
-                 ", ".join(groups[1]), os.environ[CPU_THREADS_ENV])
-        threads = [threading.Thread(target=lane, args=(group, n == 0), name=f"lane-{n}") for n, group in
-                   enumerate(groups)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-    if helper:
-        release_all()  # a lane that returned early must not leave the lookahead waiting
-        helper.join()
+            # Vosk on all cores starved the GPU engines' own CPU work (10-min piece: ESpeech 7.5 -> 12.3 min)
+            os.environ.setdefault(CPU_THREADS_ENV, str(max(2, (os.cpu_count() or 4) // 2)))
+            log.info("engines in two lanes: %s on the GPU, %s on the CPU alongside (%s CPU threads)",
+                     ", ".join(groups[0]), ", ".join(groups[1]), os.environ[CPU_THREADS_ENV])
+            for n, group in enumerate(groups):
+                thread = threading.Thread(target=lane, args=(group, n == 0), name=f"lane-{n}")
+                thread.start()
+                threads.append(thread)
+    finally:  # whatever happened above: nothing may stay waiting
+        try:
+            for thread in threads:
+                thread.join()
+        finally:
+            if helper:
+                release_all()  # a lane that returned early (or never started) must not leave the lookahead waiting
+                helper.join()
     wait_onscreen()  # a run that ends at the translation still gets onscreen.ru.json
     if errors:
         raise errors[0]
