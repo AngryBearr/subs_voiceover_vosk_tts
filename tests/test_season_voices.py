@@ -432,3 +432,78 @@ def test_label_of_a_season_person_does_not_make_a_second_speaker(season: list[Pa
     sv.apply_episode(season[0], voices, model=MODEL)
     names = [c["name"] for c in load_json(season[0] / "speakers.json") if c.get("cues")]
     assert len(names) == len(set(names))
+
+
+# ---------------------------------------------------------------- naming again after the stage
+def _after_stage(folder: Path, current: list[dict[str, Any]], first: list[dict[str, Any]]) -> None:
+    """Files as the stage leaves them: its output in place, the first pass saved, the report naming its words.json."""
+    folder.mkdir(parents=True, exist_ok=True)
+    save_json(folder / "words.json", [{"start": 1.0, "end": 1.3, "text": "w", "speaker": current[0]["id"]}])
+    save_json(folder / "speakers.json", current)
+    save_json(folder / "subs.en.json", [])
+    save_json(sv.before_path(folder, "words"), [{"start": 1.0, "end": 1.3, "text": "w", "speaker": first[0]["id"]}])
+    save_json(sv.before_path(folder, "speakers"), first)
+    save_json(sv.before_path(folder, "subs.en"), [])
+    save_json(folder / sv.REPORT, {"written": {"words": sv._sha(folder / "words.json")}})
+
+
+def test_first_pass_ids_follow_the_diarizer_label(tmp_path: Path) -> None:
+    folder = tmp_path / "e1"
+    current = [{"id": "S01", "diarizer_label": "V:Alice Smith", "name": "Alice Smith"},
+               {"id": "S02", "diarizer_label": "2", "name": None}, {"id": "S03", "diarizer_label": "9", "name": None}]
+    first = [{"id": "S01", "diarizer_label": "P:_HOST"}, {"id": "S02", "diarizer_label": "0"},
+             {"id": "S03", "diarizer_label": "2"}]
+    _after_stage(folder, current, first)
+    assert sv.first_pass_ids(folder) == {"S02": "S03"}  # a person and a label unknown to the first pass have none
+    save_json(folder / sv.REPORT, {"written": {"words": "another"}})  # the files are a first pass again
+    assert sv.first_pass_ids(folder) == {"S01": "S01", "S02": "S02", "S03": "S03"}
+
+
+def test_restore_first_pass_moves_the_saved_files_back(tmp_path: Path) -> None:
+    folder = tmp_path / "e1"
+    first = [{"id": "S01", "diarizer_label": "0", "name": None}]
+    _after_stage(folder, [{"id": "S07", "diarizer_label": "V:Bob", "name": "Bob"}], first)
+    assert sv.restore_first_pass(folder)
+    assert load_json(folder / "speakers.json") == first and load_json(folder / "words.json")[0]["speaker"] == "S01"
+    assert not any(sv.before_path(folder, n).exists() for n in sv.FILES)
+    assert not sv.restore_first_pass(folder)  # nothing saved any more
+    assert not sv.written_by_stage(folder)
+
+
+def test_renaming_reaches_the_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A naming run after the stage starts from the first pass, and the stage then starts from the new names."""
+    run, args, config, files, _ = _season_run(tmp_path, monkeypatch)
+    out = tmp_path / "work"
+    args.force = None
+    run.run_season_voices(files, out, args, config, ["vosk"])
+    e1 = out / "e1"
+    assert sv.written_by_stage(e1)
+    assert sv.restore_first_pass(e1)  # what Episode.speakers does before naming
+    cards = load_json(e1 / "speakers.json")
+    cards[1]["name"] = "Carol White"  # the naming gives a new name
+    save_json(e1 / "speakers.json", cards)
+    run.run_season_voices(files, out, args, config, ["vosk"])
+    assert load_json(sv.before_path(e1, "speakers"))[1]["name"] == "Carol White"  # not the old saved names
+
+
+def test_translated_episode_named_again_gets_the_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    run, args, config, files, _ = _season_run(tmp_path, monkeypatch)
+    out = tmp_path / "work"
+    args.force = None
+    e1 = out / "e1"
+    (e1 / "subs.ru.json").write_text("[]", encoding="utf-8")
+    episode = run.Episode(files[0], out, argparse.Namespace(season_glossary=None, force=None, until="mix"), {})
+    named, translated = episode.stamp("speakers"), episode.stamp("translate")
+    named.parent.mkdir(parents=True, exist_ok=True)
+    named.touch()
+    translated.touch()
+    os.utime(named, (1_000, 1_000))  # named before the translation: stays as it is
+    assert not episode.named_after_translation()
+    run.run_season_voices(files, out, args, config, ["vosk"])
+    assert not sv.before_path(e1, "words").exists()
+    os.utime(named, (translated.stat().st_mtime + 10,) * 2)  # named again since («Кто это?»): translated again anyway
+    assert episode.named_after_translation()
+    run.run_season_voices(files, out, args, config, ["vosk"])
+    assert sv.before_path(e1, "words").exists()

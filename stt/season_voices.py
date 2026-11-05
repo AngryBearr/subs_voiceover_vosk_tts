@@ -173,6 +173,58 @@ def before_path(folder: Path, name: str) -> Path:
     return folder / f"{name}{BEFORE}.json"
 
 
+def written_by_stage(folder: Path) -> bool:
+    """Whether the transcript files in ``folder`` are still the ones this stage wrote (its report says so)."""
+    report, words = folder / REPORT, folder / "words.json"
+    if not (report.exists() and words.exists()):
+        return False
+    try:
+        return load_json(report).get("written", {}).get("words") == _sha(words)
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def restore_first_pass(folder: Path) -> bool:
+    """Move the saved first pass (``*.before_voices.json``) back in place of this stage's output, before the naming
+    stage runs again: the naming then works on the first-pass speakers (the ids ``speakers.override.json`` uses), and
+    this stage starts from the new names instead of the saved old ones. False when there is nothing to restore."""
+    saved = {n: before_path(folder, n) for n in FILES}
+    if not all(p.exists() for p in saved.values()) or not written_by_stage(folder):
+        return False
+    for name, path in saved.items():
+        path.replace(folder / f"{name}.json")
+    return True
+
+
+def first_pass_ids(folder: Path) -> dict[str, str]:
+    """Speaker id in ``speakers.json`` now -> the id of the same speaker in the first pass (the ids the naming stage and
+    ``speakers.override.json`` use). The same ids while the files are the first pass. After this stage, a cluster
+    without a name keeps its diarizer label, which finds its first-pass card; people (one card per person, made by
+    this stage) have no first-pass id and are left out."""
+    try:
+        current = load_json(folder / "speakers.json")
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(current, list):
+        return {}
+    saved = before_path(folder, "speakers")
+    if not (written_by_stage(folder) and saved.exists()):
+        return {c["id"]: c["id"] for c in current if isinstance(c, dict) and c.get("id")}
+    by_label: dict[Any, list[str]] = defaultdict(list)
+    for card in load_json(saved):
+        if isinstance(card, dict) and card.get("id"):
+            by_label[card.get("diarizer_label")].append(card["id"])
+    mapping: dict[str, str] = {}
+    for card in current:
+        if not isinstance(card, dict) or not card.get("id"):
+            continue
+        label = card.get("diarizer_label")
+        ids = by_label.get(label) or []
+        if label and not str(label).startswith(STATE_PREFIX) and len(ids) == 1:
+            mapping[card["id"]] = ids[0]
+    return mapping
+
+
 def first_pass_files(folder: Path) -> tuple[dict[str, Path], bool]:
     """The first-pass files to read (words, speakers, subs.en) and whether they are the saved originals.
 
@@ -597,9 +649,8 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
     if dry_run:
         return Result("would-apply", report=report)
     result = Result("applied", report=report)
-    for extra in ("corrections.json", "speakers.override.json"):
-        if (folder / extra).exists():
-            log.warning("[%s] %s refers to the numbering of the first pass (line numbers / speaker ids); check it", folder.name, extra)
+    if (folder / "corrections.json").exists():  # speakers.override.json uses first-pass ids on purpose (naming stage)
+        log.warning("[%s] corrections.json refers to the line numbers of the first pass; check it", folder.name)
     if not old.original:  # the files in the folder are the first pass: keep them once
         for name in FILES:
             shutil.copy2(old.sources[name], before_path(folder, name))

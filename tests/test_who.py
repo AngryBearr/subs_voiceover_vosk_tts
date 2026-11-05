@@ -137,3 +137,24 @@ def test_ui_choices_and_page(tmp_path: Path) -> None:
     from ui import dub_app
 
     dub_app.build()  # the tab is part of the page
+
+
+def test_answers_use_the_first_pass_ids_after_the_season_voices(tmp_path: Path) -> None:
+    from stt import season_voices as sv
+    from stt.runner import save_json
+
+    folder = _episode(tmp_path)
+    current = json.loads((folder / "speakers.json").read_text("utf-8"))
+    for card, label in zip(current, ["V:Jeff Probst", "2", "5", "x"]):
+        card["diarizer_label"] = label
+    save_json(folder / "speakers.json", current)
+    save_json(folder / "words.json", [])
+    first = [{"id": "S01", "diarizer_label": "P:_HOST"}, {"id": "S05", "diarizer_label": "2"},
+             {"id": "S06", "diarizer_label": "5"}]  # S04's label "x" is not in the first pass
+    for name, data in (("speakers", first), ("words", []), ("subs.en", [])):
+        save_json(sv.before_path(folder, name), data)
+    save_json(folder / sv.REPORT, {"written": {"words": sv._sha(folder / "words.json")}})
+    assert [g.speaker for g in who.unnamed_groups(folder)] == ["S02"]  # S04 cannot be matched to the first pass
+    who.save_answer(folder, "S02", name="Richard Hatch")
+    assert json.loads((folder / who.OVERRIDE).read_text("utf-8")) == {"S05": {"name": "Richard Hatch"}}
+    assert who.unnamed_groups(folder) == []  # answered

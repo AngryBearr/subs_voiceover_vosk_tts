@@ -104,6 +104,9 @@ class FakeEpisode:
     def stamp(self, stage: str) -> Path:
         return self.out / ".stages" / stage
 
+    def named_after_translation(self) -> bool:
+        return False
+
 
 @pytest.mark.parametrize("force,rewritten", [(None, ["new"]), ("speakers", ["done", "new"])])
 def test_translated_episodes_stay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, force: str | None, rewritten: list[str]) -> None:

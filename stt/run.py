@@ -252,6 +252,11 @@ class Episode:
         engine_stage = stage in ENGINE_STAGES
         return self.out / ".stages" / (f"{stage}.{self.engine}" if engine_stage else stage)
 
+    def named_after_translation(self) -> bool:
+        """The speakers stage finished after the translation (its finish marks): the translation is made again."""
+        named, translated = self.stamp("speakers"), self.stamp("translate")
+        return named.exists() and translated.exists() and named.stat().st_mtime > translated.stat().st_mtime
+
     def needed(self, stage: str, outputs: list[Path], previous: str | None = None,
                inputs: list[Path] | None = None) -> bool:
         """Run a stage if forced, if an output is missing, if the previous stage finished after it,
@@ -427,9 +432,11 @@ class Episode:
         self.season.with_suffix(".txt").write_text(lines, encoding="utf-8")
 
     def speakers(self) -> None:
-        from stt import speakers
+        from stt import season_voices, speakers
 
-        argv = [str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("speakers")]
+        if season_voices.restore_first_pass(self.out):  # else the season voices would start from the old names
+            log.info("[%s] speakers: named again from the first pass; the season voices follow", self.media.stem)
+        argv =[str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("speakers")]
         if (self.config.get("voice_bank") or {}).get("enabled", True):
             argv += ["--voice-bank", str(self.voice_bank)]
         if self._find_cast():
@@ -1151,8 +1158,10 @@ def run_season_voices(files: list[Path], out_root: Path, args: argparse.Namespac
     for folder, medias in seasons.items():
         every = [out_root / p.stem for p in sorted(folder.iterdir()) if p.suffix.lower() in VIDEO_SUFFIXES]
         every = [f for f in every if (f / "speakers.json").exists()]
-        # A translated episode stays: a new transcript would mean a new translation and voice-over, LLM costs included
-        fresh = [m for m in medias if forced or not (episodes[m].out / "subs.ru.json").exists()]
+        # A translated episode stays: a new transcript would mean a new translation and voice-over, LLM costs included;
+        # unless its naming ran again since the translation (an answer of «Кто это?»): it is translated again anyway
+        fresh = [m for m in medias if forced or not (episodes[m].out / "subs.ru.json").exists()
+                 or episodes[m].named_after_translation()]
         for media in medias:
             if media not in fresh:
                 log.info("[%s] season voices: already translated, stays as it is (--force speakers assigns it again)", media.stem)

@@ -3,7 +3,9 @@
 
 Pure functions over an episode work folder (``speakers.json``, ``speakers.llm.json``, ``subs.en.json``, ``audio.wav``)
 and the season's ``<season>.cast.json``. The override entry of a person is ``{"name": ..., "gender": ...}``; a mixed
-group is ``{"mixed": true}`` (no name: it keeps the generic voice but is not offered again).
+group is ``{"mixed": true}`` (no name: it keeps the generic voice but is not offered again). Groups are shown with the ids
+of ``speakers.json`` now; answers are written under the first-pass ids the naming stage uses (``stt.season_voices``
+renumbers the speakers; the naming starts from the first pass again).
 """
 
 from __future__ import annotations
@@ -128,9 +130,13 @@ def unnamed_groups(folder: Path, min_cues: int = MIN_CUES) -> list[Group]:
     llm = _load(folder / "speakers.llm.json", {})
     cards = {c.get("id"): c for c in llm.get("cards", []) if isinstance(c, dict)} if isinstance(llm, dict) else {}
     overrides = load_overrides(folder)
+    first_ids = first_pass_ids(folder)
     groups = []
     for s in speakers:
-        if s.get("name") or (s.get("cues") or 0) < min_cues or s.get("id") in overrides:
+        if s.get("name") or (s.get("cues") or 0) < min_cues:
+            continue
+        answer_id = first_ids.get(s.get("id"))
+        if answer_id is None or answer_id in overrides:  # no first-pass speaker to name, or already answered
             continue
         mine = [r for r in records if r.get("speaker") == s["id"]]
         card = cards.get(s["id"], {})
@@ -179,9 +185,17 @@ def episode_groups(results: Path, episodes: list[str] | None = None, cut_to: Pat
     return found
 
 
+def first_pass_ids(folder: Path) -> dict[str, str]:
+    """Speaker id shown now -> the id the naming stage uses (they differ once the season voices rewrote the files)."""
+    from stt.season_voices import first_pass_ids as mapping
+
+    return mapping(folder)
+
+
 def save_answer(folder: Path, speaker: str, name: str | None = None, gender: str | None = None, mixed: bool = False) -> Path:
-    """Writes the answer into ``speakers.override.json`` (other entries stay): a person -> ``{"name", "gender"?}``,
-    a mixed group -> ``{"mixed": true}``. Raises ValueError for nothing to write."""
+    """Writes the answer into ``speakers.override.json`` (other entries stay) under the first-pass id of ``speaker`` (the
+    id shown now): a person -> ``{"name", "gender"?}``, a mixed group -> ``{"mixed": true}``. Raises ValueError for
+    nothing to write or a group without a first-pass speaker."""
     if gender not in GENDERS:
         gender = None
     if mixed:
@@ -194,8 +208,11 @@ def save_answer(folder: Path, speaker: str, name: str | None = None, gender: str
             entry["gender"] = gender
     else:
         raise ValueError("no name and not marked as mixed")
+    answer_id = first_pass_ids(folder).get(speaker)
+    if answer_id is None:
+        raise ValueError(f"group {speaker} has no speaker of the first pass to name")
     overrides = load_overrides(folder)
-    overrides[speaker] = entry
+    overrides[answer_id] = entry
     path = folder / OVERRIDE
     write_text_atomic(path, json.dumps(overrides, ensure_ascii=False, indent=2) + "\n")
     return path
