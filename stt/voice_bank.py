@@ -43,7 +43,7 @@ import logging
 import re
 import subprocess
 import sys
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +60,9 @@ STRONG = 0.75  # an unnamed cluster takes the name from this similarity on ...
 MARGIN = 0.1  # ... when the next other name is at least this much lower
 MIN_SPEECH_S = 20.0  # clusters with less speech give unreliable prints
 MIN_CONFIDENCE = 0.6  # LLM naming confidence needed to add a print
+TRUSTED_SOURCES = {"subtitles", "voice_bank", "manual", "voice_bank_recheck"}  # names that need no LLM confidence
+MIN_PIECE_S = 1.5  # shortest stretch of a person's cue that goes into a print computed from the audio
+PRINT_MAX_S = 90.0  # audio seconds that make a print computed from cues (longest stretches first)
 SAMPLE_MIN_S, SAMPLE_MAX_S, SAMPLE_GAP_S = 5.0, 9.0, 0.4  # F5 clips references over 12 s (with 1 s pad): keep them shorter
 SAMPLES_PER_EPISODE = 5
 CLONE_RATE = 24_000
@@ -130,6 +133,24 @@ def reference_samples(speaker: str | Collection[str], records: list[dict[str, An
     return out[:limit] if limit else out
 
 
+def cue_speech_s(speaker: str, records: list[dict[str, Any]]) -> float:
+    """Seconds of a speaker's cues (burned-in captions left out); for speakers the diarizer gave no talk time
+    (people only the subtitles name)."""
+    return sum((r["end"] - r["start"]) / 1000 for r in records if r.get("speaker") == speaker and not r.get("ocr"))
+
+
+def print_speech_s(speaker: dict[str, Any], records: list[dict[str, Any]]) -> float:
+    """Speech of a speaker card: the diarizer's talk time, else the length of its cues."""
+    return float(speaker.get("speech_s") or cue_speech_s(speaker["id"], records))
+
+
+def sure_name(speaker: dict[str, Any]) -> bool:
+    """Whether a speaker's name is sure enough for a print: given by the subtitles, the bank or a person, a person of
+    the season voices, or named by the LLM with at least ``MIN_CONFIDENCE``."""
+    return (speaker.get("name_source") in TRUSTED_SOURCES or bool(speaker.get("season_voice"))
+            or (speaker.get("llm_confidence") or 0) >= MIN_CONFIDENCE)
+
+
 class VoiceBank:
     def __init__(self, path: Path, data: dict[str, Any] | None = None) -> None:
         self.path = path
@@ -172,21 +193,25 @@ class VoiceBank:
         return sorted(best, key=lambda m: -m["score"])
 
     def add_episode(self, episode: str, speakers: list[dict[str, Any]], records: list[dict[str, Any]]) -> int:
-        """Replace this episode's prints by its named, well-heard clusters; returns their number."""
+        """Replace this episode's prints by its named, well-heard speakers; returns their number.
+
+        A speaker needs a name, an embedding and ``MIN_SPEECH_S`` of speech (the card's, else the length of its cues).
+        A name counts as sure when the subtitles, the voice bank or a person gave it, when the speaker is a person of
+        the season voices, or when the LLM was at least ``MIN_CONFIDENCE`` sure. The ids are the ones in ``speakers``
+        (the current numbering), so run it with the final cards of the episode.
+        """
         self.data["prints"] = [p for p in self.prints if p["episode"] != episode]
         self.data["conflicts"] = [c for c in self.data.get("conflicts", []) if c["episode"] != episode]
         added = 0
         for s in speakers:
-            if not s.get("name") or not s.get("embedding") or (s.get("speech_s") or 0) < MIN_SPEECH_S:
-                continue
-            confident = s.get("name_source") == "voice_bank" or (s.get("llm_confidence") or 0) >= MIN_CONFIDENCE
-            if not confident:
+            speech_s = print_speech_s(s, records)
+            if not s.get("name") or not s.get("embedding") or speech_s < MIN_SPEECH_S or not sure_name(s):
                 continue
             self.prints.append({
                 "episode": episode, "speaker": s["id"], "name": s["name"], "label_ru": s.get("label_ru"),
-                "gender": s.get("gender"), "speech_s": s.get("speech_s"), "source": s.get("name_source", "llm"),
+                "gender": s.get("gender"), "speech_s": round(speech_s, 2), "source": s.get("name_source") or "llm",
                 "confidence": s.get("llm_confidence"), "embedding": s["embedding"],
-                "samples": reference_samples(s["id"], records),
+                "cues": s.get("cues"), "samples": reference_samples(s["id"], records),
             })
             added += 1
         for s in speakers:
@@ -368,6 +393,70 @@ def cluster_prints(turns: list[dict[str, Any]], audio: np.ndarray, embed: "Segme
         vector = embed(piece, rate) * min(end - start, max_piece_s)
         sums[speaker] = sums.get(speaker, 0) + vector
     return {speaker: [round(float(x), 6) for x in _unit(list(total))] for speaker, total in sums.items()}
+
+
+def person_embedding(episode_dir: Path, speaker: str, records: list[dict[str, Any]],
+                     embed: "Callable[[np.ndarray, int], np.ndarray]") -> list[float] | None:
+    """A print for a speaker the diarizer has no cluster for (a person the subtitles name): the length-weighted mean
+    embedding of the speaker's longest solo cues (``PRINT_MAX_S`` of audio at most), as ``cluster_prints`` does for
+    clusters. None without the episode's audio or a long enough cue."""
+    import soundfile as sf
+
+    audio_path = episode_dir / "audio.wav"
+    if not audio_path.exists():
+        return None
+    source = episode_dir / "source.json"  # the audio starts at the media offset of a test piece
+    offset = float(json.loads(source.read_text(encoding="utf-8")).get("start") or 0.0) if source.exists() else 0.0
+    pieces = sorted(((r["start"] / 1000 - offset, r["end"] / 1000 - offset) for r in records
+                     if r.get("speaker") == speaker and not r.get("overlap") and not r.get("ocr")
+                     and (r["end"] - r["start"]) / 1000 >= MIN_PIECE_S), key=lambda p: p[0] - p[1])
+    if not pieces:
+        return None
+    audio, rate = sf.read(str(audio_path), dtype="float32")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    total: np.ndarray | float = 0.0
+    used = 0.0
+    for start, end in pieces:
+        end = min(end, start + 10.0)
+        if start < 0 or used >= PRINT_MAX_S:
+            continue
+        total = total + embed(audio[int(start * rate):int(end * rate)], rate) * (end - start)
+        used += end - start
+    return [round(float(x), 6) for x in _unit(list(total))] if used else None
+
+
+def refresh_episode(bank_path: Path, episode_dir: Path, device: str = "cuda",
+                    embed: "Callable[[np.ndarray, int], np.ndarray] | None" = None) -> int:
+    """Rebuild the bank's prints of one episode from its final ``speakers.json`` / ``subs.en.json`` (after the season
+    voices stage, which renumbers the speakers and gives every person one speaker). Returns the number of prints.
+
+    Every named speaker with enough speech and a sure name gets a print, also the people only the subtitles or the
+    season voices name. A speaker without an embedding gets one from its cues' audio (the model loads only then; an
+    earlier print of the same name, id and cue count is reused). The episode's earlier prints are replaced, so a
+    rerun never doubles them and no print keeps an id of the first pass. ``speakers.json`` is not touched.
+    """
+    speakers = json.loads((episode_dir / "speakers.json").read_text(encoding="utf-8"))
+    records = json.loads((episode_dir / "subs.en.json").read_text(encoding="utf-8"))
+    bank = VoiceBank.load(bank_path)
+    earlier = [p for p in bank.prints if p["episode"] == episode_dir.name]
+    for s in speakers:
+        if not s.get("name") or s.get("embedding") or not sure_name(s) or print_speech_s(s, records) < MIN_SPEECH_S:
+            continue
+        kept = next((p for p in earlier if p["speaker"] == s["id"] and same_person(p["name"], s["name"])
+                     and p.get("cues") == s.get("cues")), None)
+        if kept is not None:
+            s["embedding"] = kept["embedding"]
+            continue
+        if embed is None:
+            embed = SegmentEmbedder(device)
+        s["embedding"] = person_embedding(episode_dir, s["id"], records, embed)
+        if s["embedding"] is None:
+            log.warning("%s: no print for %s (no audio or no long cue)", episode_dir.name, s["name"])
+    added = bank.add_episode(episode_dir.name, speakers, records)
+    bank.save()
+    log.info("voice bank: %d prints from %s, %d in %s", added, episode_dir.name, len(bank.prints), bank.path)
+    return added
 
 
 def _words(episode_dir: Path, start: float, end: float) -> str | None:
@@ -739,12 +828,18 @@ def main(argv: list[str] | None = None) -> int:
                              "similarity, pieces}), or {error} on failure (for the UI)")
     parser.add_argument("--refs", type=Path, default=None,
                         help="With --manual-clip/--remove-manual: the clips folder (default: next to the bank)")
+    parser.add_argument("--refresh-episode", type=Path, default=None, metavar="EPISODE_DIR",
+                        help="Rebuild this episode's prints from its final speakers (people named by the subtitles "
+                             "or the season voices get one too)")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--recheck", action="store_true", help="List prints other episodes know by another name")
     parser.add_argument("--write-overrides", action="store_true",
                         help="With --recheck: write the renames into the episodes' speakers.override.json")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+    if args.refresh_episode:
+        refresh_episode(args.bank, args.refresh_episode, args.device)
+        return 0
     bank = VoiceBank.load(args.bank)
     if args.manual_clip or args.remove_manual:
         from stt.manual_clip import run_cli

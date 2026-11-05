@@ -176,6 +176,43 @@ def find_member(name: str, cast: dict[str, Any]) -> dict[str, Any] | None:
     return exact[0] if exact else found[0] if len(found) == 1 else None
 
 
+def _label_key(text: str) -> str:
+    """Letters and digits only, lower case: "B.B." / "B.B" / "b b" are one key."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def host_member(cast: dict[str, Any]) -> dict[str, Any] | None:
+    """The season's host: the one cast member whose role names a host (a reunion or guest host does not count
+    while a main host exists); None when there is none or several."""
+    hosts = [p for p in cast.get("cast", []) if re.search(r"\bhost\b", str(p.get("role") or "").lower())]
+    main = [p for p in hosts if not re.search(r"reunion|guest|co-?host|former", str(p.get("role") or "").lower())]
+    found = main or hosts
+    return found[0] if len(found) == 1 else None
+
+
+def member_for_label(label: str, cast: dict[str, Any]) -> dict[str, Any] | None:
+    """The cast member a subtitle label ("SEAN", "B.B", "RICH", "_HOST") stands for: the host label gives the host;
+    else the full name or an alias, then a first name, surname or alias word that only one member has, then a
+    spelling variant (``find_member``). None when no member or several fit."""
+    from stt.subtitles import HOST
+
+    people = [p for p in cast.get("cast", []) if p.get("name")]
+    key = _label_key(label)
+    if label == HOST or key == "host":
+        return host_member(cast)
+    if len(key) < 2:
+        return None
+    whole = [p for p in people if key in {_label_key(n) for n in [p["name"], *(p.get("aliases") or [])]}]
+    if len(whole) == 1:
+        return whole[0]
+    if whole:
+        return None
+    words = [p for p in people if key in {_label_key(w) for n in [p["name"], *(p.get("aliases") or [])] for w in n.split()}]
+    if words:
+        return words[0] if len(words) == 1 else None
+    return find_member(label.title(), cast)
+
+
 def check_speakers(speakers: list[dict[str, Any]], cast: dict[str, Any]) -> list[str]:
     """Cast spellings for named speakers; notes on names not in the cast and gender conflicts."""
     from stt.voice_bank import same_person

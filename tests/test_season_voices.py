@@ -391,3 +391,44 @@ def test_prepare_embeddings_recomputes_embeddings_of_an_earlier_transcript(tmp_p
         assert list(data["starts"]) == [1.0, 2.0] and data["emb"].shape == (2, 4)
     season_voices.prepare_embeddings([folder], "resnet293")  # up to date now: nothing computed
     assert calls == [2]
+
+
+CAST = {"cast": [
+    {"name": "Alice Smith", "aliases": ["Ali"], "gender": "female", "role": "Contestant"},
+    {"name": "Bob Jones", "aliases": [], "gender": "male", "role": "Contestant"},
+    {"name": "Carol Wu", "aliases": ["Caz", "C.W."], "gender": "female", "role": "Contestant"},
+    {"name": "Jeff Probst", "aliases": ["Jeff"], "gender": "male", "role": "Host"},
+]}
+
+
+def test_subtitle_labels_resolve_to_the_cast(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Initials and nicknames find the season person; spellings of one new person share one speaker named as the cast does."""
+    voices = sv.build_voices(season, MODEL, 20, cast=CAST)
+    assert voices.by_first_name("ALI") == "Alice Smith" and voices.by_first_name("_HOST") is None  # no host voice yet
+    hints = WordHints(persons={"ALI": [0, 1, 2], "CAZ": list(range(42, 47)), "C.W": list(range(47, 52)),
+                               "_HOST": list(range(52, 57))})
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: hints)
+    sv.apply_episode(season[0], voices, model=MODEL)
+    cards = load_json(season[0] / "speakers.json")
+    names = [c["name"] for c in cards if c.get("cues")]
+    assert names.count("Carol Wu") == 1  # "CAZ" and "C.W" are one person (each alone is under the 10 words a state needs)
+    carol = next(c for c in cards if c["name"] == "Carol Wu")
+    assert (carol["gender"], carol["gender_source"], carol["name_source"]) == ("female", "cast", "subtitles")
+    assert spoken(season[0])[:3] == ["Alice Smith"] * 3
+    assert not any(n and n.startswith(("Caz", "C.W", "_")) for n in names)
+
+
+def test_host_label_names_the_cast_host(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    voices = sv.build_voices(season, MODEL, 20, cast=CAST)
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: WordHints(persons={"_HOST": list(range(42, 56))}))
+    sv.apply_episode(season[0], voices, model=MODEL)
+    host = next(c for c in load_json(season[0] / "speakers.json") if c["name"] == "Jeff Probst")
+    assert host["gender"] == "male" and host["diarizer_label"] == "P:Jeff Probst"
+
+
+def test_label_of_a_season_person_does_not_make_a_second_speaker(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    voices = sv.build_voices(season, MODEL, 20, cast=CAST)
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: WordHints(persons={"BOB": [0, 1], "BOB JONES": [2, 3]}))
+    sv.apply_episode(season[0], voices, model=MODEL)
+    names = [c["name"] for c in load_json(season[0] / "speakers.json") if c.get("cues")]
+    assert len(names) == len(set(names))

@@ -86,6 +86,7 @@ class SeasonVoices:
     fingerprint: str = ""
     cards: dict[str, dict[str, Any]] = field(default_factory=dict)
     aliases: dict[str, str] = field(default_factory=dict)  # lower-case alias -> name (the season's cast list)
+    cast: dict[str, Any] = field(default_factory=dict)  # the season's cast (``<season>.cast.json``): resolves subtitle labels
 
     def __len__(self) -> int:
         return len(self.names)
@@ -99,13 +100,19 @@ class SeasonVoices:
         name = clean_name(name)
         if name in self.names:
             return name
-        order = sorted(range(len(self.names)), key=lambda j: -self.counts[j])
+        order = sorted(range(len(self.names)), key=lambda j: -(self.counts[j] if self.counts else 0))  # no counts while building
         return next((self.names[j] for j in order if same_person(name, self.names[j])), None)
 
     def by_first_name(self, label: str) -> str | None:
         """The one person whose first name is ``label``'s (case-insensitive); None when none or several."""
+        from stt.cast import member_for_label
         from stt.subtitles import HOST, HOST_LABELS
 
+        member = member_for_label(label, self.cast) if self.cast else None
+        if member is not None:  # the cast says who the label is ("B.B" = B.B. Andersen, "_HOST" = the host)
+            person = self.person_of(member["name"])
+            if person is not None:
+                return person
         if label == HOST:
             found = [n for n in self.names if n.upper() in HOST_LABELS or n.upper().split()[0] in HOST_LABELS]
         else:
@@ -116,6 +123,18 @@ class SeasonVoices:
             person = self.aliases.get(wanted)
             found = [person] if person in self.names else [n for n in self.names if wanted in n.lower().split()]
         return found[0] if len(found) == 1 else None
+
+    def own_member(self, label: str) -> dict[str, Any] | None:
+        """The cast member a subtitle label stands for (None without a cast or a clear member)."""
+        from stt.cast import member_for_label
+
+        return member_for_label(label, self.cast) if self.cast else None
+
+    def own_name(self, label: str) -> str:
+        """Name of a person the subtitles name but the first pass never did: the cast's spelling ("SEAN" -> "Sean Kenniff",
+        "_HOST" -> "Jeff Probst"), else the label in title case."""
+        member = self.own_member(label)
+        return member["name"] if member else label.title()
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -281,11 +300,13 @@ def subtitle_hints(data: EpisodeData) -> Any:
 
 
 # ---------------------------------------------------------------- build
-def fingerprint(folders: list[Path], model: str, min_words: int) -> str:
-    """What the voices depend on: the first-pass files, the word embeddings and the subtitles of every episode."""
+def fingerprint(folders: list[Path], model: str, min_words: int, cast: dict[str, Any] | None = None) -> str:
+    """What the voices depend on: the first-pass files, the word embeddings and the subtitles of every episode, and the
+    season's cast (it turns subtitle labels into people)."""
     from stt.refine_speakers import model_cache_key
 
     digest = hashlib.sha256(f"{SCHEMA}|{model_cache_key(model)}|{min_words}".encode())
+    digest.update(json.dumps(cast or {}, sort_keys=True, ensure_ascii=False).encode())
     for folder in sorted(folders):
         sources, _ = first_pass_files(folder)
         parts = [sources["words"], sources["speakers"], embedding_path(folder, model), folder / "subs.source.en.srt"]
@@ -296,7 +317,7 @@ def fingerprint(folders: list[Path], model: str, min_words: int) -> str:
 
 
 def build_voices(folders: list[Path], model: str = "resnet293", min_words: int = MIN_WORDS,
-                 aliases: dict[str, str] | None = None) -> SeasonVoices:
+                 aliases: dict[str, str] | None = None, cast: dict[str, Any] | None = None) -> SeasonVoices:
     """The season's people from the named speakers (and named subtitle lines) of the episodes with a first pass."""
     episodes = [e for e in (load_episode(f, model) for f in folders) if e is not None]
     totals: Counter[str] = Counter()
@@ -304,7 +325,8 @@ def build_voices(folders: list[Path], model: str = "resnet293", min_words: int =
         for name, n in Counter(n for n, w in zip(episode.word_names(), episode.words) if n and w.source != "ocr").items():
             totals[name] += n
     key_of = group_names(dict(totals))
-    keys = SeasonVoices(sorted(set(key_of.values())), np.zeros((0, 0)), [], model, aliases=dict(aliases or {}))
+    keys = SeasonVoices(sorted(set(key_of.values())), np.zeros((0, 0)), [], model, aliases=dict(aliases or {}),
+                       cast=cast or {})
     sums: dict[str, np.ndarray] = {}
     counts: Counter[str] = Counter()
     cards: dict[str, tuple[int, dict[str, Any]]] = {}
@@ -333,21 +355,28 @@ def build_voices(folders: list[Path], model: str = "resnet293", min_words: int =
     log.info("season voices: %d people from %d episodes (%d with fewer than %d words left out)", len(kept), len(episodes),
              len(counts) - len(kept), min_words)
     return SeasonVoices(kept, vectors, [counts[k] for k in kept], model, [e.folder.name for e in episodes],
-                        fingerprint(folders, model, min_words),
-                        {k: {f: v for f, v in cards[k][1].items() if f != "voice_bank"} for k in kept if k in cards})
+                        fingerprint(folders, model, min_words, cast),
+                        {k: {f: v for f, v in cards[k][1].items() if f != "voice_bank"} for k in kept if k in cards},
+                        aliases=dict(aliases or {}), cast=cast or {})
 
 
-def cast_aliases(voices_path: Path | None) -> dict[str, str]:
-    """Lower-case alias -> full name from the season's cast list (``<season>.cast.json`` beside the voices)."""
+def load_cast(voices_path: Path | None) -> dict[str, Any]:
+    """The season's cast (``<season>.cast.json`` beside the voices); empty without one."""
     if voices_path is None:
         return {}
     path = voices_path.with_name(voices_path.name.replace(".season_voices.npz", ".cast.json"))
     if not path.exists():
         return {}
     try:
-        cast = load_json(path).get("cast") or []
-    except (OSError, ValueError, AttributeError):
+        cast = load_json(path)
+    except (OSError, ValueError):
         return {}
+    return cast if isinstance(cast, dict) and isinstance(cast.get("cast"), list) else {}
+
+
+def cast_aliases(voices_path: Path | None) -> dict[str, str]:
+    """Lower-case alias -> full name from the season's cast list (``<season>.cast.json`` beside the voices)."""
+    cast = load_cast(voices_path).get("cast") or []
     return {str(a).lower(): str(p["name"]) for p in cast if p.get("name") for a in p.get("aliases") or []}
 
 
@@ -360,16 +389,16 @@ def _group(person: dict[int, str]) -> dict[str, list[int]]:
 
 def ensure_voices(folders: list[Path], path: Path | None, model: str, min_words: int, *, save: bool = True) -> SeasonVoices:
     """The saved season voices when they were made from exactly these inputs, else built (and saved to ``path``)."""
-    wanted = fingerprint(folders, model, min_words)
-    aliases = cast_aliases(path)
+    aliases, cast = cast_aliases(path), load_cast(path)
+    wanted = fingerprint(folders, model, min_words, cast)
     if path is not None and path.exists():
         saved = SeasonVoices.load(path)
         if saved is not None and saved.fingerprint == wanted and saved.model == model:
             log.info("season voices: %s is up to date (%d people)", path.name, len(saved))
-            saved.aliases = aliases
+            saved.aliases, saved.cast = aliases, cast
             return saved
-    voices = build_voices(folders, model, min_words, aliases)
-    voices.aliases = aliases
+    voices = build_voices(folders, model, min_words, aliases, cast)
+    voices.aliases, voices.cast = aliases, cast
     if save and path is not None:
         voices.save(path)
         log.info("season voices saved to %s", path)
@@ -388,8 +417,16 @@ def _weighted_embedding(cards: list[dict[str, Any]]) -> list[float] | None:
     return [float(x) for x in mean / (np.linalg.norm(mean) + 1e-9) * scale]
 
 
+def _cast_gender(voices: SeasonVoices, name: str) -> str | None:
+    """The cast's gender of a person named only by the subtitles (None when the cast does not say)."""
+    member = voices.own_member(name)
+    gender = member.get("gender") if member else None
+    return gender if gender in ("male", "female") else None
+
+
 def _card_for(label: str, ids: dict[str, str], cues: list[Cue], old: EpisodeData, voices: SeasonVoices,
-              labels_of: dict[str, list[str]], card_person: dict[str, str | None]) -> dict[str, Any]:
+              labels_of: dict[str, list[str]], card_person: dict[str, str | None],
+              own_labels: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """The speaker card of a new speaker (a person "V:<name>" or an unnamed cluster)."""
     own = [c for c in cues if c.speaker == label]
     person = label[len(STATE_PREFIX):] if label.startswith(STATE_PREFIX) else None
@@ -404,11 +441,18 @@ def _card_for(label: str, ids: dict[str, str], cues: list[Cue], old: EpisodeData
         if embedding is not None:
             card["embedding"] = embedding
     else:
-        base = next((c for c in old.cards if c.get("diarizer_label") == label), None)
+        wanted = [label, *((own_labels or {}).get(label[len(OWN_STATE):], []) if label.startswith(OWN_STATE) else [])]
+        base = next((c for c in old.cards if c.get("diarizer_label") in wanted), None)
         card = copy.deepcopy(base) if base else {"name": None, "gender": "unknown", "gender_source": None, "on_screen": []}
         card.update({"diarizer_label": label, "diarizer_labels": [label]})
-        if label.startswith(OWN_STATE) and not card.get("name"):
-            card["name"] = label[len(OWN_STATE):].title()
+        if label.startswith(OWN_STATE):  # a person only the subtitles name (the name is the cast's spelling when known)
+            if not card.get("name"):
+                card.update(name=label[len(OWN_STATE):], name_source="subtitles",
+                            name_evidence="the subtitles name this voice: " + ", ".join(
+                                x[len(OWN_STATE):] for x in wanted[1:] or wanted))
+            gender = _cast_gender(voices, label[len(OWN_STATE):])
+            if gender and card.get("gender") not in ("male", "female"):
+                card.update(gender=gender, gender_source="cast")
     card.update({
         "id": ids[label], "same_as": None, "cues": len(own), "words": sum(len(c.words) for c in own),
         "first_seen": round(own[0].start + old.offset, 3) if own else None, "sample": own[0].text[:120] if own else None,
@@ -489,15 +533,22 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
     states.update({label: vec for label, vec in clusters.items() if label not in named_clusters})
     fixed: dict[int, str] = {}
     hints = subtitle_hints(old)
+    own_lines: dict[str, list[int]] = defaultdict(list)  # a name only the subtitles give -> its words
+    own_labels: dict[str, list[str]] = defaultdict(list)  # ... and the first pass's "P:<LABEL>" cards of it
     for label, idx in (hints.persons.items() if hints else ()):
         who = voices.by_first_name(label)
         usable = [i for i in idx if old.words[i].source != "ocr"]
         if who is not None:
             fixed.update({i: STATE_PREFIX + who for i in usable})
-        elif len(usable) >= WordHints.min_words:  # the subtitles name someone the first pass never did: they keep their lines
+        else:  # spellings of one person ("SUE", "SUSAN") share the state, named by the cast when it knows them
+            name = voices.own_name(label)
+            own_lines[name] += usable
+            own_labels[name].append(OWN_STATE + label)
+    for name, usable in own_lines.items():
+        if len(usable) >= WordHints.min_words:  # the subtitles name someone the first pass never did: they keep their lines
             total = old.emb[usable].sum(axis=0)
-            states[OWN_STATE + label] = total / (np.linalg.norm(total) + 1e-9)
-            fixed.update({i: OWN_STATE + label for i in usable})
+            states[OWN_STATE + name] = total / (np.linalg.norm(total) + 1e-9)
+            fixed.update({i: OWN_STATE + name for i in usable})
     turns = {i for i in range(1, n) if own[i] and own[i - 1] and own[i] != own[i - 1]}
     turns |= set(hints.turns) if hints else set()  # the ">>" marks of captions
     params = RelabelParams(switch_penalty=SWITCH_PENALTY, turn_bonus=TURN_BONUS)
@@ -514,10 +565,13 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
         mine = [c for c in old.cards if person and card_person[c["id"]] == person]
         base = (max(mine, key=lambda c: c.get("words") or 0) if mine
                 else voices.cards.get(person or "") or next((c for c in old.cards if c.get("diarizer_label") == label), {}))
-        return str(base.get("gender") or "unknown")
+        gender = str(base.get("gender") or "unknown")
+        if gender not in ("male", "female") and label.startswith(OWN_STATE):  # the cast knows the person's gender
+            gender = _cast_gender(voices, label[len(OWN_STATE):]) or gender
+        return gender
 
     cues, ids, records = assemble_cues(words, diarization, options, offset=old.offset, gender_of=gender_of)
-    cards = [_card_for(label, ids, cues, old, voices, labels_of, card_person) for label, _ in sorted(ids.items(), key=lambda kv: kv[1])]
+    cards = [_card_for(label, ids, cues, old, voices, labels_of, card_person, own_labels) for label, _ in sorted(ids.items(), key=lambda kv: kv[1])]
     update_records(records, cards)
     _line_genders(records, old.records, cards)
 

@@ -126,13 +126,17 @@ def apply_cards(speakers: list[dict[str, Any]], cards: list[dict[str, Any]]) -> 
         )
 
 
-def apply_subtitle_names(speakers: list[dict[str, Any]]) -> None:
+def apply_subtitle_names(speakers: list[dict[str, Any]], cast: dict[str, Any] | None = None) -> None:
     """A speaker whose lines the subtitles mostly name ("SANDRA:", ``subtitle_person`` from stt.transcribe) gets that name
-    when the LLM left it open. No LLM call: the card's own name, a voice-bank name or an override win."""
+    when the LLM left it open; with the season ``cast`` a first name, nickname or initials ("B.B") become the cast
+    member's name. No LLM call: the card's own name, a voice-bank name or an override win."""
+    from stt.cast import member_for_label
+
     for speaker in speakers:
         person = speaker.get("subtitle_person")
         if person and not speaker.get("name"):
-            speaker.update({"name": person.title(), "name_source": "subtitles",
+            member = member_for_label(person, cast) if cast else None
+            speaker.update({"name": member["name"] if member else person.title(), "name_source": "subtitles",
                             "name_evidence": f"the subtitles name this voice: {person}"})
 
 
@@ -177,7 +181,7 @@ def name_speakers(
         save_json(folder / "speakers.llm.json", {"model": model, "usage": client.usage.to_dict(), "cards": cards})
         apply_cards(speakers, cards)
         log.info("LLM naming: %s", client.usage.to_dict())
-    apply_subtitle_names(speakers)
+    apply_subtitle_names(speakers, load_json(cast_path) if cast_path and cast_path.exists() else None)
     if bank is not None:
         for note in voice_bank.resolve(speakers):
             log.info("voice bank: %s", note)

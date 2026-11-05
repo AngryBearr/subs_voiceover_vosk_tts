@@ -195,3 +195,85 @@ def test_unrenumbered_episode_keeps_the_print_id(tmp_path: Path) -> None:
     folder = _episode(tmp_path, renumbered=False)
     assert voice_bank.locate_person(folder, "Aaliyah Puglia", "S01")[0] == {"S01"}
     assert voice_bank.locate_person(folder, "Nobody Else", "S02") == ({"S02"}, "subs.en.json", "speakers.json")
+
+
+def _final_episode(tmp_path: Path) -> Path:
+    """An episode after the season voices stage: S01 Richard (a season person with a print), S02 Sean (named by the
+    subtitles, no print yet, 30 s of cues), S03 Dirk (subtitles, 8 s), S04 an unnamed cluster, S05 an LLM-only
+    name with low confidence."""
+    import json
+
+    import soundfile as sf
+
+    folder = tmp_path / "S01E01"
+    folder.mkdir()
+    cards = [
+        _speaker("S01", "Richard Hatch", _vec(1), season_voice=True, name_source="llm", llm_confidence=0.2),
+        {"id": "S02", "name": "Sean Kenniff", "name_source": "subtitles", "gender": "male", "speech_s": None,
+         "embedding": None, "cues": 6, "season_voice": False},
+        {"id": "S03", "name": "Dirk Been", "name_source": "subtitles", "gender": "male", "speech_s": None,
+         "embedding": None, "cues": 2},
+        _speaker("S04", None, _vec(4)),
+        _speaker("S05", "Maybe Person", _vec(5), name_source="llm", llm_confidence=0.3),
+    ]
+    cues = [_cue(2 * k, 2 * k + 1.9, "S01") for k in range(15)]  # 28.5 s
+    cues += [_cue(40 + 6 * k, 45 + 6 * k, "S02") for k in range(6)]  # 30 s
+    cues += [_cue(80 + 4 * k, 84 + 4 * k, "S03") for k in range(2)]  # 8 s
+    (folder / "speakers.json").write_text(json.dumps(cards))
+    (folder / "subs.en.json").write_text(json.dumps(cues))
+    sf.write(str(folder / "audio.wav"), np.zeros(16_000 * 100, dtype=np.float32), 16_000)
+    return folder
+
+
+def test_prints_for_people_named_by_subtitles_or_season_voices(tmp_path: Path) -> None:
+    folder = _final_episode(tmp_path)
+    calls: list[int] = []
+
+    def embed(audio: np.ndarray, rate: int) -> np.ndarray:
+        calls.append(len(audio))
+        return np.ones(8) / np.sqrt(8)
+
+    bank_path = tmp_path / "Season 1.voices.json"
+    assert voice_bank.refresh_episode(bank_path, folder, embed=embed) == 2
+    prints = {p["name"]: p for p in VoiceBank.load(bank_path).prints}
+    assert set(prints) == {"Richard Hatch", "Sean Kenniff"}  # not Dirk (8 s), nobody unnamed, no unsure LLM name
+    assert prints["Sean Kenniff"]["speaker"] == "S02" and prints["Sean Kenniff"]["source"] == "subtitles"
+    assert prints["Sean Kenniff"]["speech_s"] == 30.0 and len(prints["Sean Kenniff"]["embedding"]) == 8
+    assert prints["Richard Hatch"]["embedding"] == [float(x) for x in _vec(1)]  # the card's own print is kept
+    assert len(calls) == 6  # one embedding per long cue of Sean only
+    # speakers.json is not touched: the season voices stage compares it with what it would write
+    import json
+    assert json.loads((folder / "speakers.json").read_text())[1]["embedding"] is None
+
+
+def test_refresh_twice_does_not_double_prints_nor_embed_again(tmp_path: Path) -> None:
+    folder = _final_episode(tmp_path)
+    calls: list[int] = []
+
+    def embed(audio: np.ndarray, rate: int) -> np.ndarray:
+        calls.append(1)
+        return np.ones(8) / np.sqrt(8)
+
+    bank_path = tmp_path / "Season 1.voices.json"
+    bank = VoiceBank(bank_path)  # the first pass left prints with ids of the first numbering
+    bank.add_episode(folder.name, [_speaker("S09", "Richard Hatch", _vec(1))],
+                     [_cue(0, 30, "S09")])
+    bank.add_episode("other", [_speaker("S01", "Rudy Boesch", _vec(7))], [])
+    bank.save()
+    voice_bank.refresh_episode(bank_path, folder, embed=embed)
+    first = calls[:]
+    voice_bank.refresh_episode(bank_path, folder, embed=embed)
+    assert calls == first  # the earlier print of Sean (same id, name and cues) is reused
+    prints = VoiceBank.load(bank_path).prints
+    mine = [(p["speaker"], p["name"]) for p in prints if p["episode"] == folder.name]
+    assert sorted(mine) == [("S01", "Richard Hatch"), ("S02", "Sean Kenniff")]  # no S09, no duplicates
+    assert [p["name"] for p in prints if p["episode"] == "other"] == ["Rudy Boesch"]  # other episodes untouched
+
+
+def test_add_episode_keeps_the_llm_confidence_rule_for_llm_only_names() -> None:
+    bank = VoiceBank(Path("unused.json"))
+    cues = [_cue(0, 40, "S01")]
+    unsure = _speaker("S01", "Ann Lee", _vec(1), name_source="llm", llm_confidence=0.5)
+    assert bank.add_episode("e", [unsure], cues) == 0
+    assert bank.add_episode("e", [{**unsure, "llm_confidence": 0.9}], cues) == 1
+    assert bank.add_episode("e", [{**unsure, "name_source": "subtitles"}], cues) == 1

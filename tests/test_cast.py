@@ -131,3 +131,54 @@ def test_wiki_cast_fails_without_the_seasons_article() -> None:
     client = _Client([{"queries": ["Survivor 51"]}, {"title": None}])
     with pytest.raises(RuntimeError, match="no Wikipedia article"):
         cast_module.wiki_cast(client, "Season_51", "Survivor.S51E01.mkv", [], wiki=_wiki)
+
+
+SURVIVOR = {"cast": [
+    {"name": "Jeff Probst", "aliases": ["Jeff"], "gender": "male", "role": "Host"},
+    {"name": "B.B. Andersen", "aliases": ["B.B."], "gender": "male", "role": "Contestant"},
+    {"name": "Dirk Been", "aliases": ["Dirk"], "gender": "male", "role": "Contestant"},
+    {"name": "Sean Kenniff", "aliases": ["Sean"], "gender": "male", "role": "Contestant"},
+    {"name": "Sue Hawk", "aliases": ["Susan Hawk", "Susan", "Sue"], "gender": "female", "role": "Contestant"},
+    {"name": "Richard Hatch", "aliases": ["Richard", "Rich"], "gender": "male", "role": "Contestant; winner"},
+    {"name": "Rudy Boesch", "aliases": ["Rudy"], "gender": "male", "role": "Contestant"},
+    {"name": "Bryant Gumbel", "aliases": [], "gender": "male", "role": "Reunion host"},
+    {"name": "Kelly Wiglesworth", "aliases": [], "gender": "female", "role": "Contestant"},
+    {"name": "Kelly Smith", "aliases": [], "gender": "female", "role": "Contestant"},
+]}
+
+
+def test_member_for_label_first_names_nicknames_initials_and_host() -> None:
+    from stt.cast import member_for_label
+
+    def who(label: str) -> str | None:
+        member = member_for_label(label, SURVIVOR)
+        return member["name"] if member else None
+
+    assert who("SEAN") == "Sean Kenniff" and who("DIRK") == "Dirk Been"
+    assert who("B.B") == "B.B. Andersen" and who("B.B.") == "B.B. Andersen"  # initials, with or without the last dot
+    assert who("RICH") == "Richard Hatch" and who("SUSAN") == "Sue Hawk"  # nicknames
+    assert who("HATCH") == "Richard Hatch"  # a surname
+    assert who("_HOST") == "Jeff Probst" and who("HOST") == "Jeff Probst"  # the main host, not the reunion host
+    assert who("KELLY") is None  # two Kellys: ambiguous
+    assert who("NOBODY") is None
+
+
+def test_host_member_needs_one_host() -> None:
+    from stt.cast import host_member
+
+    assert host_member({"cast": [{"name": "A", "role": "Contestant"}]}) is None
+    assert host_member({"cast": [{"name": "A", "role": "Host"}, {"name": "B", "role": "Host"}]}) is None
+    assert host_member({"cast": [{"name": "B", "role": "Reunion host"}]})["name"] == "B"  # the only host there is
+
+
+def test_subtitle_names_take_the_cast_spelling() -> None:
+    from stt.speakers import apply_subtitle_names
+
+    speakers = [{"id": "S1", "subtitle_person": "SEAN"}, {"id": "S2", "subtitle_person": "B.B"},
+                {"id": "S3", "subtitle_person": "STRANGER"}, {"id": "S4", "subtitle_person": "DIRK", "name": "Dirk Been"}]
+    apply_subtitle_names(speakers, SURVIVOR)
+    assert [s["name"] for s in speakers] == ["Sean Kenniff", "B.B. Andersen", "Stranger", "Dirk Been"]
+    assert speakers[0]["name_source"] == "subtitles" and "name_source" not in speakers[3]
+    plain = [{"id": "S1", "subtitle_person": "SEAN"}]
+    apply_subtitle_names(plain)  # without a cast: as before
+    assert plain[0]["name"] == "Sean"
