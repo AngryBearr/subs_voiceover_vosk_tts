@@ -60,7 +60,7 @@ import gradio as gr  # type: ignore
 from stt import progress as stt_progress
 from stt.refine_speakers import HUB_WEIGHTS, model_available
 from stt.run import SUBSCRIPTION_DOWN, apply_preset, finished_folder
-from ui import folder_pick, job_view, season_settings, seasons, settings, voice_preview, voices
+from ui import folder_pick, job_view, season_settings, seasons, settings, voice_preview, voices, who
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELP = Path(__file__).with_name("help.md")  # the "Справка" tab
@@ -1420,6 +1420,9 @@ def build() -> gr.Blocks:
         with gr.Tab("Голоса сезона"):
             voices_tab = voices.build(sys.modules[__name__], folder, out_root, voice_model)
 
+        with gr.Tab("Кто это?"):
+            who_tab = who.build(folder, out_root)
+
         with gr.Tab("Проверка и правка реплик"):
             note_boxes["edits"] = gr.Markdown(seasons.NO_SEASON_NOTE)
             gr.Markdown("Здесь можно поправить русские реплики серии: текст, говорящего, пол голоса или "
@@ -1664,6 +1667,7 @@ def build() -> gr.Blocks:
                                     show_progress="hidden")
         chosen.then(lambda f, r: settings_view(f, r, None), [folder, out_root], view_outputs)
         chosen.then(voices_tab.reload, voices_tab.inputs, voices_tab.outputs)
+        chosen.then(who_tab.reload, who_tab.inputs, who_tab.outputs)
         chosen.then(load_episodes, [out_root, edit_episode, edit_show, edit_query], [edit_episode, edit_table, edit_speaker])
         chosen.then(mix_episodes, out_root, mix_episode)
         chosen.then(finished_videos, out_root, vid_path)

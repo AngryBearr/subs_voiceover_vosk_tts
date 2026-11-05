@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,78 @@ def apply_subtitle_names(speakers: list[dict[str, Any]], cast: dict[str, Any] | 
                             "name_evidence": f"the subtitles name this voice: {person}"})
 
 
+HOST_ROLE = re.compile(r"\b(host|narrator)\b", re.I)
+NOT_HOST_ROLE = re.compile(
+    r"contestant|guest|reunion|co-?host|former|merged|mixed|multiple|several|background|occasional|voices", re.I)
+MIXED_ROLE = re.compile(r"merged|mixed|multiple|several|different|background|crowd|chorus|voices", re.I)
+
+
+def _is_mixed(speaker: dict[str, Any]) -> bool:
+    """A card whose role the LLM wrote as a group of voices: no one person."""
+    return bool(MIXED_ROLE.search(str(speaker.get("role") or "")))
+
+
+def apply_cast_host(speakers: list[dict[str, Any]], cast: dict[str, Any] | None,
+                    protected: frozenset[str] = frozenset()) -> None:
+    """A card whose role is the show's host or narrator ("host", "host and narrator") and that has no name gets the
+    season host from the cast (name and gender). A name already given (LLM, subtitles, a person) stays."""
+    from stt.cast import host_member
+
+    host = host_member(cast) if cast else None
+    if host is None or not host.get("name"):
+        return
+    for speaker in speakers:
+        role = str(speaker.get("role") or "")
+        if (speaker.get("name") or not speaker.get("cues") or speaker["id"] in protected
+                or not HOST_ROLE.search(role) or NOT_HOST_ROLE.search(role)):
+            continue
+        speaker.update({"name": host["name"], "name_source": "cast_host",
+                        "name_evidence": f"role '{role}': the season host in the cast"})
+        if host.get("gender") in ("male", "female"):
+            speaker.update({"gender": host["gender"], "gender_source": "cast"})
+        log.info("cast host: %s (%s) is %s", speaker["id"], role, host["name"])
+
+
+def _same_as_target(speaker: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """The first named card along the ``same_as`` pointers from ``speaker`` (None: a cycle, a dead end or an unknown id)."""
+    seen = {speaker["id"]}
+    target_id = speaker.get("same_as")
+    while target_id and target_id not in seen:
+        seen.add(target_id)
+        target = by_id.get(target_id)
+        if target is None or target.get("name"):
+            return target
+        target_id = target.get("same_as")
+    return None
+
+
+def apply_same_as(speakers: list[dict[str, Any]], protected: frozenset[str] = frozenset()) -> None:
+    """A nameless card the LLM marked ``same_as`` another card takes the name and gender of that card's person (the
+    first named card along a chain). A cycle, an unknown id, a group of voices (mixed card) on either side, a name already
+    on the card and a gender conflict leave the card as it is."""
+    from stt.voice_bank import sure_name
+
+    by_id = {s["id"]: s for s in speakers}
+    for speaker in speakers:
+        if not speaker.get("same_as") or speaker.get("name") or speaker["id"] in protected or _is_mixed(speaker):
+            continue
+        target = _same_as_target(speaker, by_id)
+        if target is None or _is_mixed(target):
+            log.info("same_as: %s -> %s ignored (cycle, unknown id or no named person)", speaker["id"], speaker["same_as"])
+            continue
+        mine, theirs = speaker.get("gender"), target.get("gender")
+        if mine in ("male", "female") and theirs in ("male", "female") and mine != theirs:
+            log.info("same_as: %s -> %s ignored (gender %s vs %s)", speaker["id"], target["id"], mine, theirs)
+            continue
+        speaker.update({"name": target["name"], "name_source": "same_as",
+                        "name_evidence": f"the LLM marked this voice as the same person as {target['id']}"})
+        if theirs in ("male", "female"):
+            speaker.update({"gender": theirs, "gender_source": target.get("gender_source") or "text"})
+        if sure_name(target):  # the name is as sure as the card it was copied from
+            speaker["llm_confidence"] = max(speaker.get("llm_confidence") or 0, target.get("llm_confidence") or 0, 0.9)
+        log.info("same_as: %s merged into %s (%s)", speaker["id"], target["id"], target["name"])
+
+
 def apply_overrides(speakers: list[dict[str, Any]], overrides: dict[str, dict[str, Any]]) -> None:
     for speaker in speakers:
         override = overrides.get(speaker["id"])
@@ -160,16 +233,20 @@ def update_records(records: list[dict[str, Any]], speakers: list[dict[str, Any]]
 
 def name_speakers(
     folder: Path, model: str, *, use_llm: bool = True, reasoning: str | None = None, glossary: str = "",
-    bank_path: Path | None = None, cast_path: Path | None = None,
+    bank_path: Path | None = None, cast_path: Path | None = None, saved_llm: bool = False,
 ) -> list[dict[str, Any]]:
     speakers_path, subs_path = folder / "speakers.json", folder / "subs.en.json"
     speakers, records = load_json(speakers_path), load_json(subs_path)
     bank = voice_bank.VoiceBank.load(bank_path) if bank_path else None
     if bank is not None:
         voice_bank.attach_matches(speakers, bank, folder.name)
-    if use_llm:
+    cast = load_json(cast_path) if cast_path and cast_path.exists() else None
+    saved_path = folder / "speakers.llm.json"
+    if saved_llm and saved_path.exists():  # apply the earlier answer again, no request
+        apply_cards(speakers, load_json(saved_path).get("cards", []))
+        log.info("LLM naming: the saved answer %s", saved_path.name)
+    elif use_llm:
         client = OpenRouterClient(model, reasoning=reasoning)
-        cast = load_json(cast_path) if cast_path and cast_path.exists() else None
         from stt.cast import cast_text
 
         prompt = build_prompt([s for s in speakers if s.get("cues")], records, glossary=glossary,
@@ -178,21 +255,25 @@ def name_speakers(
         answer = client.chat_json(SYSTEM_PROMPT, prompt)
         progress.tick(1, 1, "requests")
         cards = answer.get("speakers", []) if isinstance(answer, dict) else answer
-        save_json(folder / "speakers.llm.json", {"model": model, "usage": client.usage.to_dict(), "cards": cards})
+        save_json(saved_path, {"model": model, "usage": client.usage.to_dict(), "cards": cards})
         apply_cards(speakers, cards)
         log.info("LLM naming: %s", client.usage.to_dict())
-    apply_subtitle_names(speakers, load_json(cast_path) if cast_path and cast_path.exists() else None)
+    override_path = folder / "speakers.override.json"
+    overrides = load_json(override_path) if override_path.exists() else {}
+    protected = frozenset(i for i, o in overrides.items() if "name" in o)  # a person's name is never replaced
+    apply_subtitle_names(speakers, cast)
     if bank is not None:
         for note in voice_bank.resolve(speakers):
             log.info("voice bank: %s", note)
-    if cast_path and cast_path.exists():  # cast spellings; names not in the cast and gender conflicts listed
+    apply_cast_host(speakers, cast, protected)
+    apply_overrides(speakers, overrides)  # before the merge: a card a person named is the one others point to
+    apply_same_as(speakers, protected)
+    if cast:  # cast spellings; names not in the cast and gender conflicts listed
         from stt.cast import check_speakers
 
-        for note in check_speakers(speakers, load_json(cast_path)):
+        for note in check_speakers(speakers, cast):
             log.info("cast: %s", note)
-    override_path = folder / "speakers.override.json"
-    if override_path.exists():
-        apply_overrides(speakers, load_json(override_path))
+    apply_overrides(speakers, overrides)
     if bank is not None:
         added = bank.add_episode(folder.name, speakers, records)
         bank.save()
@@ -217,6 +298,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--glossary", default=None, help="glossary.txt from stt.glossary (canonical names)")
     parser.add_argument("--voice-bank", type=Path, default=None, help="Season voice bank (stt.voice_bank)")
     parser.add_argument("--cast", type=Path, default=None, help="Season cast from the web (stt.cast)")
+    parser.add_argument("--saved-llm", action="store_true",
+                        help="Apply the saved speakers.llm.json instead of asking the LLM again")
     parser.add_argument(
         "--reasoning",
         default="medium",
@@ -228,7 +311,7 @@ def main(argv: list[str] | None = None) -> None:
     reasoning = None if args.reasoning == "default" else args.reasoning
     glossary = Path(args.glossary).read_text(encoding="utf-8") if args.glossary else ""
     name_speakers(Path(args.folder), args.model, use_llm=not args.no_llm, reasoning=reasoning, glossary=glossary,
-                  bank_path=args.voice_bank, cast_path=args.cast)
+                  bank_path=args.voice_bank, cast_path=args.cast, saved_llm=args.saved_llm)
 
 
 if __name__ == "__main__":
