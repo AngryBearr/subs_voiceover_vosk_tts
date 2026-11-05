@@ -48,8 +48,9 @@ Vosk runs alongside on the CPU (20). Reviewed together with an independent GPT-6
   (b) a "Кто это?" panel per season with an episode filter: unnamed groups with audio snippets, pick a cast name;
   best used after preparing the season and before voicing; (c) a blind A/B piece of F5 at 32 vs 16 steps.
 - Queue: season prepare command + UI button (item 3 above); references for new seasons (one episode rarely has a
-  clean 5-9 s solo stretch: more episodes, or a relaxed rule for people without any clip); audio-LLM speaker
-  experiment with references (output/exp_audio_llm/, incl. qwen3.8-omni-flash); one subtitle base (item 4).
+  clean 5-9 s solo stretch: more episodes, or a relaxed rule for people without any clip); one subtitle base (item 4).
+- Closed 5.11: the audio-LLM speaker experiment with references (`output/exp_audio_llm/report.md`): models 12-21% right
+  vs our voice prints 64%, no use even for shouts (docs/experiments.md).
 
 ## Plan of 3.11.2026: the UI built around a season (agreed with the user)
 
