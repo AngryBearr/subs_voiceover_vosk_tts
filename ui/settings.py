@@ -65,6 +65,9 @@ SETTINGS: list[Setting] = [
             info="Авто: надписи на экране, сведение звука и сжатие видео идут рядом с другими задачами только если "
                  "видеопамяти хватает с запасом (сначала смотрим, сколько её на карте и сколько свободно); иначе "
                  "задачи идут по очереди (медленнее, но без сбоев)"),
+    Setting(("overlap_episodes",), "Переводить следующую серию, пока озвучивается текущая", "bool", "Запуск",
+            info="Работает, когда в одном запуске несколько серий. Перевод следующей серии идёт через языковую "
+                 "модель и видеокарту не занимает; экономит около 4 минут на серию"),
     Setting(("mode",), "Распознавание", "choice", "Распознавание", MODES),
     Setting(("diarizer",), "Кто когда говорит", "choice", "Распознавание",
             {"DiariZen v2 (точнее; окружение diarizen_env)": "diarizen-v2",
@@ -142,6 +145,7 @@ FALLBACKS: dict[tuple[str, ...], Any] = {("line_gender", "enabled"): True, ("lin
                                          ("review",): True, ("ui", "engines"): ["vosk"],
                                          ("voiceover", "listen_stress"): True, ("voiceover", "season_stress"): True,
                                          ("voiceover", "parallel_cpu"): True, ("gpu", "parallel"): "auto",
+                                         ("overlap_episodes",): True,
                                          ("on_screen", "voice"): "text",
                                          ("on_screen", "neutral_gender"): "male", ("on_screen", "track"): True,
                                          ("on_screen", "burn_in_when_compressing"): False}

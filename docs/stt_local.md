@@ -113,6 +113,15 @@ other, 19.6 min in two lanes without the CPU cap, 16.4 min with it (a third less
 of the clips the same). The stress check is no longer redone for each engine (the lines are the
 same: `stress.json` records them).
 
+Translating ahead (`"overlap_episodes": true`, top level of the config, default; UI: "Переводить следующую серию,
+пока озвучивается текущая"). While the GPU lane voices episode N, a lookahead thread runs episode N+1 up to and
+including `translate` (LLM only, about 4 min), so the GPU does not wait for it. One episode ahead at most, and only
+when N+1 needs no GPU stage first (recognition, glossary, names: with season voices those are done before the lanes
+start); otherwise it is logged and left to the lane. The lane waits for the lookahead before it touches that
+episode. It helps only when several episodes run in one command or one UI job; it is off for one file, for
+`--until` before `translate` and for `--force` at or before `translate` (that stage is forced once per episode).
+An error in the lookahead or in a lane stops the whole run.
+
 Parallel work on the graphics card (`"gpu": {"parallel": "auto"}`, UI: "Параллельная работа на видеокарте"). Three
 speed-ups overlap GPU work: the on-screen text scan beside diarization and recognition, the mix of one engine
 (voice separation) beside the voicing of the next, and the video compression beside the voicing. They were

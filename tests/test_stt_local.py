@@ -956,7 +956,8 @@ class LanesTest(unittest.TestCase):
 
         args = argparse.Namespace(engine="f5,vosk", until="mix")
         with mock.patch.object(run, "Episode", FakeEpisode):
-            run.run_lanes([Path("e1.mkv"), Path("e2.mkv")], Path("out"), args, {}, ["f5", "vosk"])
+            run.run_lanes([Path("e1.mkv"), Path("e2.mkv")], Path("out"), args, {"overlap_episodes": False},
+                           ["f5", "vosk"])  # the lookahead has its own tests
         for media in ("e1.mkv", "e2.mkv"):
             mine = [c for c in calls if c[0] == media]
             self.assertEqual(mine[0], (media, "f5", "translate"))  # the GPU lane does the shared stages first

@@ -288,9 +288,9 @@ class Episode:
             return False  # runs from before the marks existed
         return not mark.exists() or mark.stat().st_mtime < self.stamp(previous).stat().st_mtime
 
-    def run(self) -> None:
-        until = STAGES.index(self.args.until)
-        steps = {
+    def steps(self) -> dict[str, tuple[Any, ...]]:
+        """Per stage: its function, its outputs and (optionally) the manual inputs that make it run again."""
+        return {
             "transcribe": (self.transcribe, [self.out / "subs.en.json"]),
             "glossary": (self.glossary, [self.out / "glossary.json"]),
             "speakers": (self.speakers, [self.out / "speakers.llm.json"], [self.out / "speakers.override.json"]),
@@ -303,6 +303,19 @@ class Episode:
             "check": (self.check, [self.vo_dir / "speech_check.json"]),
             "mix": (self.mix, [self.track(self.engine)]),
         }
+
+    def gpu_stage_needed(self) -> bool:
+        """Would a run of this episode start with a GPU stage (recognition, glossary, names)? Same rules as ``run``."""
+        steps = self.steps()
+        for position, stage in enumerate(STAGES[: STAGES.index("speakers") + 1]):
+            _, outputs, *inputs = steps[stage]
+            if self.needed(stage, outputs, STAGES[position - 1] if position else None, *inputs):
+                return True
+        return False
+
+    def run(self) -> None:
+        until = STAGES.index(self.args.until)
+        steps = self.steps()
         background: Background | None = getattr(self.args, "mix_background", None)
         for position, stage in enumerate(STAGES[: until + 1]):
             func, outputs, *inputs = steps[stage]
@@ -1029,17 +1042,58 @@ def lanes(engines: list[str], parallel: bool) -> list[list[str]]:
     return [gpu, cpu] if parallel and gpu and cpu else [engines]
 
 
+def lookahead_enabled(files: list[Path], args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    """Translate the next episode while the current one is voiced (``overlap_episodes``, several episodes, run
+    reaches the translation). Off when a stage up to the translation is forced: the lookahead and the lane would both run it."""
+    if not config.get("overlap_episodes", True) or len(files) < 2:
+        return False
+    translate = STAGES.index("translate")
+    if STAGES.index(args.until) < translate:
+        return False
+    force = getattr(args, "force", None)
+    if force and STAGES.index(force) <= translate:
+        log.info("episodes overlap is off: --force %s is at or before the translation and would run twice", force)
+        return False
+    return True
+
+
 def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, config: dict[str, Any],
               engines: list[str]) -> None:
     """Every episode in every engine; the second lane (CPU engines) starts an episode once the first
-    has its shared stages, so the GPU-heavy recognition never runs twice at once."""
+    has its shared stages, so the GPU-heavy recognition never runs twice at once.
+
+    Lookahead (``lookahead_enabled``): a third thread runs the next episode up to ``translate`` (LLM only) while
+    the first lane voices the current one. The first lane waits for it before it touches that episode. Events:
+    ``voicing[i]`` (lane 0 started the engines of episode i), ``ahead_done[i]`` (the lookahead is done with i or
+    skipped it). An error anywhere is appended to ``errors`` and sets every event, so no thread waits forever."""
     groups = lanes(engines, bool((config.get("voiceover") or {}).get("parallel_cpu", True)))
     locks = {media: threading.Lock() for media in files}
     shared = {media: threading.Event() for media in files}
+    voicing = {media: threading.Event() for media in files}
+    ahead_done = {media: threading.Event() for media in files}
     errors: list[BaseException] = []
+    ahead = lookahead_enabled(files, args, config)
+    translate_stage = STAGES[min(STAGES.index(args.until), STAGES.index("translate"))]
+    shared_forced: set[Path] = set()  # episodes whose forced shared stages have run already
+    forced_guard = threading.Lock()
+    force_shared = bool(getattr(args, "force", None)) and STAGES.index(args.force) <= STAGES.index("translate")
+
+    def release_all() -> None:
+        for events in (shared, voicing, ahead_done):
+            for event in events.values():
+                event.set()
+
+    def fail(error: BaseException) -> None:
+        errors.append(error)
+        release_all()
 
     def episode(media: Path, engine: str, until: str | None = None) -> Episode:
         lane_args = argparse.Namespace(**{**vars(args), "engine": engine, "until": until or args.until})
+        if force_shared:
+            with forced_guard:  # the forced shared stages run once per episode, the finish marks pull the rest along
+                if media in shared_forced:
+                    lane_args.force = None
+                shared_forced.add(media)
         return Episode(media, out_root, lane_args, config, lock=locks[media])
 
     def lane(group: list[str], first: bool) -> None:
@@ -1048,33 +1102,59 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
                 return
             background = Background()  # this lane's mixes running while its next engine dubs and voices
             try:
-                if first and len(groups) > 1:
+                if first and ahead:
+                    ahead_done[media].wait()  # the lookahead may be on this episode
+                    if errors:
+                        return
+                if first and (len(groups) > 1 or ahead):
                     try:
-                        episode(media, group[0], STAGES[min(STAGES.index(args.until), STAGES.index("translate"))]).run()
+                        episode(media, group[0], translate_stage).run()
                     finally:
                         shared[media].set()
                 elif not first:
                     shared[media].wait()
+                if errors:
+                    return
+                voicing[media].set()
                 for engine in group:
                     if background.failed():
                         break
                     ep = episode(media, engine)
                     ep.args.mix_background = background
                     ep.run()
-            except BaseException as error:  # noqa: BLE001 - stop both lanes, report after they end
-                errors.append(error)
-                for event in shared.values():
-                    event.set()
+            except BaseException as error:  # noqa: BLE001 - stop all threads, report after they end
+                fail(error)
             finally:
                 try:
                     background.join()
                 except BaseException as error:  # noqa: BLE001
-                    errors.append(error)
-                    for event in shared.values():
-                        event.set()
+                    fail(error)
             if errors:
                 return
 
+    def lookahead() -> None:
+        try:
+            for previous, media in zip(files, files[1:]):
+                voicing[previous].wait()
+                if errors:
+                    return
+                probe = episode(media, groups[0][0], "translate")
+                if probe.gpu_stage_needed():
+                    log.info("[%s] not translated ahead: it needs recognition or names first", media.stem)
+                else:
+                    log.info("[%s] translate ahead while %s is voiced", media.stem, previous.stem)
+                    probe.run()
+                ahead_done[media].set()
+        except BaseException as error:  # noqa: BLE001
+            fail(error)
+        finally:
+            for event in ahead_done.values():
+                event.set()
+
+    ahead_done[files[0]].set()  # nothing runs before the first episode
+    helper = threading.Thread(target=lookahead, name="lookahead") if ahead else None
+    if helper:
+        helper.start()
     if len(groups) == 1:
         lane(groups[0], True)
     else:
@@ -1090,6 +1170,9 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
             thread.start()
         for thread in threads:
             thread.join()
+    if helper:
+        release_all()  # a lane that returned early must not leave the lookahead waiting
+        helper.join()
     wait_onscreen()  # a run that ends at the translation still gets onscreen.ru.json
     if errors:
         raise errors[0]

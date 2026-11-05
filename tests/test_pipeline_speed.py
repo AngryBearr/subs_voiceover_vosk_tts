@@ -607,3 +607,191 @@ def test_compression_is_not_held_back_by_the_card_when_the_encoder_is_software(
     episode.config["mix"]["video"]["codec"] = "libx265"
     episode.start_compression()
     assert len(run._COMPRESS_JOBS) == 1
+
+
+# ---- 4. the next episode is translated while the current one is voiced; forced stages run once
+
+def _stage_fakes(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str, str]], *, gate: Any = None) -> None:
+    """Real ``Episode.run`` and ``needed``; every stage only writes its output and records (episode, stage, engine)."""
+    def fake(stage: str) -> Any:
+        def stage_func(self: run.Episode) -> None:
+            calls.append((self.media.stem, stage, self.engine))
+            if gate:
+                gate(self, stage)
+            for path in self.steps()[stage][1]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+        return stage_func
+
+    for stage in run.STAGES:
+        monkeypatch.setattr(run.Episode, stage, fake(stage))
+    monkeypatch.setattr(run.Episode, "start_compression", lambda self: None)
+
+
+def _args(**over: Any) -> argparse.Namespace:
+    base: dict[str, Any] = dict(season_glossary=None, force=None, until="voiceover", engine="f5", start=None, duration=None)
+    return argparse.Namespace(**{**base, **over})
+
+
+def _season(tmp_path: Path, n: int = 3, *, ready: bool = True) -> list[Path]:
+    """n episodes; with ``ready`` the stages up to speakers are done (as after run_season_voices)."""
+    files = [tmp_path / "S" / f"e{i}.mkv" for i in range(1, n + 1)]
+    if ready:
+        for media in files:
+            episode = run.Episode(media, tmp_path / "out", _args(), {})
+            for stage in run.STAGES[:3]:
+                for path in episode.steps()[stage][1]:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("{}", encoding="utf-8")
+                episode.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
+                episode.stamp(stage).touch()
+    return files
+
+
+def _guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deadlock fails fast: every Event wait in run_lanes gets a limit."""
+    original = threading.Event.wait
+    monkeypatch.setattr(threading.Event, "wait", lambda self, timeout=None: original(self, 10 if timeout is None else timeout))
+
+
+def test_next_episode_is_translated_while_the_current_is_voiced(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    _stage_fakes(monkeypatch, calls)
+    files = _season(tmp_path)
+    run.run_lanes(files, tmp_path / "out", _args(), {}, ["f5"])
+    order = [(m, s) for m, s, _ in calls]
+    assert order.count(("e2", "translate")) == 1 and order.count(("e3", "translate")) == 1
+    # e2 is translated after e1's engine stages began and before e2's own voicing
+    assert order.index(("e1", "dub")) < order.index(("e2", "translate")) < order.index(("e2", "dub"))
+    assert order.index(("e2", "dub")) < order.index(("e3", "translate")) < order.index(("e3", "dub"))
+
+
+def test_lane_waits_for_the_lookahead(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    release = threading.Event()
+    running: list[str] = []
+
+    def gate(episode: run.Episode, stage: str) -> None:
+        if episode.media.stem == "e2" and stage == "translate":
+            running.append("translating")
+            assert release.wait(5)
+            running.append("translated")
+        if episode.media.stem == "e2" and stage == "dub":
+            running.append("e2 dub")
+
+    _stage_fakes(monkeypatch, calls, gate=gate)
+    files = _season(tmp_path, 2)
+    original = run.Episode.voiceover
+
+    def slow_voiceover(self: run.Episode) -> None:  # e1 voicing lasts until e2's translation has started
+        original(self)
+        if self.media.stem == "e1":
+            deadline = threading.Event()
+            for _ in range(500):
+                if running:
+                    break
+                deadline.wait(0.01)
+            threading.Timer(0.2, release.set).start()
+
+    monkeypatch.setattr(run.Episode, "voiceover", slow_voiceover)
+    run.run_lanes(files, tmp_path / "out", _args(), {}, ["f5"])
+    assert running == ["translating", "translated", "e2 dub"]
+
+
+def test_episode_needing_a_gpu_stage_is_not_translated_ahead(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                            caplog: pytest.LogCaptureFixture) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    _stage_fakes(monkeypatch, calls)
+    files = _season(tmp_path, 2, ready=False)
+    first = run.Episode(files[0], tmp_path / "out", _args(), {})
+    for stage in run.STAGES[:3]:  # e1 is ready, e2 is not
+        for path in first.steps()[stage][1]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
+        first.stamp(stage).parent.mkdir(parents=True, exist_ok=True)
+        first.stamp(stage).touch()
+    with caplog.at_level(logging.INFO):
+        run.run_lanes(files, tmp_path / "out", _args(), {}, ["f5"])
+    assert "not translated ahead" in caplog.text
+    order = [(m, s) for m, s, _ in calls]
+    assert order.index(("e2", "transcribe")) < order.index(("e2", "translate"))
+    assert order.index(("e1", "dub")) < order.index(("e2", "transcribe"))  # done by the lane, after e1
+
+
+@pytest.mark.parametrize("name", ["config", "single", "until", "force"])
+def test_lookahead_is_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    _stage_fakes(monkeypatch, calls)
+    files = _season(tmp_path, 1 if name == "single" else 2)
+    config: dict[str, Any] = {"overlap_episodes": False} if name == "config" else {}
+    args = _args(until="speakers" if name == "until" else "voiceover", force="translate" if name == "force" else None)
+    assert run.lookahead_enabled(files, args, config) is False
+    threads_before = threading.active_count()
+    run.run_lanes(files, tmp_path / "out", args, config, ["f5"])
+    assert threading.active_count() == threads_before
+    if name == "until":
+        assert not [c for c in calls if c[1] == "translate"]  # nothing past speakers
+
+
+def test_error_in_the_lookahead_stops_the_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+
+    def gate(episode: run.Episode, stage: str) -> None:
+        if episode.media.stem == "e2" and stage == "translate":
+            raise RuntimeError("translation exploded")
+
+    _stage_fakes(monkeypatch, calls, gate=gate)
+    files = _season(tmp_path)
+    with pytest.raises(RuntimeError, match="translation exploded"):
+        run.run_lanes(files, tmp_path / "out", _args(), {}, ["f5"])
+    assert not [c for c in calls if c[0] == "e3" and c[1] == "dub"]
+
+
+def test_error_in_the_lane_releases_the_lookahead(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+
+    def gate(episode: run.Episode, stage: str) -> None:
+        if episode.media.stem == "e1" and stage == "voiceover":
+            raise RuntimeError("voicing exploded")
+
+    _stage_fakes(monkeypatch, calls, gate=gate)
+    files = _season(tmp_path)
+    for parallel in (False, True):
+        calls.clear()
+        with pytest.raises(RuntimeError, match="voicing exploded"):
+            run.run_lanes(files, tmp_path / "out", _args(), {"voiceover": {"parallel_cpu": parallel}}, ["f5", "vosk"])
+        assert not [c for c in calls if c[0] == "e3" and c[1] == "dub"]
+    assert threading.active_count() <= 2  # no thread left behind
+
+
+@pytest.mark.parametrize("engines,force,expected", [
+    (["f5"], "translate", 1), (["f5", "teratts"], "translate", 1), (["f5", "vosk"], "translate", 1),
+    (["f5", "teratts"], "glossary", 1)])
+def test_forced_shared_stage_runs_once_per_episode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                   engines: list[str], force: str, expected: int) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    _stage_fakes(monkeypatch, calls)
+    files = _season(tmp_path, 1)
+    run.run_lanes(files, tmp_path / "out", _args(force=force, until="mix"), {"voiceover": {"parallel_cpu": True}}, engines)
+    assert len([c for c in calls if c[1] == force]) == expected
+    assert len([c for c in calls if c[1] == "translate"]) == 1
+    for engine in engines:  # the later stages still run for every engine
+        assert ("e1", "dub", engine) in calls and ("e1", "mix", engine) in calls
+
+
+def test_force_of_an_engine_stage_still_applies_per_engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _guard(monkeypatch)
+    calls: list[tuple[str, str, str]] = []
+    _stage_fakes(monkeypatch, calls)
+    files = _season(tmp_path, 1)
+    run.run_lanes(files, tmp_path / "out", _args(until="mix"), {}, ["f5", "teratts"])
+    calls.clear()
+    run.run_lanes(files, tmp_path / "out", _args(until="mix", force="dub"), {}, ["f5", "teratts"])
+    assert {(s, e) for _, s, e in calls if s == "dub"} == {("dub", "f5"), ("dub", "teratts")}
