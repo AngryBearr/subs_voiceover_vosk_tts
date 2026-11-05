@@ -213,9 +213,10 @@ work folder, and episodes of one folder share a season glossary and a voice bank
    fast`) or by Cohere Transcribe plus Whisper, whose two texts a language model fuses into one
    (`--mode accurate`). Word times come from forced alignment (matching known text to the audio).
    The video is also scanned twice per second for burned-in captions and name cards (OCR); a
-   caption is used instead of the speech recognition's text and voiced by a neutral voice, and
-   the Russian translation of captions, name cards and place titles is shown in their place on
-   screen (a subtitle track, burned into the picture when the video is compressed). Who speaks is worked
+   caption is used instead of the speech recognition's text, and the Russian translation of captions,
+   name cards and place titles is shown right over the English text (a subtitle track, burned into the
+   picture when the video is compressed). By default captioned lines are not voiced (the original
+   sound stays; setting `on_screen.voice`: `text` | `neutral` | `hero`), because who says them is often unclear. Who speaks is worked
    out here (section 8), and existing subtitles are looked up first (section 9).
 2. **glossary**. A language model builds a list of names, places and terms of the season with
    their Russian spelling. Once per season it also gets the cast (people, nicknames, relations)

@@ -249,3 +249,28 @@ def test_mux_burns_the_onscreen_text_into_the_compressed_video(monkeypatch: pyte
     assert encoded["name"] == "video.hevc_nvenc.3811k.onscreen.mkv" and len(encoded["overlays"]) == 1
     assert muxed["video_source"] == episode.out / "video.hevc_nvenc.3811k.onscreen.mkv"
     assert muxed["onscreen_ass"] is None  # burned in: no second copy as a track
+
+
+def test_on_screen_voice_text_needs_the_track(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    episode = _episode(tmp_path, {})
+    assert episode.on_screen()["voice"] == "text"  # the default
+    episode.config["on_screen"] = {"voice": "text", "track": False}
+    with caplog.at_level("WARNING"):
+        assert episode.on_screen()["voice"] == "neutral"
+    assert "on_screen.track is off" in caplog.text
+    episode.config["on_screen"] = {"voice": "hero", "track": False}
+    assert episode.on_screen()["voice"] == "hero"
+
+
+def test_dub_passes_the_on_screen_voice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from stt import dub
+
+    episode = _episode(tmp_path, {})
+    episode.config.update({"dub": {"interjections": "dense"}, "on_screen": {"voice": "hero"}})
+    seen: list[list[str]] = []
+    monkeypatch.setattr(dub, "main", lambda argv: seen.append(argv))
+    monkeypatch.setattr(episode, "_engine", lambda: {"voices": {"female": 1, "male": 2}})
+    monkeypatch.setattr(episode, "_host_voices", lambda: None)
+    episode.engine = "vosk"
+    episode.dub()
+    assert seen[0][seen[0].index("--on-screen-voice") + 1] == "hero"

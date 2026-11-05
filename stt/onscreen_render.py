@@ -4,9 +4,11 @@
     ass = write_ass(items, Path("onscreen.ass"), 1920, 1080)       # soft track: stt.mix.mux_tracks(onscreen_ass=...)
     overlays = render_overlays(items, 1920, 1080)                   # burn-in: stt.video_compress (--onscreen)
 
-Both outputs come from one layout, so they look alike. Captions sit on the English ones (an opaque dark box
-covers the English text); name cards and lower thirds go to the opposite side of the screen (mirrored
-horizontally, or above the English text when it is near the centre). Overlapping items are stacked.
+Both outputs come from one layout, so they look alike. Every Russian item sits right over the English text it
+translates, on a dark box a little larger than the English box (opaque for captions, about 85% for name cards and
+lower thirds; the box may grow around a longer Russian text). A name card is the name in bold and the descriptor
+lines (job, tribe) below; a lower third keeps its lines. Overlapping items are stacked (never two boxes on top of
+each other).
 All item times are on the episode timeline; ``offset_s`` is the start of a test piece (subtracted).
 """
 
@@ -29,9 +31,8 @@ FONT_DIRS = (Path("/usr/share/fonts/truetype/dejavu"), Path("/usr/share/fonts/de
 LINE_HEIGHT = 1.17  # line height / font size of DejaVu Sans
 MARGIN = 0.02  # of the screen: the layer never goes closer to the edge
 PAD = 0.012  # of the screen height: space around the text inside its box
-CENTRE_ZONE = 0.15  # |centre x - 0.5| below this: an English card is "in the centre"
 CAPTION_BG = (12, 12, 12, 255)
-CARD_BG = (12, 12, 12, 190)
+CARD_BG = (12, 12, 12, 217)  # about 85% opaque
 TEXT_COLOUR = (255, 255, 255, 255)
 
 Rect = tuple[float, float, float, float]
@@ -148,45 +149,55 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 def _place(kind: str, lines: list[Line], box: list[float] | None, width: int, height: int) -> Cue | None:
-    """Centre and rectangle of one item before stacking (times are filled in by the caller)."""
+    """Rectangle and text centre of one item before stacking (times are filled in by the caller).
+    The rectangle always covers the English box (plus a small padding) and grows around the Russian text if
+    that needs more room; it stays in the frame."""
     text_w, text_h = _block(lines)
     pad = PAD * height
     box_w, box_h = text_w + 2 * pad, text_h + 2 * pad
     margin_x, margin_y = MARGIN * width, MARGIN * height
-    if kind == "caption":
-        if box:
-            ex0, ey0, ex1, ey1 = box[0] * width, box[1] * height, box[2] * width, box[3] * height
-            cx, cy = (ex0 + ex1) / 2, (ey0 + ey1) / 2
-            # the English text must be covered: the rectangle is at least its box (plus a small margin)
-            cover = (ex0 - pad / 2, ey0 - pad / 2, ex1 + pad / 2, ey1 + pad / 2)
-        else:
-            cx, cy = width / 2, height * 0.92 - box_h / 2
-            cover = (cx, cy, cx, cy)
-        rect = (min(cx - box_w / 2, cover[0]), min(cy - box_h / 2, cover[1]),
-                max(cx + box_w / 2, cover[2]), max(cy + box_h / 2, cover[3]))
-        bg = CAPTION_BG
-    else:
-        bg = CARD_BG
-        if box:
-            ex0, ey0, ex1, ey1 = box[0] * width, box[1] * height, box[2] * width, box[3] * height
-            ecx, ecy = (ex0 + ex1) / 2, (ey0 + ey1) / 2
-            if abs(ecx / width - 0.5) < CENTRE_ZONE:  # near the centre: above the English text
-                cx, cy = ecx, ey0 - pad - box_h / 2
+    if box:
+        gap = pad / 2 if kind == "caption" else pad
+        cover = (box[0] * width - gap, box[1] * height - gap, box[2] * width + gap, box[3] * height + gap)
+    else:  # no English box: bottom centre
+        cy = height * 0.92 - box_h / 2
+        cover = (width / 2, cy, width / 2, cy)
+    cx, cy = (cover[0] + cover[2]) / 2, (cover[1] + cover[3]) / 2
+    rect = (min(cx - box_w / 2, cover[0]), min(cy - box_h / 2, cover[1]),
+            max(cx + box_w / 2, cover[2]), max(cy + box_h / 2, cover[3]))
+    # keep the layer on the screen, but never uncover the English box
+    rect = (max(rect[0], min(margin_x, cover[0])), max(rect[1], min(margin_y, cover[1])),
+            min(rect[2], max(width - margin_x, cover[2])), min(rect[3], max(height - margin_y, cover[3])))
+    centre = ((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
+    return Cue(0.0, 0.0, kind, lines, centre, rect, CAPTION_BG if kind == "caption" else CARD_BG)
+
+
+def _split(text: Any) -> list[str]:
+    return [x.strip() for x in str(text or "").split("\n") if x.strip()]
+
+
+def _fit_block(parts: list[tuple[str, bool, float]], size: int, min_size: int, max_width: float,
+               max_height: float) -> list[Line]:
+    """Lines for ``parts`` (text, bold, size factor): the largest font size where every part fits ``max_width``
+    on one line; failing that, parts may wrap to two lines while the block stays under ``max_height``."""
+    for max_lines in (1, 2):
+        for candidate in range(size, min_size - 1, -2):
+            lines: list[Line] = []
+            for text, bold, factor in parts:
+                small = max(1, int(candidate * factor))
+                wrapped = _wrap(text, small, bold, max_width, max_lines)
+                if wrapped is None:
+                    break
+                lines += [Line(x, small, bold) for x in wrapped]
             else:
-                cx, cy = width - ecx, ecy
-        else:
-            cx, cy = width - margin_x - box_w / 2, margin_y + height * 0.04 + box_h / 2
-        rect = (cx - box_w / 2, cy - box_h / 2, cx + box_w / 2, cy + box_h / 2)
-    # keep the layer on the screen (the text centre follows the rectangle's shift)
-    dx = _clamp(rect[0], margin_x, width - margin_x - (rect[2] - rect[0])) - rect[0]
-    dy = _clamp(rect[1], margin_y, height - margin_y - (rect[3] - rect[1])) - rect[1]
-    rect = (rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy)
-    centre = (_clamp(cx + dx, 0, width), cy + dy)
-    return Cue(0.0, 0.0, kind, lines, centre, rect, bg)
+                if max_lines == 1 or sum(x.size * LINE_HEIGHT for x in lines) <= max_height:
+                    return lines
+    return [Line(text, max(1, int(min_size * factor)), bold) for text, bold, factor in parts]
 
 
 def _item_lines(item: dict[str, Any], width: int, height: int) -> list[Line]:
-    """Font sizes from the English box height, long texts wrapped to two lines (a card: name + descriptor)."""
+    """Font sizes fitted to the English box: a caption wraps to a few lines; a card is the name in bold with the
+    descriptor lines below; a lower third keeps its lines. The block may be up to 30% wider than the box."""
     kind = item.get("kind", "caption")
     text = str(item.get("text_ru") or "").strip()
     box = item.get("box")
@@ -197,18 +208,16 @@ def _item_lines(item: dict[str, Any], width: int, height: int) -> list[Line]:
         max_width = max(0.62 * width, (box[2] - box[0]) * width * 1.1) if box else 0.62 * width
         lines, size = _fit(text, size, False, min(max_width, 0.9 * width), int(0.028 * height))
         return [Line(x, size) for x in lines]
-    size = int(_clamp(box_h * 0.5, 0.03 * height, 0.052 * height))
-    descriptor = str(item.get("descriptor_ru") or "").strip()
-    max_width = 0.36 * width
+    pad = PAD * height
     if kind == "lower_third":
-        lines, size = _fit(text, size, False, max_width, int(0.026 * height))
-        return [Line(x, size) for x in lines]
-    names, size = _fit(text, size, True, max_width, int(0.026 * height), max_lines=1)
-    out = [Line(names[0], size, bold=True)]
-    if descriptor:
-        small = int(size * 0.75)
-        out.append(Line(_fit(descriptor, small, False, max_width, int(0.022 * height), max_lines=1)[0][0], small))
-    return out
+        parts = [(x, False, 1.0) for x in _split(text)]
+    else:
+        parts = [(text.replace("\n", " "), True, 1.0), *((x, False, 0.8) for x in _split(item.get("descriptor_ru")))]
+    inner_h = max(box_h, 0.03 * height) + pad  # the cover is the box plus a padding on both sides
+    size = int(_clamp(inner_h / (sum(f for _, _, f in parts) * LINE_HEIGHT), 0.026 * height, 0.055 * height))
+    box_w = (box[2] - box[0]) * width if box else 0.3 * width
+    max_width = min(max(box_w * 1.3, 0.2 * width) - 2 * pad, (1 - 2 * MARGIN) * width - 2 * pad)
+    return _fit_block(parts, size, int(0.02 * height), max_width, inner_h + size * LINE_HEIGHT)
 
 
 def _overlap(a: Rect, b: Rect) -> bool:

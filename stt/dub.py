@@ -17,9 +17,10 @@ from the speaker's (a correction, or `gender_by_voice` from `stt.line_gender`) i
 gender, not by the speaker's own voice; a corrected gender wins over `gender_by_voice`.
 
 Lines captioned on screen (`on_screen` in the records, set by `stt.transcribe`) are voiced by the engine's generic
-voice of `--neutral-gender` (`--on-screen-voice neutral`, the default), never by a speaker's own or the host's
-voice: the text on screen is not the hero's utterance. `--on-screen-voice hero` voices them like any line. A
-manual `speaker` or `gender` fix in `corrections.json` wins over the neutral voice.
+voice of `--neutral-gender` (`--on-screen-voice neutral`), never by a speaker's own or the host's voice: the text
+on screen is not the hero's utterance. `--on-screen-voice text` (the default) does not voice them at all: the Russian
+on-screen text shows them and the original audio stays audible. `--on-screen-voice hero` voices them like any line.
+A manual `speaker` or `gender` fix in `corrections.json` wins over `text` and `neutral`: the person decided.
 
 Writes `dub.ru.json` (or `--output`; voiced lines only, `voiceover` input format plus `speaker`,
 `gender`, `voice`), `dub.ru.srt` and `dub.report.json` (skipped lines with reasons).
@@ -72,7 +73,7 @@ def plan(
     dense_gap_ms: int = 1000,
     skip: set[int] | frozenset[int] = frozenset(),
     speaker_voices: dict[str, int | str] | None = None,
-    on_screen_voice: str = "neutral",
+    on_screen_voice: str = "text",
     neutral_gender: str = "male",
     corrected: set[int] | frozenset[int] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -88,6 +89,8 @@ def plan(
         reason = None
         if rec["index"] in skip:
             reason = "skipped in corrections.json"
+        elif rec.get("on_screen") and on_screen_voice == "text" and rec["index"] not in corrected:
+            reason = "on-screen caption: shown as Russian text"
         elif not " ".join(rec["text"]).strip():
             reason = "empty"
         elif interjections != "keep" and is_interjection(text_en):
@@ -130,9 +133,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="JSON {speaker id: voice} (e.g. cloned voices of the F5 engine); others by gender")
     parser.add_argument("--interjections", default="dense", choices=["dense", "all", "keep"],
                         help="Skip interjections over other speech / in rapid exchanges (dense), always, or never")
-    parser.add_argument("--on-screen-voice", default="neutral", choices=["neutral", "hero"],
-                        help="Voice of lines captioned on screen: the generic voice of --neutral-gender (neutral) "
-                             "or the speaker's usual one (hero)")
+    parser.add_argument("--on-screen-voice", default="text", choices=["text", "neutral", "hero"],
+                        help="Lines captioned on screen: not voiced, the Russian on-screen text shows them (text), "
+                             "the generic voice of --neutral-gender (neutral) or the speaker's usual one (hero)")
     parser.add_argument("--neutral-gender", default="male", choices=["male", "female"],
                         help="Which generic voice (of --voices) speaks the lines captioned on screen")
     args = parser.parse_args(argv)

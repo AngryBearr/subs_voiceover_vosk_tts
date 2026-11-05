@@ -67,3 +67,13 @@ def test_reclassify_repairs_shown_texts_not_the_classification() -> None:
     descriptors = [e["text"] for e in out["events"] if e["kind"] == "name_card_descriptor"]
     assert descriptors == ["SOCIOLOGY PROFESSOR"]
     assert reclassify(data)["captions"][0]["text"] == "Ifeel really good about.."  # no words: untouched
+
+
+def test_graphic_text_gets_day_and_tribe_spacing() -> None:
+    from stt.ocr_repair import fix_graphic_text
+
+    assert fix_graphic_text("DAY1") == "DAY 1"
+    assert fix_graphic_text("ESPADA-Older Tribe") == "ESPADA - Older Tribe"
+    assert fix_graphic_text("TOKA·TRIBE") == "TOKA TRIBE"
+    assert fix_graphic_text("ESPADA-OLDER TRIBE") == "ESPADA-OLDER TRIBE"
+    assert fix_graphic_text("H264 DAYS") == "H264 DAYS"

@@ -25,7 +25,7 @@
   "word_speakers": {"enabled": true, "model": "resnet293", "switch_penalty": 0.3, "prior": 0.0, "change_prior": 0.15, "window_s": 1.0, "passes": 1},
   "season_voices": {"enabled": true, "model": "resnet293-ft", "min_words": 20},
   "ocr": {"enabled": true, "fps": 2.0},
-  "on_screen": {"voice": "neutral", "neutral_gender": "male", "track": true, "burn_in_when_compressing": true},
+  "on_screen": {"voice": "text", "neutral_gender": "male", "track": true, "burn_in_when_compressing": true},
   "subtitles": {"enabled": true, "online": true, "imdb": {"amazing race": "tt0285335", "australia": null, "survivor": "tt0239195"}, "archive": null, "turn_bonus": 0.3},
   "llm": {
     "model": "openai/gpt-6-luna",

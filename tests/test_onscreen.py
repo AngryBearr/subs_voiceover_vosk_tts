@@ -138,7 +138,7 @@ def test_collect_builds_items_with_boxes_merged_fragments_and_voiced_flag() -> N
     assert by_kind["caption"][1]["voiced"] is False
     card = by_kind["name_card"][0]
     assert (card["text"], card["descriptor"], card["box"], card["voiced"]) == (
-        "DEVIN", "ACTOR", [0.05, 0.7, 0.2, 0.8], False)
+        "DEVIN", "ACTOR", [0.05, 0.7, 0.2, 0.85], False)  # the box covers all lines
     thirds = by_kind["lower_third"]
     assert [t["text"] for t in thirds] == ["SPIRIT OF THE PACIFIC", "DAY 3"]  # fragments merged; "..", short, scene dropped
     assert (thirds[0]["start"], thirds[0]["end"]) == (40.0, 42.0) and thirds[0]["voiced"] is False
@@ -329,11 +329,21 @@ def _rec(index: int, speaker: str = "S01", gender: str = "female", **extra: Any)
 
 def test_on_screen_lines_get_the_neutral_voice_not_the_speakers() -> None:
     records = [_rec(1), _rec(2, on_screen=True), _rec(3, speaker="S02", gender="male", on_screen=True)]
-    voiced, _ = plan(records, VOICES, speaker_voices={"S01": "/clips/s01.wav", "S02": "/clips/jeff.wav"})
+    voiced, _ = plan(records, VOICES, speaker_voices={"S01": "/clips/s01.wav", "S02": "/clips/jeff.wav"},
+                     on_screen_voice="neutral")
     assert [r["voice"] for r in voiced] == ["/clips/s01.wav", "m_generic", "m_generic"]
     female, _ = plan([_rec(1, on_screen=True)], VOICES, speaker_voices={"S01": "/clips/s01.wav"},
-                     neutral_gender="female")
+                     on_screen_voice="neutral", neutral_gender="female")
     assert female[0]["voice"] == "f_generic"
+
+
+def test_text_mode_is_the_default_and_skips_captioned_lines() -> None:
+    records = [_rec(1), _rec(2, on_screen=True), _rec(3, on_screen=True)]
+    voiced, skipped = plan(records, VOICES, corrected={3})
+    assert [r["source_index"] for r in voiced] == [1, 3]  # the corrected captioned line is still voiced
+    assert [(r["index"], r["reason"]) for r in skipped] == [(2, "on-screen caption: shown as Russian text")]
+    voiced, skipped = plan(records, VOICES, on_screen_voice="hero")
+    assert len(voiced) == 3 and not skipped
 
 
 def test_hero_option_keeps_the_speakers_voice() -> None:
@@ -344,9 +354,10 @@ def test_hero_option_keeps_the_speakers_voice() -> None:
 
 def test_manual_correction_wins_over_the_neutral_voice() -> None:
     record = _rec(1, on_screen=True, gender_changed=True)
-    voiced, _ = plan([record], VOICES, corrected={1})
+    voiced, _ = plan([record], VOICES, corrected={1}, on_screen_voice="neutral")
     assert voiced[0]["voice"] == "f_generic"
-    voiced, _ = plan([_rec(2, on_screen=True)], VOICES, corrected={2}, speaker_voices={"S01": "/clips/s01.wav"})
+    voiced, _ = plan([_rec(2, on_screen=True)], VOICES, corrected={2}, speaker_voices={"S01": "/clips/s01.wav"},
+                     on_screen_voice="neutral")
     assert voiced[0]["voice"] == "/clips/s01.wav"
 
 
@@ -358,6 +369,132 @@ def test_dub_main_reads_corrections_and_cli_options(tmp_path: Path) -> None:
     (tmp_path / "speakers.json").write_text(json.dumps([
         {"id": "S01", "gender": "female", "name": "Ana"}, {"id": "S02", "gender": "male", "name": "Rob"}]), encoding="utf-8")
     (tmp_path / "corrections.json").write_text(json.dumps({"2": {"gender": "male"}}), encoding="utf-8")
-    dub.main([str(tmp_path), "--voices", "female=f_generic,male=m_generic", "--neutral-gender", "female"])
+    dub.main([str(tmp_path), "--voices", "female=f_generic,male=m_generic", "--neutral-gender", "female",
+              "--on-screen-voice", "neutral"])
     out = json.loads((tmp_path / "dub.ru.json").read_text(encoding="utf-8"))
     assert [r["voice"] for r in out] == ["f_generic", "m_generic"]  # line 2: its corrected gender, not the neutral one
+    dub.main([str(tmp_path), "--voices", "female=f_generic,male=m_generic"])  # default: text only
+    out = json.loads((tmp_path / "dub.ru.json").read_text(encoding="utf-8"))
+    assert [r["source_index"] for r in out] == [2]
+
+
+# ---- card blocks: the lines of one card are one item
+
+def _blocks_ocr(*events: dict[str, Any]) -> dict[str, Any]:
+    return {"captions": [], "cards": [], "events": list(events)}
+
+
+def _graphics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [i for i in items if i["kind"] != "caption"]
+
+
+def test_interview_card_with_the_name_set_as_scene_text_is_one_name_card() -> None:
+    ocr = _blocks_ocr(  # S21 style: the name is a short scene text, the job and the tribe are lower thirds
+        _event(657.9, 660.5, "HOLLY", "scene", [0.1906, 0.7431, 0.3906, 0.8389]),
+        _event(657.9, 660.5, "SWIM COACH", "lower_third", [0.376, 0.7625, 0.5927, 0.8361]),
+        _event(657.9, 661.0, "ESPADA-OLDER TRIBE", "lower_third", [0.1958, 0.8264, 0.5708, 0.9042]),
+        _event(660.5, 661.0, "HOLLY SWIMCOACH", "lower_third", [0.1906, 0.7389, 0.5969, 0.8458]),  # read as one
+        _event(900.0, 902.0, "SHIRT TEXT", "scene", [0.4, 0.8, 0.6, 0.9]))
+    for names in ([], ["Holly"]):
+        (card,) = _graphics(onscreen.collect(ocr, names=names))
+        assert (card["kind"], card["text"], card["descriptor"]) == ("name_card", "HOLLY", "SWIM COACH\nESPADA-OLDER TRIBE")
+        assert (card["start"], card["end"]) == (657.9, 661.0) and card["box"] == [0.1906, 0.7431, 0.5927, 0.9042]
+        assert [line["text"] for line in card["lines"]] == ["HOLLY", "SWIM COACH", "ESPADA-OLDER TRIBE"]
+        assert card["lines"][1]["box"] == [0.376, 0.7625, 0.5927, 0.8361]
+
+
+def test_a_scene_job_next_to_a_name_card_is_kept() -> None:
+    ocr = _blocks_ocr(
+        _event(1568.0, 1570.6, "AALIYAH", "name_card", [0.1427, 0.7407, 0.376, 0.8407]),
+        _event(1568.0, 1570.6, "CHEF", "scene", [0.3875, 0.7685, 0.4792, 0.8426]),
+        _event(1568.0, 1570.6, "TOKA·TRIBE", "name_card_descriptor", [0.1406, 0.8241, 0.3563, 0.9074]))
+    (card,) = _graphics(onscreen.collect(ocr))
+    assert (card["text"], card["descriptor"]) == ("AALIYAH", "CHEF\nTOKA TRIBE")
+    assert [line["text"] for line in card["lines"]] == ["AALIYAH", "CHEF", "TOKA TRIBE"]
+
+
+def test_an_animated_card_read_in_pieces_is_one_item_with_the_full_time() -> None:
+    ocr = _blocks_ocr(
+        _event(1615.5, 1616.0, "OCIOLOGY PROFESSOR", "lower_third", [0.3219, 0.7667, 0.6792, 0.8389]),
+        _event(1616.0, 1618.7, "TOKA TRIBE", "lower_third", [0.1448, 0.8333, 0.3552, 0.9037]),
+        _event(1617.1, 1618.7, "JELLY SOCIOLOGY PROFESSOR", "name_card", [0.1406, 0.7333, 0.6854, 0.8537]))
+    (card,) = _graphics(onscreen.collect(ocr, names=["Jelly"]))
+    assert (card["kind"], card["text"], card["descriptor"]) == ("name_card", "JELLY", "SOCIOLOGY PROFESSOR\nTOKA TRIBE")
+    assert (card["start"], card["end"]) == (1615.5, 1618.7)
+    assert [line["text"] for line in card["lines"]] == ["JELLY SOCIOLOGY PROFESSOR", "TOKA TRIBE"]
+
+
+def test_a_title_block_of_scene_lines_is_one_lower_third_without_a_name() -> None:
+    ocr = _blocks_ocr(
+        _event(584.4, 588.6, "ESPADA-Older Tribe", "scene", [0.1917, 0.7389, 0.6302, 0.8444]),
+        _event(584.4, 588.6, "DAY1", "scene", [0.1927, 0.8278, 0.3052, 0.9083]))
+    (block,) = _graphics(onscreen.collect(ocr, names=["Espada"]))
+    assert (block["kind"], block["text"], block["descriptor"]) == ("lower_third", "ESPADA - Older Tribe\nDAY 1", None)
+    assert [line["text"] for line in block["lines"]] == ["ESPADA - Older Tribe", "DAY 1"]
+    assert block["box"] == [0.1917, 0.7389, 0.6302, 0.9083]
+
+
+def test_isolated_scene_text_and_lists_stay_out() -> None:
+    shirts = _blocks_ocr(
+        _event(10.0, 13.0, "NO FEAR", "scene", [0.5, 0.8, 0.7, 0.9]),  # one sign
+        _event(20.0, 23.0, "WELCOME", "scene", [0.7, 0.8, 0.9, 0.9]),  # two texts, not a block
+        _event(20.0, 23.0, "BEACH", "scene", [0.1, 0.5, 0.3, 0.6]),
+        _event(30.0, 33.0, "SURVIVOR", "scene", [0.6, 0.8, 0.8, 0.86]),  # stacked, but on the right: a logo
+        _event(30.0, 33.0, "FIFTY ONE", "scene", [0.6, 0.86, 0.8, 0.92]))
+    assert _graphics(onscreen.collect(shirts, names=["Welcome", "Survivor"])) == []
+    roll = _blocks_ocr(*[_event(40.0, 43.0, f"CREW NAME {n}", "lower_third",
+                                [0.2, 0.55 + 0.07 * n, 0.5, 0.61 + 0.07 * n]) for n in range(6)])
+    assert not [i for i in onscreen.collect(roll) if i.get("lines")]  # a list is not a card
+
+
+def test_a_card_after_another_card_is_not_merged_into_it() -> None:
+    ocr = _blocks_ocr(
+        _event(700.2, 701.2, "ORI", "name_card", [0.1437, 0.75, 0.2333, 0.8426]),
+        _event(700.2, 701.2, "PERSONAL TRAINER", "name_card_descriptor", [0.1396, 0.8204, 0.4802, 0.9074]),
+        _event(701.2, 702.8, "THIENAN", "name_card", [0.1385, 0.7407, 0.4135, 0.8444]),
+        _event(701.2, 702.8, "MEDICAL STUDENT", "name_card_descriptor", [0.1375, 0.813, 0.4875, 0.913]))
+    assert [(i["text"], i["descriptor"]) for i in _graphics(onscreen.collect(ocr))] == [
+        ("ORI", "PERSONAL TRAINER"), ("THIENAN", "MEDICAL STUDENT")]
+
+
+# ---- translation in the context of the dialogue
+
+CUES_EN = [{"index": n, "start": 1000 * n, "end": 1000 * n + 900, "text": [t]} for n, t in enumerate(
+    ["Come on.", "Where do I put it on?", "Over there.", "Good.", "Okay.", "Let's go."], 1)]
+CUES_RU = [{"index": n, "start": 1000 * n, "end": 1000 * n + 900, "text": [t]} for n, t in enumerate(
+    ["Давай.", "Куда его надевать?", "Вон там.", "Хорошо.", "Ладно.", "Пошли."], 1)]
+
+
+def test_caption_prompt_carries_the_overlapping_cue_and_its_neighbours_with_the_dub_russian() -> None:
+    client = FakeClient()
+    items = [_item(1, "caption", "Where do I put it?", 2.0, 2.8), _item(2, "lower_third", "DAY 3", 20.0, 22.0)]
+    out = onscreen.translate_items(items, [], client, cues=CUES_EN, cues_ru=CUES_RU)
+    rows = {r["i"]: r for r in (json.loads(x) for x in client.prompts[0].split("Lines:\n", 1)[1].splitlines())}
+    context = rows[1]["context"]
+    assert context["cue"] == [{"t": [2.0, 2.9], "en": "Where do I put it on?", "ru": "Куда его надевать?"}]
+    assert [c["ru"] for c in context["before"]] == ["Давай."] and [c["ru"] for c in context["after"]][:2] == [
+        "Вон там.", "Хорошо."]
+    assert "context" not in rows[2] and "follow that cue's Russian" in onscreen.SYSTEM_PROMPT
+    assert out[0]["context_hash"] and "context_hash" not in out[1]
+
+
+def test_changed_dub_text_retranslates_the_caption_and_unchanged_one_is_cached() -> None:
+    items = [_item(1, "caption", "Where do I put it?", 2.0, 2.8)]
+    first = onscreen.translate_items(items, [], FakeClient(), cues=CUES_EN, cues_ru=CUES_RU)
+    same = FakeClient()
+    onscreen.translate_items(items, [], same, cues=CUES_EN, cues_ru=CUES_RU, cached=first)
+    assert same.prompts == []
+    changed = [dict(c, text=["Куда это надеть?"]) if c["index"] == 2 else c for c in CUES_RU]
+    again = FakeClient()
+    onscreen.translate_items(items, [], again, cues=CUES_EN, cues_ru=changed, cached=first)
+    assert len(again.prompts) == 1
+
+
+def test_onscreen_ru_is_written_without_the_dub_translation(tmp_path: Path) -> None:
+    (tmp_path / "onscreen.json").write_text(json.dumps([_item(1, "caption", "Where do I put it?", 2.0, 2.8)]),
+                                            encoding="utf-8")
+    (tmp_path / "subs.en.json").write_text(json.dumps(CUES_EN), encoding="utf-8")
+    client = FakeClient()
+    result = onscreen.translate_folder(tmp_path, client)
+    assert (tmp_path / "onscreen.ru.json").exists() and result[0]["text_ru"]
+    assert "context" not in client.prompts[0] and "context_hash" not in result[0]

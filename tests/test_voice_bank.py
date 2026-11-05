@@ -142,3 +142,56 @@ def test_unchanged_clip_index_keeps_its_time(tmp_path: Path) -> None:
     assert not voice_bank.write_if_changed(index, "[]\n")
     assert index.stat().st_mtime == 1000
     assert voice_bank.write_if_changed(index, '[{"name": "Jeff"}]\n')
+
+
+def _episode(tmp_path: Path, renumbered: bool) -> Path:
+    import json
+
+    folder = tmp_path / "ep1"
+    folder.mkdir()
+    first = [{"id": "S01", "name": "Aaliyah Puglia", "diarizer_label": "3"},
+             {"id": "S02", "name": "Devin Way", "diarizer_label": "10"}]
+    (folder / "diarization.test.json").write_text(json.dumps({"turns": [
+        {"speaker": "3", "start": 0.0, "end": 9.0}, {"speaker": "10", "start": 9.0, "end": 18.0}]}))
+    cues = [_cue(0, 9, "S01", "aaliyah"), _cue(9, 18, "S02", "devin")]
+    if renumbered:  # season voices swapped the ids and keep the first pass aside
+        (folder / "speakers.before_voices.json").write_text(json.dumps(first))
+        (folder / "subs.en.before_voices.json").write_text(json.dumps(cues))
+        now = [{"id": "S01", "name": "Devin Way", "diarizer_label": "V:Devin", "diarizer_labels": ["10"]},
+               {"id": "S02", "name": "Aaliyah Puglia", "diarizer_label": "V:Aaliyah", "diarizer_labels": ["3"]}]
+        cues = [_cue(0, 9, "S02", "aaliyah"), _cue(9, 18, "S01", "devin")]
+    else:
+        now = first
+    (folder / "speakers.json").write_text(json.dumps(now))
+    (folder / "subs.en.json").write_text(json.dumps(cues))
+    return folder
+
+
+def test_person_is_found_by_name_after_season_voices(tmp_path: Path) -> None:
+    import json
+
+    folder = _episode(tmp_path, renumbered=True)
+    # the print still says S01 (first pass), but S01 is Devin now
+    ids, subs, speakers = voice_bank.locate_person(folder, "Aaliyah Puglia", "S01")
+    assert (ids, subs, speakers) == ({"S02"}, "subs.en.json", "speakers.json")
+    records = json.loads((folder / subs).read_text())
+    assert reference_samples(ids, records)[0]["text"] == "aaliyah"
+    assert voice_bank.other_voice_seconds(folder, ids, 0.0, 9.0, speakers) == 0.0
+    assert voice_bank.other_voice_seconds(folder, ids, 5.0, 12.0, speakers) == 3.0
+
+
+def test_person_without_a_current_card_uses_the_first_pass(tmp_path: Path) -> None:
+    import json
+
+    folder = _episode(tmp_path, renumbered=True)
+    ids, subs, speakers = voice_bank.locate_person(folder, "Kristin Flickinger", "S02")
+    assert (ids, subs, speakers) == ({"S02"}, "subs.en.before_voices.json", "speakers.before_voices.json")
+    records = json.loads((folder / subs).read_text())
+    assert reference_samples(ids, records)[0]["text"] == "devin"
+    assert voice_bank.other_voice_seconds(folder, ids, 9.0, 18.0, speakers) == 0.0
+
+
+def test_unrenumbered_episode_keeps_the_print_id(tmp_path: Path) -> None:
+    folder = _episode(tmp_path, renumbered=False)
+    assert voice_bank.locate_person(folder, "Aaliyah Puglia", "S01")[0] == {"S01"}
+    assert voice_bank.locate_person(folder, "Nobody Else", "S02") == ({"S02"}, "subs.en.json", "speakers.json")

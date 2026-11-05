@@ -279,10 +279,14 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   S10E01: 61 captions — 32 already right in ASR, 17 replaced, 11 added, 1 under other speech.
 - Since 4.11 the caption wins for its own utterance: a caption ASR already had is written with the
   caption's text over the same word times (`caption: true` on its words), and a captioned run of
-  words is its own cue (`on_screen: true`). Such cues are voiced by the track's neutral voice
-  (`on_screen.voice`: `neutral` | `hero`, `on_screen.neutral_gender`), not the hero's; a manual
-  speaker/gender fix in `corrections.json` wins. S51E01: 138 captions, 109 voiced, 29 under other
-  speech (mostly whispers under a confessional) only shown as text.
+  words is its own cue (`on_screen: true`). `on_screen.voice` decides what happens to them:
+  `text` (default) does not voice them, the Russian on-screen text shows them and the original audio
+  stays audible (the mix ducks only under voiced lines); `neutral` voices them with the track's neutral
+  voice (`on_screen.neutral_gender`), not the hero's; `hero` voices them like any line (dub:
+  `--on-screen-voice text|neutral|hero`). A manual speaker/gender fix in `corrections.json` wins and the
+  line is voiced. With `on_screen.track` off, `text` falls back to `neutral` (logged warning), so the
+  captioned lines are not lost. S51E01: 138 captions, 29 of them under other speech (mostly whispers
+  under a confessional) only ever shown as text.
 - `onscreen.json` (written by the transcribe stage): captions, name cards (+ descriptor) and lower
   thirds with their screen box; `python -m stt.onscreen translate <folder>` (run in the translate
   stage) writes `onscreen.ru.json` with the cast's Russian names and the glossary, cached per text and
@@ -292,8 +296,9 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   "yourname", damaged job lines), truncated animation frames are folded into the full text, and card
   lines read as one ("DEVIN ACTOR") are split into name and descriptor.
   `stt.onscreen_render` turns it into an ASS track muxed as "Надписи на экране" (default, forced,
-  DejaVu fonts attached): a caption on a dark box over the English one, a card or lower third in the
-  mirrored part of the screen. When the video is compressed (`mix.video.compress`, preset `upload`)
+  DejaVu fonts attached): every Russian item sits on a dark box (about 85% opaque, a little larger than the
+  English text it translates) that covers the English: a caption, a card (name in bold, job and tribe
+  below) and a lower third alike. The box may grow slightly for a longer Russian text, overlapping items are stacked. When the video is compressed (`mix.video.compress`, preset `upload`)
   the same text is burned into the picture instead (`on_screen.burn_in_when_compressing`). Off:
   `"on_screen": {"track": false}`.
 - Name cards, titles and caption labels ("Shonee: …") become `on_screen` evidence for the

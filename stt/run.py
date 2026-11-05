@@ -380,9 +380,16 @@ class Episode:
         self.translate_onscreen()
 
     def on_screen(self) -> dict[str, Any]:
-        """``on_screen`` settings: the voice of captioned lines and the Russian on-screen text."""
-        return {"voice": "neutral", "neutral_gender": "male", "track": True, "burn_in_when_compressing": True,
-                **(self.config.get("on_screen") or {})}
+        """``on_screen`` settings: the voice of captioned lines and the Russian on-screen text.
+        Voice ``text`` (captions only shown as Russian text) needs the track: without it the voice becomes
+        ``neutral`` so the captioned lines are not lost."""
+        settings = {"voice": "text", "neutral_gender": "male", "track": True, "burn_in_when_compressing": True,
+                    **(self.config.get("on_screen") or {})}
+        if settings["voice"] == "text" and not settings["track"]:
+            log.warning("[%s] on_screen.voice is 'text' but on_screen.track is off: captioned lines get the "
+                        "neutral voice instead", self.media.stem)
+            settings["voice"] = "neutral"
+        return settings
 
     def translate_onscreen(self) -> Path | None:
         """``onscreen.ru.json``: on-screen captions, name cards and lower thirds in Russian (cached per text).
@@ -390,7 +397,8 @@ class Episode:
         source, target = self.out / "onscreen.json", self.out / "onscreen.ru.json"
         if not source.exists() or not self.on_screen()["track"]:
             return None
-        inputs = [p for p in (source, self.out / "subs.en.json", self.out / "speakers.json") if p.exists()]
+        inputs = [p for p in (source, self.out / "subs.en.json", self.out / "speakers.json", self.out / "subs.ru.json")
+                  if p.exists()]  # speakers: genders; subs.ru: the dub's wording the captions follow
         if target.exists() and target.stat().st_mtime >= max(p.stat().st_mtime for p in inputs):  # speakers: genders
             return target
         from stt import onscreen

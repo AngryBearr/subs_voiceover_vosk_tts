@@ -41,29 +41,64 @@ def test_caption_sits_on_the_english_box_and_covers_it() -> None:
     assert cue.rect[1] <= CAPTION_BOX[1] * H and cue.rect[3] >= CAPTION_BOX[3] * H
 
 
-def test_name_card_is_mirrored_and_lower_third_too() -> None:
+def covers(rect: tuple[float, float, float, float], box: list[float]) -> bool:
+    return (rect[0] <= box[0] * W and rect[1] <= box[1] * H and rect[2] >= box[2] * W and rect[3] >= box[3] * H)
+
+
+def test_name_card_and_lower_third_cover_the_english_box() -> None:
+    third_box = [0.1, 0.2, 0.3, 0.26]
     cards = layout([item("name_card", 1, 3, "ДЕВИН", CARD_BOX, "АКТЁР"),
-                    item("lower_third", 1, 3, "ДУХ ТИХОГО ОКЕАНА", [0.1, 0.2, 0.3, 0.26], n=2)], W, H)
+                    item("lower_third", 1, 3, "ДУХ ТИХОГО ОКЕАНА", third_box, n=2)], W, H)
     card, third = cue_by_kind(cards, "name_card"), cue_by_kind(cards, "lower_third")
     assert [x.text for x in card.lines] == ["ДЕВИН", "АКТЁР"] and card.lines[0].bold and not card.lines[1].bold
-    assert card.centre[0] == pytest.approx((1 - (CARD_BOX[0] + CARD_BOX[2]) / 2) * W, abs=1)
-    assert card.centre[1] == pytest.approx((CARD_BOX[1] + CARD_BOX[3]) / 2 * H, abs=1)
-    assert third.centre[0] == pytest.approx(0.8 * W, abs=1)
-    assert card.bg[3] < 255  # semi-transparent
+    assert covers(card.rect, CARD_BOX) and covers(third.rect, third_box)
+    # not mirrored: the text stays on the English side of the screen
+    assert card.centre[0] == pytest.approx((CARD_BOX[0] + CARD_BOX[2]) / 2 * W, abs=0.15 * W)
+    assert card.centre[0] < 0.5 * W and third.centre[0] < 0.5 * W
+    assert card.bg[3] == 217  # about 85% opaque
+    # a small padding only: the box does not wander far from the English one
+    assert card.rect[0] >= CARD_BOX[0] * W - 0.1 * W and card.rect[3] <= CARD_BOX[3] * H + 0.05 * H
 
 
-def test_central_card_goes_above_the_english_text() -> None:
-    box = [0.4, 0.7, 0.6, 0.78]
-    cue = layout([item("name_card", 1, 3, "ДЕВИН", box)], W, H)[0]
-    assert cue.centre[0] == pytest.approx(0.5 * W, abs=1)
-    assert cue.rect[3] <= box[1] * H
+def test_multi_line_card_and_lower_third_use_their_lines() -> None:
+    card_box, third_box = [0.05, 0.70, 0.25, 0.80], [0.70, 0.20, 0.95, 0.30]
+    cues = layout([item("name_card", 1, 3, "ХОЛЛИ", card_box, "ТРЕНЕР ПО ПЛАВАНИЮ\nПЛЕМЯ ЭСПАДА"),
+                   item("lower_third", 1, 3, "ЭСПАДА - старшее племя\nДЕНЬ 1", third_box, n=2)], W, H)
+    card, third = cue_by_kind(cues, "name_card"), cue_by_kind(cues, "lower_third")
+    assert [x.text for x in card.lines] == ["ХОЛЛИ", "ТРЕНЕР ПО ПЛАВАНИЮ", "ПЛЕМЯ ЭСПАДА"]
+    assert card.lines[0].bold and card.lines[1].size < card.lines[0].size
+    assert [x.text for x in third.lines] == ["ЭСПАДА - старшее племя", "ДЕНЬ 1"]
+    for cue, box in ((card, card_box), (third, third_box)):
+        assert covers(cue.rect, box)
+        assert cue.rect[2] - cue.rect[0] <= (box[2] - box[0]) * W * 1.3 + 0.05 * W  # at most ~30% wider
+        assert 0 <= cue.rect[0] and cue.rect[2] <= W and 0 <= cue.rect[1] and cue.rect[3] <= H
+        block = sum(x.size * 1.17 for x in cue.lines)
+        assert block <= cue.rect[3] - cue.rect[1]  # the text fits its box
+
+
+def test_long_russian_card_shrinks_or_wraps_within_the_width() -> None:
+    box = [0.05, 0.70, 0.20, 0.78]
+    cue = layout([item("name_card", 1, 3, "АЛЕКСАНДРА", box, "ПРОФЕССИОНАЛЬНЫЙ ГОНЩИК\nПЛЕМЯ")], W, H)[0]
+    assert covers(cue.rect, box) and cue.rect[2] - cue.rect[0] <= (box[2] - box[0]) * W * 1.3 + 0.05 * W
+    assert len(cue.lines) >= 3
+
+
+def test_old_items_without_lines_still_render() -> None:
+    cue = layout([item("lower_third", 1, 2, "ДУХ", [0.7, 0.2, 0.9, 0.25])], W, H)[0]
+    assert [x.text for x in cue.lines] == ["ДУХ"]
 
 
 def test_items_without_box_use_defaults() -> None:
-    cues = layout([item("caption", 1, 2, "Привет", None), item("name_card", 1, 2, "АНА", None, n=2)], W, H)
-    caption, card = cue_by_kind(cues, "caption"), cue_by_kind(cues, "name_card")
+    caption = layout([item("caption", 1, 2, "Привет", None)], W, H)[0]
     assert caption.centre[0] == pytest.approx(W / 2, abs=1) and caption.centre[1] > 0.8 * H
-    assert card.centre[0] > 0.7 * W and card.centre[1] < 0.3 * H
+
+
+def test_stacked_cards_never_overlap_and_stay_on_screen() -> None:
+    cues = layout([item("name_card", 1, 3, "ДЕВИН", CARD_BOX, "АКТЁР"),
+                   item("lower_third", 2, 4, "ДУХ\nДЕНЬ 1", CARD_BOX, n=2)], W, H)
+    a, b = cues
+    assert a.rect[1] >= b.rect[3] or b.rect[1] >= a.rect[3]
+    assert all(0 <= c.rect[1] and c.rect[3] <= H for c in cues)
 
 
 def test_overlapping_items_are_stacked_not_overlapped() -> None:
@@ -101,8 +136,12 @@ def test_write_ass(tmp_path: Path) -> None:
     assert "Dialogue: 1,0:00:00.50,0:00:02.25,Caption" in text  # offset subtracted
     ex, ey = round((CAPTION_BOX[0] + CAPTION_BOX[2]) / 2 * W), round((CAPTION_BOX[1] + CAPTION_BOX[3]) / 2 * H)
     assert f"\\pos({ex},{ey})" in text
-    mirrored = round((1 - (CARD_BOX[0] + CARD_BOX[2]) / 2) * W)
-    assert re.search(rf"\\pos\({mirrored},\d+\)\}}\{{\\fs\d+\\b1\}}ДЕВИН\\N\{{\\fs\d+\\b0\}}АКТЁР", text)
+    card = cue_by_kind(layout(items, W, H, offset_s=1.0), "name_card")
+    px, py = round(card.centre[0]), round(card.centre[1])
+    assert re.search(rf"\\pos\({px},{py}\)\}}\{{\\fs\d+\\b1\}}ДЕВИН\\N\{{\\fs\d+\\b0\}}АКТЁР", text)
+    x0, y0, x1, y1 = (round(v) for v in card.rect)  # the box drawing covers the English card
+    assert f"m {x0} {y0} l {x1} {y0} {x1} {y1} {x0} {y1}" in text
+    assert x0 <= CARD_BOX[0] * W and x1 >= CARD_BOX[2] * W and y0 <= CARD_BOX[1] * H and y1 >= CARD_BOX[3] * H
     assert text.count("\\p1") == 3  # one background drawing per item
 
 
@@ -128,7 +167,11 @@ def test_render_overlays_shape_alpha_and_position() -> None:
     for overlay, cue in zip(sorted(overlays, key=lambda o: o.x), sorted(cues, key=lambda c: c.rect[0])):
         assert overlay.x == round(cue.rect[0]) and overlay.y == round(cue.rect[1])
         assert overlay.rgba.dtype == np.uint8 and overlay.rgba.shape[2] == 4
-    assert caption.rgba[0, 0, 3] == 255 and card.rgba[0, 0, 3] < 255  # opaque caption box, translucent card
+    assert caption.rgba[0, 0, 3] == 255 and card.rgba[0, 0, 3] == 217  # opaque caption box, translucent card
+    card_cue = cue_by_kind(cues, "name_card")
+    assert card.x <= CARD_BOX[0] * W and card.x + card.rgba.shape[1] >= CARD_BOX[2] * W  # over the English card
+    assert card.y <= CARD_BOX[1] * H and card.y + card.rgba.shape[0] >= CARD_BOX[3] * H
+    assert card.x == round(card_cue.rect[0])
     assert (caption.rgba[..., :3] > 200).any()  # white text drawn
     assert (card.start, card.end) == (1.0, 2.0)
 

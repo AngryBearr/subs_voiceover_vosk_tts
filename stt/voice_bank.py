@@ -43,6 +43,7 @@ import logging
 import re
 import subprocess
 import sys
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,7 @@ from utils.atomic_io import write_text_atomic
 log = logging.getLogger(__name__)
 
 SCHEMA = "stt-voice-bank-v1"
+FIRST_PASS = ".before_voices"  # suffix of the first-pass files that stt.season_voices keeps
 EVIDENCE = 0.6  # matches from this similarity on are shown to the LLM
 STRONG = 0.75  # an unnamed cluster takes the name from this similarity on ...
 MARGIN = 0.1  # ... when the next other name is at least this much lower
@@ -96,9 +98,11 @@ def _unit(vector: list[float]) -> np.ndarray:
     return v / norm if norm > 0 else v
 
 
-def reference_samples(speaker: str, records: list[dict[str, Any]], limit: int | None = SAMPLES_PER_EPISODE
-                      ) -> list[dict[str, Any]]:
-    """Stretches of one speaker's solo speech (consecutive cues, no overlap, no burned-in caption)."""
+def reference_samples(speaker: str | Collection[str], records: list[dict[str, Any]],
+                      limit: int | None = SAMPLES_PER_EPISODE) -> list[dict[str, Any]]:
+    """Stretches of one speaker's (or one person's several ids') solo speech (consecutive cues, no overlap,
+    no burned-in caption)."""
+    ids = {speaker} if isinstance(speaker, str) else set(speaker)
     out: list[dict[str, Any]] = []
     run: list[dict[str, Any]] = []
 
@@ -111,7 +115,7 @@ def reference_samples(speaker: str, records: list[dict[str, Any]], limit: int | 
         run.clear()
 
     for record in records:
-        solo = record.get("speaker") == speaker and not record.get("overlap") and not record.get("ocr")
+        solo = record.get("speaker") in ids and not record.get("overlap") and not record.get("ocr")
         if solo and run and (record["start"] - run[-1]["end"]) / 1000 > SAMPLE_GAP_S:
             close()
         if not solo:
@@ -390,16 +394,37 @@ def _read_media(media: str, start: float, duration: float, rate: int, channels: 
     return np.frombuffer(raw, dtype=np.float32).reshape(-1, channels).T
 
 
-def other_voice_seconds(episode_dir: Path, speaker: str, start: float, end: float) -> float:
+def locate_person(episode_dir: Path, name: str, speaker: str) -> tuple[set[str], str, str]:
+    """Where a person speaks in an episode: (speaker ids, cues file, speakers file).
+
+    A print carries the speaker id of the first pass, but the season voices stage (``stt.season_voices``)
+    renumbers the speakers of the current files. So the person is found by name among the current cards;
+    without a card of that name the first-pass files (``*.before_voices.json``) are read with the print's id.
+    """
+    speakers_path = episode_dir / "speakers.json"
+    if speakers_path.exists():
+        cards = json.loads(speakers_path.read_text(encoding="utf-8"))
+        ids = {s["id"] for s in cards if s.get("name") and same_person(s["name"], name)}
+        if ids:
+            return ids, "subs.en.json", "speakers.json"
+    first = ("subs.en" + FIRST_PASS + ".json", "speakers" + FIRST_PASS + ".json")
+    if all((episode_dir / f).exists() for f in first):
+        return {speaker}, first[0], first[1]
+    return {speaker}, "subs.en.json", "speakers.json"
+
+
+def other_voice_seconds(episode_dir: Path, speaker: str | Collection[str], start: float, end: float,
+                        speakers_file: str = "speakers.json") -> float:
     """Seconds of other diarized speakers inside the stretch (overlapping speech included)."""
     found = sorted(episode_dir.glob("diarization.*.json"))
-    speakers_path = episode_dir / "speakers.json"
+    speakers_path = episode_dir / speakers_file
     if not found or not speakers_path.exists():
         return 0.0
     # a person made of several clusters (stt.season_voices) lists them in "diarizer_labels"
     labels = {s["id"]: {*(s.get("diarizer_labels") or []), s.get("diarizer_label")}
               for s in json.loads(speakers_path.read_text(encoding="utf-8"))}
-    own = labels.get(speaker, {None})
+    own = {label for sid in ({speaker} if isinstance(speaker, str) else set(speaker))
+           for label in labels.get(sid, {None})}
     turns = json.loads(found[0].read_text(encoding="utf-8"))["turns"]
     return sum(max(0.0, min(end, t["end"]) - max(start, t["start"])) for t in turns if t["speaker"] not in own)
 
@@ -572,19 +597,24 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
         why = {"episodes": 0, "stretches": 0, "rejected": 0, "other_voices": 0, "low_score": 0, "noisy": 0,
                "unchecked": 0}
         looked: set[str] = set()
+        searched: set[tuple[str, tuple[str, ...], str]] = set()
         candidates = []
         for p in mine:
             episode_dir = bank.path.parent / p["episode"]
             if not (episode_dir / "audio.wav").exists() or not (episode_dir / "subs.en.json").exists():
                 continue
+            ids, subs_file, speakers_file = locate_person(episode_dir, person["name"], p["speaker"])
+            if (p["episode"], tuple(sorted(ids)), subs_file) in searched:  # two prints of one person
+                continue
+            searched.add((p["episode"], tuple(sorted(ids)), subs_file))
             looked.add(p["episode"])
-            records = json.loads((episode_dir / "subs.en.json").read_text(encoding="utf-8"))
+            records = json.loads((episode_dir / subs_file).read_text(encoding="utf-8"))
             if p["episode"] not in audio_cache:
                 audio_cache[p["episode"]] = sf.read(str(episode_dir / "audio.wav"), dtype="float32")
             audio, sr = audio_cache[p["episode"]]
             source = episode_dir / "source.json"  # a test piece's audio and diarization start mid-episode
             offset = float(json.loads(source.read_text(encoding="utf-8")).get("start") or 0.0) if source.exists() else 0.0
-            for sample in reference_samples(p["speaker"], records, limit=None):
+            for sample in reference_samples(ids, records, limit=None):
                 if (p["episode"], round(sample["start"], 2)) in rejected:
                     why["stretches"] += 1
                     why["rejected"] += 1
@@ -593,11 +623,11 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
                 if start < 0:
                     continue
                 why["stretches"] += 1
-                if other_voice_seconds(episode_dir, p["speaker"], start, end) > MAX_OTHER_VOICE_S:
+                if other_voice_seconds(episode_dir, ids, start, end, speakers_file) > MAX_OTHER_VOICE_S:
                     why["other_voices"] += 1
                     continue
                 vector = embed(audio[int(start * sr):int(end * sr)], sr)
-                candidates.append({**sample, "episode": p["episode"], "speaker": p["speaker"],
+                candidates.append({**sample, "episode": p["episode"], "speaker": min(ids),
                                    "score": round(max(float(vector @ q) for q in prints), 3)})
         why["episodes"] = len(looked)
         candidates.sort(key=lambda c: -c["score"])

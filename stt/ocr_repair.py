@@ -177,6 +177,14 @@ def fix_punctuation(text: str) -> str:
     return text
 
 
+def fix_graphic_text(text: str) -> str:
+    """Punctuation fixes plus the habits of title graphics: "DAY1" -> "DAY 1" ("NIGHT1" too), "ESPADA-Older Tribe" ->
+    "ESPADA - Older Tribe" (a tribe name in capitals, a hyphen and a capitalised word)."""
+    text = fix_punctuation(text)
+    text = re.sub(r"\b(DAYS?|NIGHTS?)(\d+)\b", r"\1 \2", text)
+    return re.sub(r"\b([A-Z]{2,})-(?=[A-Z][a-z])", r"\1 - ", text)
+
+
 def repair_text(text: str, vocab: Vocabulary | None = None) -> str:
     """Repaired OCR text; without a vocabulary only the punctuation is fixed."""
     text = fix_punctuation(text)
