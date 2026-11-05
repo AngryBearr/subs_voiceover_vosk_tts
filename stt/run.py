@@ -1170,6 +1170,43 @@ def run_season_voices(files: list[Path], out_root: Path, args: argparse.Namespac
                 episode.stamp("speakers").touch()
 
 
+_EPISODE_CODE = re.compile(r"S\d{1,2}E\d{1,3}", re.IGNORECASE)
+
+
+def prepare_summary(files: list[Path], out_root: Path) -> list[str]:
+    """Lines telling what ``--prepare`` left in each source folder of ``files``: episodes with ``speakers.json`` out of
+    all its videos, those already translated (kept as they are), the unnamed speaker groups per episode and the next step."""
+    from stt import who
+
+    def label(stem: str) -> str:
+        code = _EPISODE_CODE.search(stem)
+        return code.group(0).upper() if code else stem
+
+    lines: list[str] = []
+    unnamed_total = 0
+    for folder in dict.fromkeys(media.parent for media in files):
+        stems = [p.stem for p in sorted(folder.iterdir()) if p.suffix.lower() in VIDEO_SUFFIXES]
+        ready = [s for s in stems if (out_root / s / "speakers.json").exists()]
+        lines.append(f"{folder}: {len(ready)} of {len(stems)} episodes have speakers.json")
+        translated = [s for s in ready if (out_root / s / "subs.ru.json").exists()]
+        if translated:
+            lines.append("  already translated, kept as they are: " + ", ".join(label(s) for s in translated))
+        groups = who.episode_groups(out_root, ready) if ready else []
+        by_episode: dict[str, list[str]] = {}
+        for group in groups:
+            by_episode.setdefault(group.episode, []).append(f"{group.speaker} {group.cues} lines")
+        unnamed_total += len(groups)
+        for stem in ready:
+            if stem in by_episode:
+                lines.append(f"  {label(stem)}: unnamed {', '.join(by_episode[stem])}")
+    if unnamed_total:
+        lines.append("Next: optionally name the unnamed voices in the UI tab «Кто это?», then voice each episode "
+                     "with the normal command (stt.run without --prepare).")
+    else:
+        lines.append("Next: voice each episode with the normal command (stt.run without --prepare).")
+    return lines
+
+
 SUBSCRIPTION_DOWN = "The ChatGPT subscription login of OpenCode does not work (run `opencode auth login`)"
 
 
@@ -1216,7 +1253,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default=str(REPO_ROOT / "stt_config.json"))
     parser.add_argument("--preset", default=None, help="A named set of settings (presets in the config): main, upload, fast, previous")
     parser.add_argument("--mode", choices=["fast", "accurate"], default=None, help="Default from the config")
-    parser.add_argument("--until", choices=STAGES, default="mix", help="Last stage to run")
+    parser.add_argument("--until", choices=STAGES, default=None, help="Last stage to run (default: mix)")
+    parser.add_argument("--prepare", action="store_true",
+                        help="Prepare the season: every episode up to speakers (transcript, on-screen text, who speaks, names, "
+                             "season voices), no translation or voice-over")
     parser.add_argument("--force", choices=STAGES, default=None, help="Recompute this stage and the ones after it")
     parser.add_argument("--season-glossary", default=None, help="Default: <out-root>/<folder>.glossary.json")
     parser.add_argument("--engine", default=None,
@@ -1232,6 +1272,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--download-voice-model", action="store_true",
                         help="Download the trained weights of the season's voices first, when they are not here (115 MB, once)")
     args = parser.parse_args(argv)
+    if args.prepare and args.until not in (None, "speakers"):
+        parser.error(f"--prepare stops after speakers, it cannot be combined with --until {args.until}")
+    args.until = "speakers" if args.prepare else args.until or "mix"
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
     config = apply_preset(load_config(Path(args.config)), args.preset)
@@ -1257,6 +1300,10 @@ def main(argv: list[str] | None = None) -> None:
     if season_voices_enabled(config, args):
         run_season_voices(files, out_root, args, config, engines)
     run_lanes(files, out_root, args, config, engines)
+    if args.prepare:
+        for line in prepare_summary(files, out_root):
+            log.info("prepare: %s", line)
+            print(line)
 
 
 if __name__ == "__main__":

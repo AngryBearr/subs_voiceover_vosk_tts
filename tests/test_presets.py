@@ -185,3 +185,62 @@ def test_recount_of_season_voices_keeps_translated_episodes(monkeypatch: pytest.
             break
         time.sleep(0.01)
     assert started == [["--season-voices-only", "--download-voice-model", "E1", "E2"]]
+
+
+def _prepared_season(tmp_path: Path) -> tuple[Path, Path]:
+    source, work = tmp_path / "Season_48", tmp_path / "STT_Season_48"
+    source.mkdir()
+    for name in ("S48E01.mkv", "S48E02.mkv", "S48E03.mkv"):
+        (source / name).write_text("")
+    for name, speakers in (("S48E01", [{"id": "S01", "name": "Anna", "cues": 30}]),
+                           ("S48E02", [{"id": "S01", "name": "Anna", "cues": 30}, {"id": "S02", "cues": 41}])):
+        (work / name).mkdir(parents=True)
+        (work / name / "speakers.json").write_text(json.dumps(speakers), encoding="utf-8")
+        (work / name / "subs.en.json").write_text("[]", encoding="utf-8")
+    (work / "S48E01" / "subs.ru.json").write_text("[]", encoding="utf-8")
+    return source, work
+
+
+def test_prepare_sets_until_and_rejects_another_stage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    video = tmp_path / "S48E01.mkv"
+    video.write_text("")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(run, "check_subscription", lambda config: True)
+    monkeypatch.setattr(run, "run_lanes", lambda files, out_root, args, config, engines: seen.update(until=args.until))
+    monkeypatch.setattr(run, "prepare_summary", lambda files, out_root: [])
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(CONFIG), encoding="utf-8")
+    base = [str(video), "--out-root", str(tmp_path / "R"), "--config", str(config), "--no-season-voices"]
+    run.main([*base, "--prepare"])
+    assert seen["until"] == "speakers"
+    run.main([*base, "--prepare", "--until", "speakers"])
+    with pytest.raises(SystemExit):
+        run.main([*base, "--prepare", "--until", "translate"])
+    run.main(base)
+    assert seen["until"] == "mix"
+
+
+def test_prepare_summary(tmp_path: Path) -> None:
+    source, work = _prepared_season(tmp_path)
+    text = "\n".join(run.prepare_summary([source / "S48E01.mkv", source / "S48E02.mkv"], work))
+    assert "2 of 3 episodes have speakers.json" in text
+    assert "already translated, kept as they are: S48E01" in text
+    assert "S48E02: unnamed S02 41 lines" in text
+    assert "S48E01: unnamed" not in text
+    assert "«Кто это?»" in text
+
+
+def test_prepare_season_button_takes_all_videos(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source, work = _prepared_season(tmp_path)
+    launched: list[dub_app.Job] = []
+    monkeypatch.setattr(dub_app, "JOB", None)
+    monkeypatch.setattr(dub_app, "_launch", launched.append)
+    monkeypatch.setattr(dub_app, "base_config", lambda: json.loads(json.dumps(CONFIG)))
+    mode, model = list(dub_app.MODES)[0], list(dub_app.MODELS)[0]
+    form = (str(source), ["S48E01.mkv"], str(work), [], mode, model, True, True, True, True, True, 10, 2, False, None, False, "main")
+    answer = dub_app.prepare_season(*form)
+    assert answer.startswith("⏳ Запущено: Подготовка сезона") and "3 серии: распознавание, без перевода" in answer
+    job = launched[-1]
+    assert job.title == dub_app.PREPARE_TITLE and job.out_root == work  # the trial piece is ignored
+    assert job.files == [source / n for n in ("S48E01.mkv", "S48E02.mkv", "S48E03.mkv")]
+    assert job.extra == ["--prepare"] and job.engines == [dub_app.ENGINES[list(dub_app.ENGINES)[0]]]

@@ -38,6 +38,8 @@ subs_env/bin/python -m stt.selftest             # GPU, models (downloads them), 
 
 # whole season, up to the Russian dubbing script (no TTS):
 subs_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --until dub
+# prepare a whole season (every episode up to speakers: transcript, on-screen text, who speaks, names, season voices; no translation or voice-over):
+subs_env/bin/python -m stt.run "/media/.../Australia S10 1080p/*.mkv" --out-root R --prepare
 # one episode end to end (voice-over in all three engines by default, checks, mix); --engine teratts for one engine:
 subs_env/bin/python -m stt.run ep01.mkv
 ```
@@ -635,6 +637,17 @@ marks: F1 0.879 -> 0.889 (3 of 4 episodes better). Through the real assembly wit
 68.4% -> 71.6% (stock 70.9%), S20 F1 0.879 -> 0.897 (stock 0.891), S29 E01/E03/E07 0.860 -> 0.871 (stock 0.860). It became the default on 2.11.2026 after the user listened to season-voiced episodes and approved them. Its limit: the stage gives words to named people who may not be in the episode at all (a wrong name instead of a
 neutral voice is worse than no name), and a cluster that was named after its main speaker feeds the others' voices into
 that person.
+
+### Preparing a season
+
+`stt.run ... --prepare` (UI: "Подготовить весь сезон" on the "Обработка" tab, which takes all videos of the season folder) is
+the same as `--until speakers` and conflicts with another `--until`. Every episode gets its transcript, on-screen text,
+speakers and names, and the season voices are counted over the whole season at once (about 8-10 minutes per episode, GPU;
+the glossary and naming use the LLM). Episodes that are already translated stay as they are. At the end the command prints,
+per source folder, how many episodes have `speakers.json`, which are translated, and the unnamed speaker groups per episode
+(`S48E02: unnamed S02 41 lines`). Then optionally name them in the UI tab "Кто это?" (`speakers.override.json`; the speakers
+stage reruns by itself) and voice each episode with the normal command: it only translates and voices, about 15 minutes faster
+per episode. In the UI table such an episode shows "подготовлена (ждёт перевода)".
 
 ## Checking by ear and fixing lines
 

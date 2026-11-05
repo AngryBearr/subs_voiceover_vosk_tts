@@ -248,6 +248,8 @@ def validate(source_text: str, results_text: str) -> tuple[Season | None, str]:
 # ---------------------------------------------------------------- episodes of a season
 
 STATE_NEW = "не начата"
+STATE_PREPARED = "подготовлена (ждёт перевода)"
+PREPARED_STAGES = {"transcribe", "glossary", "speakers"}  # what ``stt.run --prepare`` leaves
 STAGE_TOTAL = len(STAGES)
 
 
@@ -279,6 +281,8 @@ def _work_state(folder: Path) -> str:
             if found == state:
                 return f"{mark} {word}: {job_view.stage_title(stage)}"
     done = {stage for stage in STAGES if any(n == stage or n.startswith(stage + ".") for n in names)}
+    if done == PREPARED_STAGES and not any(n.startswith("translate") for n in names):
+        return STATE_PREPARED
     if done:
         return f"{len(done)} из {STAGE_TOTAL} этапов"
     return STATE_NEW if not names and not progress.read_all(folder) else "начата"

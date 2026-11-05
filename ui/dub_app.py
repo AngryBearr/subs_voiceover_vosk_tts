@@ -284,7 +284,7 @@ def start_job(folder: str, names: list[str], out_root: str, engines: list[str], 
               subtitles: bool, duck_voices: bool, stress: bool, refine: bool, preview: bool,
               preview_from: float, preview_minutes: float, f5_fast: bool = False, transport: str | None = None,
               stt_args: list[str] | None = None, preset: str | None = None,
-              download_voice_model: bool = False, title: str | None = None) -> str:
+              download_voice_model: bool = False, title: str | None = None, detail: str | None = None) -> str:
     global JOB
     with LOCK:
         if busy := _busy():
@@ -317,7 +317,7 @@ def start_job(folder: str, names: list[str], out_root: str, engines: list[str], 
                   engines=[ENGINES[e] for e in engines], config_path=config_path,
                   log_path=ui_dir / f"job_{stamp}.log", extra=extra, title=title or DEFAULT_TITLE)
         _launch(job)
-        return started_text(job.title, f"{seasons.episodes_word(len(names))}, озвучка: {', '.join(engines)}")
+        return started_text(job.title, detail or f"{seasons.episodes_word(len(names))}, озвучка: {', '.join(engines)}")
 
 
 def voice_model_missing() -> bool:
@@ -827,6 +827,30 @@ def preset_form(preset: str | None, out_root: str = "") -> list[Any]:
 def start_with_preset(*values: Any) -> str:
     """``start_job`` from the form; the last values are the voice model tick and the chosen set of settings."""
     return start_job(*values[:-2], download_voice_model=values[-2], preset=values[-1])
+
+
+PREPARE_TITLE = "Подготовка сезона"
+PREPARE_HELP = (
+    "**Подготовить весь сезон** - распознаёт речь, текст на экране, кто говорит и имена во **всех** сериях папки "
+    "(не только отмеченных), без перевода и озвучки. Нужна видеокарта, примерно 8-10 минут на серию. "
+    "Зачем: голоса сезона собираются по всем сериям сразу и получаются точнее, а потом каждая серия только "
+    "переводится и озвучивается (примерно на 15 минут быстрее). После подготовки можно открыть вкладку "
+    "«Кто это?» и назвать голоса без имени. Уже переведённые серии не меняются.")
+
+
+def prepare_season(*values: Any) -> str:
+    """``start_job`` for ALL videos of the season folder with ``--prepare`` (every episode up to the speakers stage),
+    from the same form values as ``start_with_preset``; the trial piece is ignored, and with no engine ticked the first
+    one is used (engines do not matter before translation)."""
+    (folder, _ticked, out_root, engines, mode, model, subtitles, duck_voices, stress, refine, _preview, preview_from,
+     preview_minutes, f5_fast, transport, voice_model, preset) = values
+    names = list_videos(folder) if folder else []
+    if folder and out_root and not names:
+        return f"В папке {folder} нет видео или она недоступна."
+    return start_job(folder, names, out_root, engines or list(ENGINES)[:1], mode, model, subtitles, duck_voices, stress,
+                     refine, False, preview_from, preview_minutes, f5_fast, transport, stt_args=["--prepare"],
+                     download_voice_model=voice_model, preset=preset, title=PREPARE_TITLE,
+                     detail=f"{seasons.episodes_word(len(names))}: распознавание, без перевода")
 
 
 def form_defaults(config: dict[str, Any] | None = None) -> list[Any]:
@@ -1380,8 +1404,10 @@ def build() -> gr.Blocks:
                     preview_minutes = gr.Number(label="Минут", value=2)
             with gr.Row():
                 start = gr.Button("Начать", variant="primary")
+                prepare = gr.Button("Подготовить весь сезон")
                 resume = gr.Button("▶ Продолжить", interactive=False)
                 stop = gr.Button("Остановить", variant="stop")
+            gr.Markdown(PREPARE_HELP)
             message = gr.Markdown()
             status = gr.Markdown("Нет запущенной обработки.")
             progress = gr.Dataframe(headers=["Серия"], label="Ход обработки по этапам", interactive=False, wrap=True)
@@ -1410,6 +1436,9 @@ def build() -> gr.Blocks:
             start.click(start_with_preset, [folder, episodes, out_root, engines, mode, model, subtitles, duck_voices, stress,
                                             refine, preview, preview_from, preview_minutes, f5_fast, transport, voice_model, preset],
                         message)
+            prepare.click(prepare_season, [folder, episodes, out_root, engines, mode, model, subtitles, duck_voices, stress,
+                                           refine, preview, preview_from, preview_minutes, f5_fast, transport, voice_model, preset],
+                          message)
             stop.click(stop_job, None, message)
             resume.click(resume_job, None, message)
             gr.Timer(2.0).tick(refresh, None, [status, progress, log, results, checkpoints, raw_log, resume])

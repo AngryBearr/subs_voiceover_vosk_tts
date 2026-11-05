@@ -133,7 +133,7 @@ def _mark(folder: Path, *names: str) -> None:
 
 
 def test_episode_states_from_the_results_folder(tmp_path: Path) -> None:
-    source = _videos(tmp_path / "S", "S01E01.mkv", "S01E02.mkv", "S01E03.mkv", "S01E04.mkv", "S01E05.mkv")
+    source = _videos(tmp_path / "S", "S01E01.mkv", "S01E02.mkv", "S01E03.mkv", "S01E04.mkv", "S01E05.mkv", "S01E06.mkv")
     results = tmp_path / "STT_S"
     _mark(results / "S01E02", "transcribe", "glossary", "speakers")
     _mark(results / "S01E03", "transcribe", "dub.vosk", "voiceover.vosk")
@@ -142,11 +142,13 @@ def test_episode_states_from_the_results_folder(tmp_path: Path) -> None:
         {"stage": "check", "engine": "vosk", "state": "running", "pid": 2 ** 22 + 12345, "boot": "gone",
          "started": 1.0, "updated": 1.0}), encoding="utf-8")
     _mark(results / "S01E04", "transcribe")
+    _mark(results / "S01E06", "transcribe", "glossary")
     (results / "S01E04.ru.mkv").write_text("")
     (results / "S01E01.ru.small.mkv").write_text("")  # a compressed copy is not the finished video
     rows = {r.stem: r for r in seasons.episode_rows(seasons.Season(source, results))}
     assert rows["S01E01"].state == seasons.STATE_NEW and rows["S01E01"].finished is None
-    assert rows["S01E02"].state == "3 из 9 этапов"
+    assert rows["S01E02"].state == seasons.STATE_PREPARED
+    assert rows["S01E06"].state == "2 из 9 этапов"
     assert rows["S01E03"].state.startswith("⏸ прервано") and "Проверка речи" in rows["S01E03"].state
     assert rows["S01E04"].state == "✅ готово" and rows["S01E04"].finished == results / "S01E04.ru.mkv"
     assert rows["S01E05"].state == seasons.STATE_NEW
