@@ -328,11 +328,11 @@ def subtitles_note(folder: Path) -> str:
 
 
 def table(season: Season | None) -> list[list[str]]:
-    """Rows of the table "Серия | Состояние | Готовое видео | Субтитры"."""
+    """Rows of the table "Серия | Состояние | Субтитры | Готовое видео" (the long file name last)."""
     if season is None:
         return []
-    return [[job_view.short_name(r.stem), r.state, r.finished.name if r.finished else "",
-             subtitles_note(season.results / r.stem)] for r in episode_rows(season)]
+    return [[job_view.short_name(r.stem), r.state, subtitles_note(season.results / r.stem),
+             r.finished.name if r.finished else ""] for r in episode_rows(season)]
 
 
 def summary(season: Season | None) -> str:

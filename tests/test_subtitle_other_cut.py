@@ -151,5 +151,5 @@ def test_table_has_the_column_and_a_dash_without_a_work_folder(tmp_path: Path) -
     (results / "S01E02").mkdir(parents=True)
     (results / "S01E02" / "subs.source.json").write_text(json.dumps({"origin": "base", "kind": "turns"}), encoding="utf-8")
     table = seasons.table(seasons.Season(source, results))
-    assert [row[3] for row in table] == ["—", "смены говорящих, база"]
+    assert [row[2] for row in table] == ["—", "смены говорящих, база"]
     assert seasons.subtitles_note(results / "S01E01") == "—"
