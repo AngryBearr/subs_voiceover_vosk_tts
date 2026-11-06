@@ -208,7 +208,8 @@ def fill_dictionary_stress(text: str, accents: Dict[str, str], omographs: Dict[s
     on words said weakly: "это", "или", "сразу", "слишком"), so no TTS engine guesses them.
 
     Homographs stay unmarked, and so does a word after a stressed one-syllable word: the stress
-    moved there ("н+е было", "н+а пол").
+    moved there ("н+е было", "н+а пол"). The particle after a hyphen stays unmarked too ("вс+ё-таки",
+    not "вс+ё-так+и"): ``unstress_function_words`` took its stress off before this runs.
     """
     out: List[str] = []
     last = 0
@@ -216,10 +217,11 @@ def fill_dictionary_stress(text: str, accents: Dict[str, str], omographs: Dict[s
     for match in _WORD_RE.finditer(text):
         word = match.group()
         out.append(text[last:match.start()])
+        particle = word.lower() in HYPHEN_SUFFIXES and text[last:match.start()].endswith("-")  # "всё-таки"
         last = match.end()
         key = word.lower()
         form = accents.get(key) if sum(ch in _VOWELS for ch in word) >= 2 and "+" not in word \
-            and "ё" not in key and key not in omographs else None
+            and "ё" not in key and key not in omographs and not particle else None
         moved = "+" in previous and sum(ch in _VOWELS for ch in previous) == 1
         if form and form.count("+") == 1 and form.replace("+", "") == key and not moved:
             position = form.index("+")

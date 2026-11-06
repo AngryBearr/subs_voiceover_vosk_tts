@@ -266,7 +266,7 @@ class VoskEngine:
                                 f"{importlib.metadata.version('ru-normalizr')}" if enabled else None,
                     "accent": f"ruaccent/{importlib.metadata.version('ruaccent')}" if enabled else None,
                     "punctuation_map": "vosk_text.normalize_vosk_text",
-                    "prepare_version": 2,  # bump when the preparation code changes engine texts
+                    "prepare_version": 3,  # bump when the preparation code changes engine texts
                     **({"accent_per_cue": True} if self.normalization.get("accent_per_cue", True) else {}),
                     **({"fill_stress": True} if self.normalization.get("fill_stress", True) else {}),
                     **({"keep_input_yo_homographs": True} if self.normalization.get("keep_input_yo_homographs")

@@ -74,6 +74,13 @@ changed lines are synthesised: every other take is in the TTS cache), the checks
 A stress typed as `+` before the vowel ("зам+ок") wins over RUAccent and the stress check and
 never reaches the video's subtitles (`utils.text_normalizer.keep_user_stress`).
 
+Quotes and "все/всё": the text sent to every voice engine (`utils.vosk_text.normalize_vosk_text`, the last
+step of the text preparation, after ru-normalizr) has no quote marks or apostrophes and brackets turned into
+commas, because ESpeech says a stray "ж/з/с" sound before a word after a straight quote or "(". The subtitles and
+the review list keep the quotes. The stress check also sends every "все"/"всё" (and RUAccent's other е/ё pairs)
+to its screening with the whole line: the models choose the spelling that fits the sentence, and the fix
+writes it into the voice-over text only.
+
 `scripts/install.sh` (Linux, NVIDIA driver with CUDA 12.8+): checks the GPU, disk and `uv`
 (offers to install it), creates subs_env, f5_env and diarizen_env (`--basic`: subs_env only;
 existing environments are kept and only updated), downloads the Vosk voice model, runs `hf auth

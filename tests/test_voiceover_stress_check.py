@@ -321,3 +321,32 @@ def test_screener_runs_while_the_text_is_proofread_with_the_same_questions(monke
     plain_screens = {c["sentence"]: c["screen"] for v in plain["verdicts"] if v["word"] == "дома" for c in v["contexts"]}
     assert screens == plain_screens and screens["Мы дома."] == "д+ома"
     assert result["proofread"]["valid"] == 1 and "screen:scr" in result["llm"]
+
+
+def test_vse_and_vsyo_go_to_the_check_with_their_sentence() -> None:
+    acc = SimpleNamespace(custom_dict={}, omographs={}, accents={"все": "вс+е"},
+                          yo_homographs={"звезды": "звёзды"})
+    from voiceover.stress_check import classify
+    assert classify("все", acc) == classify("всё", acc) == "homograph"  # built-in pair
+    assert classify("звезды", acc) == classify("звёзды", acc) == "homograph"  # RUAccent's own list
+    assert classify("ещё", acc) == "trivial"
+    found = collect(["И все об +этом узн+ают.", "Вс+ё хорош+о."], acc)
+    assert found["все"].variants == ["вс+е", "вс+ё"] and found["все"].contexts == ["И все об этом узнают."]
+    assert found["всё"].source == "homograph" and found["всё"].contexts == ["Всё хорошо."]
+
+
+def test_a_yo_answer_is_valid_and_the_sentence_fix_writes_the_chosen_spelling() -> None:
+    suspect = Suspect("всё", "вс+ё", "homograph", ["вс+е", "вс+ё"])
+    assert valid_stress(suspect, "вс+е") and valid_stress(suspect, "вс+ё") and not valid_stress(suspect, "вс+я")
+    plain = "И все об этом узнают."
+    fixes = {plain: {"все": "вс+ё"}}
+    assert apply_sentence_fixes("И вс+е об +этом узн+ают.", fixes, plain) == "И вс+ё об +этом узн+ают."
+    assert apply_sentence_fixes("Вс+е", {"К": {"все": "вс+ё"}}, "К") == "Вс+ё"  # the capital stays
+
+
+def test_the_screener_corrects_vsyo_in_its_sentence(monkeypatch) -> None:
+    texts = ["Мы вс+ё поним+аем.", "Вс+ё т+ихо."]
+    accents = {"все": "вс+е"}
+    voters = [FakeClient(votes={"вс+ё": "вс+е"}, only="Мы всё понимаем.") for _ in range(3)]
+    result = _check(monkeypatch, texts, voters, FakeClient(), accents=accents)
+    assert result["sentences"] == {"Мы всё понимаем.": {"всё": "вс+е"}}

@@ -88,6 +88,8 @@ of speech, case and number, or tense/person/aspect), then give the stress of sta
 for exactly that form. For names and borrowed words use their usual Russian pronunciation.
 "variants" (if given) are the readings the dictionary knows; answer with one of them unless the
 correct stress of this form is another one (поняла: п+оняла / пон+яла known, correct понял+а).
+When the variants differ in е / ё (вс+е / вс+ё: "все" = everyone, "всё" = everything), choose the spelling that
+fits the sentence; this is the one case where a letter may change.
 Answer JSON: {"items": [{"id": <id>, "form": "<meaning and form, a few words>",
 "stressed": "<the word with + before the stressed vowel>"}]}, one entry per item in the same
 order. Keep the letters exactly as given; only the "+" may move.
@@ -155,8 +157,49 @@ def _hyphenated(text: str, match: re.Match[str]) -> bool:
     return text[match.end():match.end() + 1] == "-" or text[max(0, match.start() - 1):match.start()] == "-"
 
 
+# Words spelled both with е and with ё (е-form -> ё-form) besides RUAccent's own list of such homographs.
+YO_PAIRS = {"все": "всё", "небо": "нёбо"}
+
+
+def yo_pairs(accentizer: Any) -> dict[str, str]:
+    """е-form -> ё-form of the words whose spelling is ambiguous: RUAccent's ``yo_homographs`` and ``YO_PAIRS``."""
+    return {**YO_PAIRS, **(getattr(accentizer, "yo_homographs", None) or {})}
+
+
+def yo_forms(word: str, accentizer: Any) -> tuple[str, str] | None:
+    """(е-form, ё-form) when `word` (either spelling) is ambiguous between the two."""
+    pairs = yo_pairs(accentizer)
+    if word in pairs:
+        return word, pairs[word]
+    for plain, yo in pairs.items():
+        if yo == word:
+            return plain, yo
+    return None
+
+
+def yo_variants(word: str, accentizer: Any) -> list[str]:
+    """The stressed readings of an е / ё homograph: the ё-form is stressed on its ё, the е-form as the dictionary
+    has it (a one-vowel word on its vowel)."""
+    forms = yo_forms(word, accentizer)
+    if not forms:
+        return []
+    plain, yo = forms
+    out = []
+    known = getattr(accentizer, "accents", {}).get(plain)
+    if known and known.count("+") == 1 and known.replace("+", "") == plain:
+        out.append(known)
+    elif sum(ch in VOWELS for ch in plain) == 1:
+        at = next(i for i, ch in enumerate(plain) if ch in VOWELS)
+        out.append(plain[:at] + "+" + plain[at:])
+    at = yo.index("ё")
+    out.append(yo[:at] + "+" + yo[at:])
+    return out
+
+
 def classify(word: str, accentizer: Any) -> str:
     """Where RUAccent took the stress of `word` (lower case, no marks) from."""
+    if yo_forms(word, accentizer):
+        return "homograph"  # все / всё: one vowel or a ё, yet the spelling depends on the sentence
     if sum(ch in VOWELS for ch in word) < 2 or "ё" in word:
         return "trivial"
     if word in accentizer.custom_dict:
@@ -227,7 +270,8 @@ def collect(texts: list[str], accentizer: Any, max_contexts: int = 8,
                 source = "disputed"  # RUAccent's dictionary and the second placer disagree in this sentence
             elif source not in ("guess", "homograph"):
                 continue
-            variants = list(accentizer.omographs.get(word, [])) if source == "homograph" else []
+            variants = (list(accentizer.omographs.get(word, [])) + yo_variants(word, accentizer)
+                        if source == "homograph" else [])
             item = found.setdefault(word, Suspect(word, accented, source, variants, name_en=english))
             item.count += 1
             sentence = text.replace("+", "")
@@ -240,9 +284,13 @@ def collect(texts: list[str], accentizer: Any, max_contexts: int = 8,
 
 def valid_stress(suspect: Suspect, stressed: str) -> bool:
     """One "+" right before a vowel and the same letters (a homograph may get a stress outside the
-    dictionary's variants: поняла has п+оняла / пон+яла there, but is понял+а)."""
+    dictionary's variants: поняла has п+оняла / пон+яла there, but is понял+а). For an е / ё homograph
+    е and ё count as the same letter."""
     position = stressed.find("+")
-    return (stressed.replace("+", "") == suspect.word and stressed.count("+") == 1
+    yo = "ё" in suspect.word or any("ё" in variant for variant in suspect.variants)
+    letters = stressed.replace("+", "")
+    return ((letters.replace("ё", "е") == suspect.word.replace("ё", "е") if yo else letters == suspect.word)
+            and stressed.count("+") == 1
             and position + 1 < len(stressed) and stressed[position + 1] in VOWELS)
 
 
@@ -663,8 +711,13 @@ def stress_in(text: str, word: str) -> str | None:
 
 
 def restress(token: str, stressed: str) -> str:
-    """`token` (any case, maybe with "+") with the stress of `stressed` (lower case, one "+")."""
+    """`token` (any case, maybe with "+") with the stress of `stressed` (lower case, one "+"). Letters follow
+    `stressed` where it differs from the token only by е / ё (все -> вс+ё), keeping the token's capitals."""
     plain = token.replace("+", "")
+    letters = stressed.replace("+", "")
+    if letters != plain.lower() and len(letters) == len(plain) \
+            and letters.replace("ё", "е") == plain.lower().replace("ё", "е"):
+        plain = "".join(new.upper() if old.isupper() else new for old, new in zip(plain, letters))
     position = stressed.index("+")
     return plain[:position] + "+" + plain[position:]
 

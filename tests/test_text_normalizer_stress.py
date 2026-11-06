@@ -49,6 +49,13 @@ def test_fill_dictionary_stress() -> None:
     assert fill_dictionary_stress("Род-Айленд", accents, omographs) == "Род-Айленд"  # not in the dictionary
 
 
+def test_fill_dictionary_stress_leaves_a_hyphen_particle_alone() -> None:
+    accents = {"таки": "так+и", "нибудь": "ниб+удь", "общаются": "общ+аются"}
+    assert fill_dictionary_stress("он+и вс+ё-таки общаются", accents, {}) == "он+и вс+ё-таки общ+аются"
+    assert fill_dictionary_stress("кто-нибудь", {"кто": "кт+о", **accents}, {}) == "кто-нибудь"
+    assert fill_dictionary_stress("таки пришёл", accents, {}) == "так+и пришёл"  # alone it is a word
+
+
 def test_user_stress_marks_win_and_leave_the_display() -> None:
     from utils.text_normalizer import keep_user_stress, strip_user_stress
 
