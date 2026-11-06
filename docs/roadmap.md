@@ -39,18 +39,27 @@ Vosk runs alongside on the CPU (20). Reviewed together with an independent GPT-6
    timing that matches the video) into one curated base, used by every season run (who speaks, captions,
    names).
 
-### Status and queue (5.11 night)
+### Status and queue (6.11)
 - Done and in develop (1ab39c8): speed-up (S48E07 65.7 min, S01E01 34.5 min for 44 min), GPU fallback
   (`gpu.parallel: auto`), subtitle labels -> cast names, bank prints for every named person.
-- To check: background video compression on a real 2 GB episode (S48, preset upload): log line
-  "compressing the video in the background", mux without the 5-min encode.
-- Now: (a) the narrator (host voice-over, 22% of S01E01, unnamed; the naming LLM marked the host card "same as S02");
-  (b) a "Кто это?" panel per season with an episode filter: unnamed groups with audio snippets, pick a cast name;
-  best used after preparing the season and before voicing; (c) a blind A/B piece of F5 at 32 vs 16 steps.
-- Queue: season prepare command + UI button (item 3 above); references for new seasons (one episode rarely has a
-  clean 5-9 s solo stretch: more episodes, or a relaxed rule for people without any clip); one subtitle base (item 4).
-- Closed 5.11: the audio-LLM speaker experiment with references (`output/exp_audio_llm/report.md`): models 12-21% right
-  vs our voice prints 64%, no use even for shouts (docs/experiments.md).
+- Done 6.11 (merged to develop on the user's word):
+  - the host's voice-over named after the season's host (cast.json); naming again starts from the first pass, so the
+    season voices no longer bring back old names (S01E01: Jeff 23 -> 142 lines, own ESpeech clip);
+  - tab "Кто это?": unnamed groups per season with snippets, the answer written under the first-pass id;
+  - item 3: `stt.run --prepare` and the UI button "Подготовить весь сезон" (state "подготовлена (ждёт перевода)");
+    the next episode is translated while the current one is voiced (`overlap_episodes`, seen on a real two-piece run);
+    with `--force translate` the translation ran 2-3 times per episode, now once;
+  - item 4: names in subtitles in any case (hunt episodes with names 438 -> 707 of 742), one base
+    `Survivor/subtitles_base` (`stt.subtitle_base`), lookup order with a season folder, other-cut fallback to the base's
+    alternates, UI group "Субтитры" and a table column; translated episodes keep their subtitles;
+  - ESpeech text: no quote marks in the synthesis text (a stray "ж" before quoted words: 6/24 takes -> 0/24),
+    все/всё decided by the stress check with the whole line, "-таки" unstressed (found in the audiobook work).
+- Closed: audio LLMs and clef-omni as speaker identifiers (8-21% vs voice prints 64%; docs/experiments.md).
+- To check: background video compression on a real 2 GB episode (log line "compressing the video in the background");
+  the A/B of ESpeech at 16 vs 32 steps waits for the user's ear; the effect of the host-only names of seasons 21-39 on
+  who speaks is not measured yet (S29 with `stt.turn_eval`).
+- Queue: references for new seasons glued from 2-3 clean pieces when no single 5-9 s stretch exists (the user's idea,
+  6.11); a second-episode check of the clef tie-breaker only if wanted.
 
 ## Plan of 3.11.2026: the UI built around a season (agreed with the user)
 
