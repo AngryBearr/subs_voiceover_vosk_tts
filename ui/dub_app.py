@@ -1378,7 +1378,7 @@ def build() -> gr.Blocks:
             with gr.Row():
                 select_all = gr.Button("Выбрать все", size="sm")
                 select_none = gr.Button("Снять выбор", size="sm")
-            season_status = gr.Dataframe(headers=["Серия", "Состояние", "Готовое видео"], label="Серии сезона: состояние",
+            season_status = gr.Dataframe(headers=["Серия", "Состояние", "Готовое видео", "Субтитры"], label="Серии сезона: состояние",
                                          interactive=False, wrap=True)
             preset = gr.Radio(label="Набор настроек (ниже можно поправить отдельные пункты)", choices=preset_choices(), value="main")
             with gr.Row():

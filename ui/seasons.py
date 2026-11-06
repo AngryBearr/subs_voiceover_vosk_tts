@@ -9,6 +9,7 @@ the episodes, the season files (voice bank, glossary, ...), the finished ``*.ru.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -305,11 +306,33 @@ def episode_rows(season: Season) -> list[EpisodeStatus]:
     return rows
 
 
+SUBTITLE_KINDS = {"labels": "имена", "turns": "смены говорящих", "plain": "только текст", "none": "нет"}
+SUBTITLE_ORIGINS = {"season folder": "своя папка", "embedded": "в видео", "sidecar": "рядом с видео", "base": "база",
+                    "archive": "архив"}
+
+
+def subtitles_note(folder: Path) -> str:
+    """The table cell "Субтитры" from ``<folder>/subs.source.json`` (``stt.subtitles``): "имена, база";
+    "—" while the episode has no such file yet."""
+    try:
+        data = json.loads((folder / "subs.source.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "—"
+    if not isinstance(data, dict):
+        return "—"
+    origin = data.get("origin")
+    if not origin:
+        return SUBTITLE_KINDS["none"]
+    where = "интернет" if str(origin).startswith("online") else SUBTITLE_ORIGINS.get(str(origin), str(origin))
+    return f"{SUBTITLE_KINDS.get(str(data.get('kind')), 'только текст')}, {where}"
+
+
 def table(season: Season | None) -> list[list[str]]:
-    """Rows of the table "Серия | Состояние | Готовое видео"."""
+    """Rows of the table "Серия | Состояние | Готовое видео | Субтитры"."""
     if season is None:
         return []
-    return [[job_view.short_name(r.stem), r.state, r.finished.name if r.finished else ""] for r in episode_rows(season)]
+    return [[job_view.short_name(r.stem), r.state, r.finished.name if r.finished else "",
+             subtitles_note(season.results / r.stem)] for r in episode_rows(season)]
 
 
 def summary(season: Season | None) -> str:

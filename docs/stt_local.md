@@ -381,6 +381,14 @@ the archive with these rules, ranks them per episode (named lines > turn marks >
 names, more marks, more cues) and writes the winner to `<base>/survivor/Sxx/SxxEyy.en.srt` with an `index.json`
 (the facts of the winner, its original file and the next two candidates). Set `subtitles.base` to that folder.
 
+Another cut of the episode: when the file came from the base, has named lines, and fewer than `subtitles.min_pinned`
+(default 0.3) of them were pinned to the recognized words (`pinned_lines / (pinned_lines + not_confirmed)` in
+`subtitle_hints.json`), it probably belongs to another cut of the episode. `stt.run` then tries the base's alternates
+(only those with named lines or turn marks, at most 2) and assembles again each time (recognition and diarization
+are cached). The first alternate that reaches `min_pinned` ends the search; if none does, the file with the best share
+is kept and a warning is logged. `subs.source.json` then holds the file in use and a `rejected` list (path and pinned
+share of every file tried and not kept), and the subtitle key follows it, so the next run does not repeat this.
+
 A translated episode keeps the subtitles it was assembled with: when a better file turns up later (the base, a
 season folder), only episodes without `subs.ru.json` are assembled again; `--force transcribe` takes the new file
 for a translated one (and translates and voices it again).

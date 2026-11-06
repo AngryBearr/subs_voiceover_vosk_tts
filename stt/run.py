@@ -415,8 +415,64 @@ class Episode:
         if self.args.duration:
             argv += ["--duration", str(self.args.duration)]
         transcribe.main(argv)
+        if subtitles:
+            self._try_other_cuts(lambda: transcribe.main(argv))
         self.subtitle_stamp.parent.mkdir(parents=True, exist_ok=True)
         self.subtitle_stamp.write_text(self.subtitle_key() + "\n", encoding="utf-8")
+
+    def pinned_share(self) -> float | None:
+        """Share of the named subtitle lines the audio confirmed (``subtitle_hints.json``); None without such lines."""
+        try:
+            report = json.loads((self.out / "subtitle_hints.json").read_text(encoding="utf-8"))
+            pinned, lost = int(report["pinned_lines"]), int(report["not_confirmed"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return pinned / (pinned + lost) if pinned + lost else None
+
+    def _try_other_cuts(self, assemble: Callable[[], None]) -> None:
+        """The base's file fits the audio badly (named lines mostly not confirmed): it is probably from another cut of
+        the episode. Try the base's alternates (at most 2), keep the one with the best share of confirmed lines
+        (``assemble`` redoes the assembly only), and record every file tried but not kept as ``rejected`` in
+        ``subs.source.json``. A good enough alternate ends the search; when none is good enough, the best is kept."""
+        from stt import subtitles as subs
+
+        found, cfg = self.subtitle_source(), self.config.get("subtitles") or {}
+        share = self.pinned_share()
+        threshold = float(cfg.get("min_pinned", 0.3))
+        code = subs.episode_code(self.media)
+        if not found or found.get("origin") != "base" or not found.get("labels") or not cfg.get("base") or not code \
+                or share is None or share >= threshold:
+            return
+        alternates = subs.base_alternates(Path(str(cfg["base"])).expanduser(), self.media,
+                                          subs.imdb_of(self.media, cfg.get("imdb", "tt0239195")), *code)[:2]
+        if not alternates:
+            return
+        log.info("[%s] subtitles from the base: only %.0f%% of the named lines fit the audio; trying other cuts",
+                 self.media.stem, 100 * share)
+        path = self.out / subs.SOURCE_SRT
+        original = path.read_text(encoding="utf-8")
+        # (share, file, text, facts) of every file tried; the base's own file first
+        tried: list[tuple[float, str, str, dict[str, Any]]] = [(share, str(found["path_or_url"]), original, found)]
+        for alternate in alternates:
+            path.write_text(alternate.text, encoding="utf-8")
+            assemble()
+            tried.append((self.pinned_share() or 0.0, alternate.where, alternate.text, alternate.info))
+            if tried[-1][0] >= threshold:
+                break
+        best = max(tried, key=lambda t: t[0])  # the first of equals: the base's own file wins ties
+        if best[0] < threshold:
+            log.warning("[%s] no file of the base fits the audio (best: %.0f%% of the named lines confirmed); "
+                        "keeping the best", self.media.stem, 100 * best[0])
+        if best is not tried[-1]:
+            path.write_text(best[2], encoding="utf-8")
+            assemble()
+        info = best[3]
+        result = {**found, "origin": "base", "path_or_url": best[1],
+                  **{k: info[k] for k in ("kind", "labels", "turns", "cues")},
+                  "sha1": hashlib.sha1(best[2].encode("utf-8")).hexdigest()[:10],
+                  "rejected": [{"path": t[1], "pinned_share": round(t[0], 3)} for t in tried if t is not best]}
+        (self.out / subs.SOURCE_JSON).write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        self._subtitles = result  # the stamp written next must name the file now in use
 
     @property
     def season_voices(self) -> Path:

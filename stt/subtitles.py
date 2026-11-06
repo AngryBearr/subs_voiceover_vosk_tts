@@ -556,15 +556,15 @@ def show_allows(media: Path, imdb: str | dict[str, str | None] | None, show_imdb
     return imdb is None or imdb == show_imdb
 
 
-def base_candidates(base: Path, media: Path, imdb: str | dict[str, str | None] | None, season: int, episode: int) -> list[Candidate]:
-    """The base's file for this episode (``<base>/<show>/index.json`` made by ``stt.subtitle_base``): the first show
-    folder whose IMDb id suits the video. Its alternates are not used here, they are for a person to look at."""
+def base_entry(base: Path, media: Path, imdb: str | dict[str, str | None] | None, season: int, episode: int) -> dict[str, Any] | None:
+    """The base's entry of this episode (``<base>/<show>/index.json`` made by ``stt.subtitle_base``) with the show folder
+    as ``folder``: from the first show folder whose IMDb id suits the video; None when there is none."""
     key = f"S{season:02d}E{episode:02d}"
     try:
         folders = sorted(d for d in base.iterdir() if (d / BASE_INDEX).is_file())
     except OSError as error:
         log.warning("Subtitle base %s not read: %s", base, error)
-        return []
+        return None
     for folder in folders:
         try:
             index = json.loads((folder / BASE_INDEX).read_text(encoding="utf-8"))
@@ -573,9 +573,28 @@ def base_candidates(base: Path, media: Path, imdb: str | dict[str, str | None] |
             continue
         entry = (index.get("episodes") or {}).get(key)
         if entry and show_allows(media, imdb, str(index.get("imdb") or "")):
-            found = file_candidate("base", base / str(entry.get("file", "")))
-            return [found] if found is not None else []
-    return []
+            return {**entry, "folder": str(folder)}
+    return None
+
+
+def base_candidates(base: Path, media: Path, imdb: str | dict[str, str | None] | None, season: int, episode: int) -> list[Candidate]:
+    """The base's file for this episode (``base_entry``). Its alternates are for ``base_alternates``."""
+    entry = base_entry(base, media, imdb, season, episode)
+    found = file_candidate("base", base / str(entry.get("file", ""))) if entry else None
+    return [found] if found is not None else []
+
+
+def base_alternates(base: Path, media: Path, imdb: str | dict[str, str | None] | None, season: int, episode: int) -> list[Candidate]:
+    """The next candidates the base lists for this episode (``alternates``, original files), best first, that have named
+    lines or turn marks and can still be read; they are tried when the base's own file does not fit the video."""
+    entry = base_entry(base, media, imdb, season, episode) or {}
+    found = []
+    for alternate in entry.get("alternates") or []:
+        if not (alternate.get("named_lines") or alternate.get("turn_marks")) or not alternate.get("source"):
+            continue
+        if (candidate := file_candidate("base", Path(str(alternate["source"])))) is not None:
+            found.append(candidate)
+    return found
 
 
 # -- local archive

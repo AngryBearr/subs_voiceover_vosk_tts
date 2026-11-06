@@ -153,7 +153,7 @@ def test_episode_states_from_the_results_folder(tmp_path: Path) -> None:
     assert rows["S01E04"].state == "✅ готово" and rows["S01E04"].finished == results / "S01E04.ru.mkv"
     assert rows["S01E05"].state == seasons.STATE_NEW
     table = seasons.table(seasons.Season(source, results))
-    assert table[3] == ["S01E04", "✅ готово", "S01E04.ru.mkv"] and table[0][1] == seasons.STATE_NEW
+    assert table[3] == ["S01E04", "✅ готово", "S01E04.ru.mkv", "—"] and table[0][1] == seasons.STATE_NEW
     assert seasons.table(None) == []
 
 
@@ -213,7 +213,7 @@ def test_season_handlers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     assert dub_app.save_season("", "")[0].startswith("Впишите")
     got = dub_app.select_season(str(source))
     assert got[0] == str(source) and got[1] == results["value"] and [value for _, value in got[3]["choices"]] == ["e1.mkv", "e2.mkv"]
-    assert got[5] == [["e1", "не начата", ""], ["e2", "не начата", ""]]
+    assert got[5] == [["e1", "не начата", "", "—"], ["e2", "не начата", "", "—"]]
     assert dub_app.select_season(None)[0] == ""
     assert dub_app.season_table("", "") == []
     assert dub_app.season_picker()["choices"][0][1] == str(source)
