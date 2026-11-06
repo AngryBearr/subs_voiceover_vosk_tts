@@ -342,12 +342,16 @@ Many episodes already have English subtitles with speaker information: SDH files
 ("SANDRA: ...") and broadcast captions mark a new voice with ">>". `stt.run` looks for them before the
 transcription (`stt.subtitles.find_subtitles`, in this order):
 
-1. subtitle streams inside the video (English text codecs only; a hearing-impaired/SDH stream first),
-2. `.srt`/`.vtt` files next to the video and in its `subs/` folder, with the same episode code
+1. the season's own subtitle folder (`subtitles.folder`, best set in the season's settings): `.srt`/`.vtt` files with
+   the episode code,
+2. subtitle streams inside the video (English text codecs only; a hearing-impaired/SDH stream first),
+3. `.srt`/`.vtt` files next to the video and in its `subs/` folder, with the same episode code
    (`S05E02`, `10x05`) or file name; Russian files and our own products (`_ru`, `translated`,
    `whisperx`, `_edit`, `_synced`) are skipped,
-3. a local archive: `subtitles.archive` is a folder with a `manifest.jsonl` (season, episode, path, ...),
-4. online (`subtitles.online`, `subtitles.imdb`): the OpenSubtitles Stremio addon, then Gestdown
+4. the subtitle base (`subtitles.base`): one chosen file per episode, made by `stt.subtitle_base` (below),
+5. a local archive: `subtitles.archive` is a folder with a `manifest.jsonl` (season, episode, path, ...); it holds
+   Survivor US only, so it is not asked for a video the `imdb` map gives to another show,
+6. online (`subtitles.online`, `subtitles.imdb`): the OpenSubtitles Stremio addon, then Gestdown
    (`imdb` is one id, or a map `{"part of the path": id}`: the first part found in the video's path wins, `null` means no online search; the shared config maps Survivor and The Amazing Race, and Australian Survivor has `null`)
    (a few requests per episode, text only, a network failure is a warning and means "none").
 
@@ -364,6 +368,22 @@ Turn marks make a speaker change at the mark cheaper in the word-level pass (`su
 The person goes to the naming step as evidence ("caption label: SANDRA x7", the host as "host per subtitles");
 when the LLM leaves the name open, `speakers.json` gets the name from the subtitles. No extra LLM call.
 `subtitle_hints.json` reports what was used (lines pinned and not confirmed, fixed words, persons).
+
+Names in any case: a label is "NAME:" at the line start, also after "-" or ">>". ALL-CAPS names count as always;
+"Jeff:", ">> jeff:" or "Jeff Probst:" count when the same file uses that name as a label at least 3 times (so
+"Their destination: Tarutao Island," is a sentence) and it is not a generic word. Seasons 21-39 have broadcast
+captions that name only the host (">> jeff:") and mark the others with ">>": these were read as turns before and now
+give the host's lines as well (the turn marks still count). Over the hunt archive (742 episodes) the episodes with
+named lines went from 438 to 707.
+
+The subtitle base: `python -m stt.subtitle_base build --archive <hunt> --out <base> [--dry-run]` reads every file of
+the archive with these rules, ranks them per episode (named lines > turn marks > plain, then more named lines, more
+names, more marks, more cues) and writes the winner to `<base>/survivor/Sxx/SxxEyy.en.srt` with an `index.json`
+(the facts of the winner, its original file and the next two candidates). Set `subtitles.base` to that folder.
+
+A translated episode keeps the subtitles it was assembled with: when a better file turns up later (the base, a
+season folder), only episodes without `subs.ru.json` are assembled again; `--force transcribe` takes the new file
+for a translated one (and translates and voices it again).
 
 Switching off: `"subtitles": {"enabled": false}` or `stt.run --no-subtitles`. Episodes without such subtitles
 run exactly as before; transcripts made before this rule stay untouched until the transcribe stage is forced; if the subtitle source of an episode changes later, only the speaker assignment is redone

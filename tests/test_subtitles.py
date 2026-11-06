@@ -419,3 +419,111 @@ def test_english_check_takes_sdh_text_and_refuses_other_languages() -> None:
     assert looks_english(sdh)
     assert not looks_english("Vamos a la playa con mis amigos porque hace mucho sol hoy en esta ciudad tan bonita. " * 5)
     assert not looks_english("Wir gehen heute zusammen nach Hause und essen dort etwas Warmes mit der ganzen Familie. " * 5)
+
+
+# ---- speaker labels: ALL-CAPS names and soft (mixed or lower case) names
+
+def _cue(*lines: str, t: float = 0.0) -> tuple[float, float, list[str]]:
+    return (t, t + 0.8, list(lines))
+
+
+def test_all_caps_names_are_labels_with_or_without_a_turn_mark() -> None:
+    assert subs.label_of("JEFF PROBST: We are in Ha Tai Yao,") is not None
+    found = subs.label_of(">> PROBST: it is still")
+    assert found is not None and found[0] == "PROBST" and found[1] == "it is still"
+    assert subs.label_of("- NICK: Hello there friend") is not None
+
+
+def test_mixed_and_lower_case_names_are_soft_labels() -> None:
+    for line in ("Jeff: we go now", ">> jeff: we go now", "Jeff Probst: we go now"):
+        found = subs.label_of(line)
+        assert found is not None and found[2] is True, line
+    caps = subs.label_of("NICK: we go now")
+    assert caps is not None and caps[2] is False
+
+
+@pytest.mark.parametrize("line", ["Note: this is a thing", "Destination: Tarutao Island", "One two three four: text",
+                                  "Player 2: hello"])
+def test_soft_labels_refuse_generic_words_long_names_and_digits(line: str) -> None:
+    assert subs.label_of(line) is None
+
+
+def test_a_soft_name_counts_only_when_used_at_least_three_times() -> None:
+    twice = [_cue("Nick: one thing", t=i) for i in range(2)]
+    thrice = [_cue("Nick: one thing", t=i) for i in range(3)]
+    assert subs.soft_label_names(twice) == set()
+    assert subs.soft_label_names(thrice) == {"NICK"}
+
+
+def test_a_soft_label_used_once_in_a_sentence_is_not_a_label_in_the_file() -> None:
+    cues = [_cue("Their destination: Tarutao Island,", t=1.0)] + [_cue("Plain words here", t=i + 2.0) for i in range(5)]
+    pieces = subs.file_pieces(cues)
+    assert all(p.person == "" for p in pieces)
+    assert "Their destination" in " ".join(p.text for p in pieces)
+
+
+def test_a_soft_name_used_often_becomes_a_label_in_every_line() -> None:
+    cues = [_cue("Sandra: we vote tonight", t=i) for i in range(4)]
+    pieces = subs.file_pieces(cues)
+    assert [p.person for p in pieces] == ["SANDRA"] * 4
+    assert pieces[0].text == "we vote tonight"
+
+
+def test_host_names_in_any_case_map_to_the_host_marker() -> None:
+    for raw in ("JEFF", "Jeff", "jeff probst", "PROBST", "Jeff Probst"):
+        assert subs.clean_person(raw) == HOST
+
+
+def test_file_of_host_labels_and_bare_turn_marks_is_labels_and_keeps_turn_marks() -> None:
+    cues = [_cue(">> jeff: Come on in, guys", t=i * 2) for i in range(25)]
+    cues += [_cue(">> Where do we go from here friend", t=100 + i * 2) for i in range(25)]
+    info = subs.describe_text(_cues_text(cues))
+    assert info["kind"] == "labels"
+    assert info["names"] == 1
+    assert info["turn_marks"] >= 50
+
+
+def test_describe_text_counts_distinct_names_and_kinds() -> None:
+    names = ["NICK", "SANDRA", "LIZ"]
+    cues = [_cue(f"{names[i % 3]}: we are going to win this one", t=i) for i in range(30)]
+    info = subs.describe_text(_cues_text(cues))
+    assert (info["kind"], info["names"], info["cues"]) == ("labels", 3, 30)
+    turns = subs.describe_text(_cues_text([_cue(">> we are going to win this one", t=i) for i in range(30)]))
+    assert turns["kind"] == "turns" and turns["turn_marks"] == 30
+    plain = subs.describe_text(_cues_text([_cue("we are going to win this one", t=i) for i in range(30)]))
+    assert plain["kind"] == "plain" and plain["names"] == 0
+
+
+def test_nineteen_named_lines_are_still_plain_and_twenty_are_labels() -> None:
+    def kind(n: int) -> str:
+        return subs.describe_text(_cues_text([_cue("NICK: we are going to win this one", t=i) for i in range(n)]))["kind"]
+
+    assert kind(19) == "plain" and kind(20) == "labels"
+
+
+def test_pieces_of_with_explicit_soft_names_accepts_only_those() -> None:
+    cue = _cue("Jeff Probst: hello there", "Nick: hi")
+    pieces = subs.pieces_of(cue, {"NICK"})
+    assert pieces[0].person == "" and "Jeff Probst" in pieces[0].text
+    assert any(p.person == "NICK" for p in pieces)
+
+
+def _cues_text(cues: list[tuple[float, float, list[str]]]) -> str:
+    out = []
+    for n, (start, end, lines) in enumerate(cues, 1):
+        def stamp(x: float) -> str:
+            return f"{int(x) // 3600:02d}:{int(x) // 60 % 60:02d}:{int(x) % 60:02d},{int(x % 1 * 1000):03d}"
+
+        out.append(f"{n}\n{stamp(start)} --> {stamp(end)}\n" + "\n".join(lines) + "\n")
+    return "\n".join(out)
+
+
+def test_the_show_is_found_in_a_dotted_file_name() -> None:
+    from stt import subtitles as s
+
+    imdb = {"amazing race": "tt0285335", "australia": None, "survivor": "tt0239195"}
+    assert s.imdb_of(Path("/v/The.Amazing.Race.S01E01.mkv"), imdb) == "tt0285335"
+    assert s.imdb_of(Path("/v/Australian_Survivor-S10E01.mkv"), imdb) is None
+    assert s.imdb_of(Path("/v/Survivor.S48E01.720p.mkv"), imdb) == "tt0239195"
+    assert not s.show_allows(Path("/v/The.Amazing.Race.S01E01.mkv"), imdb, "tt0239195")
+    assert s.show_allows(Path("/v/Survivor.S48E01.mkv"), imdb, "tt0239195")

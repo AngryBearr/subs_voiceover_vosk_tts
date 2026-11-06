@@ -16,6 +16,7 @@ import tempfile
 import time
 import zipfile
 from bisect import bisect_right
+from collections import Counter
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -30,11 +31,18 @@ GENERIC_LABELS = {
     "NARRATOR", "VOICE", "PRODUCER", "OTHERS", "EVERYONE", "PEOPLE", "TEAM", "TRIBE", "ANNOUNCER", "SPEAKER", "BOY",
     "GIRL", "PLAYERS", "CONTESTANTS", "MAN ON TV", "WOMAN ON TV", "CAMERAMAN", "CHILD", "KIDS", "HOST", "REPORTER",
     "SINGER", "SINGERS", "NOTE", "NOTES", "SIGN", "CAPTION", "NEXT", "NEXT TIME", "PREVIOUSLY", "THANKS",
+    "SOMEONE", "ANYONE", "NOBODY", "CHILDREN", "KID", "LADY", "LADIES", "GUY", "GUYS", "CHYRON", "TITLE", "TEXT",
+    "SUBTITLE", "SUBTITLES", "TRANSLATION", "TRANSLATOR", "INTERPRETER", "PLAYER", "WINNER", "ANSWER", "QUESTION",
+    "WARNING", "REMINDER", "TIP", "EXAMPLE", "FACT", "RULES", "SCORE", "TIME", "TODAY", "TONIGHT", "TOMORROW",
+    "SOMETHING", "LOOK", "LISTEN", "WELL", "DESTINATION", "LOCATION", "CHALLENGE", "REWARD", "IMMUNITY",
 }
+MIN_SOFT_LABEL_USES = 3  # a mixed or lower case name is a label only when the file uses it at least this often
 HOST_LABELS = {"PROBST", "JEFF PROBST", "JEFF", "JONATHAN LAPAGLIA", "LAPAGLIA", "HOST JEFF"}
 HOST = "_HOST"
 
-_LABEL = re.compile(r"^\s*(?:(?:[-–—]|>>+)\s*)?([A-Z][A-Z .'’-]{1,20}):\s*(.*)$")
+_LABEL = re.compile(r"^\s*(?:(?:[-–—]|>>+)\s*)?([A-Za-z][A-Za-z .'’-]{1,23}):\s*(.*)$")
+_MAX_CAPS_LABEL = 21
+_MAX_SOFT_LABEL_WORDS = 3
 _DASH = re.compile(r"^\s*[-–—]\s*(.*)$")
 _TURN = re.compile(r"^\s*>>+\s*(.*)$")
 _NOISE = re.compile(r"\[[^\]]*\]|\([^)]*\)|[♪♫]|<[^>]+>|\{[^}]*\}")
@@ -73,7 +81,7 @@ def tokens(text: str) -> list[str]:
 
 
 def clean_person(raw: str) -> str:
-    name = re.sub(r"\s+", " ", raw.replace("’", "'")).strip(" .-")
+    name = re.sub(r"\s+", " ", raw.replace("’", "'")).strip(" .-").upper()
     return HOST if name in HOST_LABELS else name
 
 
@@ -116,17 +124,47 @@ def _is_label(match: re.Match[str]) -> bool:
     return not rest or len(tokens(rest)) <= 1 or rest != rest.upper()
 
 
-def pieces_of(cue: tuple[float, float, list[str]]) -> list[Piece]:
-    """Split one cue by voices: a label, a dash or ">>" opens a piece, other lines continue the current one."""
+def label_of(text: str) -> tuple[str, str, bool] | None:
+    """(name, rest of the line, soft) when the line opens with "NAME:" (after an optional dash or ">>"), else None.
+    An ALL-CAPS name is a label as it always was; a name in any other case ("Jeff", "jeff", "Jeff Probst") is *soft*:
+    it must name a person (not "Note") and the file must use it often enough (``soft_label_names``)."""
+    match = _LABEL.match(text)
+    if not match:
+        return None
+    name, rest = match.group(1), match.group(2)
+    if name == name.upper():
+        return (name, rest, False) if len(name) <= _MAX_CAPS_LABEL and _is_label(match) else None
+    if len(name.split()) > _MAX_SOFT_LABEL_WORDS or not names_person(clean_person(name)):
+        return None
+    return name, rest, True
+
+
+def soft_label_names(cues: Sequence[tuple[float, float, list[str]]], min_uses: int = MIN_SOFT_LABEL_USES) -> set[str]:
+    """Cleaned mixed/lower case names that the file uses as a label at least ``min_uses`` times: "Jeff:" at the start of
+    many lines is a speaker, "Their destination:" once is a sentence."""
+    counts: Counter[str] = Counter()
+    for _, _, lines in cues:
+        for line in lines:
+            found = label_of(_NOISE.sub(" ", line).strip())
+            if found and found[2]:
+                counts[clean_person(found[0])] += 1
+    return {name for name, n in counts.items() if n >= min_uses}
+
+
+def pieces_of(cue: tuple[float, float, list[str]], soft_names: set[str] | None = None) -> list[Piece]:
+    """Split one cue by voices: a label, a dash or ">>" opens a piece, other lines continue the current one.
+    ``soft_names`` (``soft_label_names`` of the file): the mixed/lower case names that count as labels; None: all."""
     start, end, lines = cue
     out: list[Piece] = []
     for line in lines:
         text = _NOISE.sub(" ", line).strip()
-        label = _LABEL.match(text)
+        label = label_of(text)
+        if label and label[2] and soft_names is not None and clean_person(label[0]) not in soft_names:
+            label = None
         turn = _TURN.match(text) or _DASH.match(text)
         mark = text.startswith(">>")
-        if label and _is_label(label):
-            out.append(Piece(clean_person(label.group(1)), label.group(2), start, end, opens_turn=True, turn_mark=mark))
+        if label:
+            out.append(Piece(clean_person(label[0]), label[1], start, end, opens_turn=True, turn_mark=mark))
         elif turn:
             out.append(Piece("", turn.group(1), start, end, opens_turn=True, turn_mark=mark))
         elif out:
@@ -136,6 +174,12 @@ def pieces_of(cue: tuple[float, float, list[str]]) -> list[Piece]:
     for piece in out:
         piece.tokens = tokens(piece.text)
     return out
+
+
+def file_pieces(cues: Sequence[tuple[float, float, list[str]]]) -> list[Piece]:
+    """Pieces of a whole file: soft (mixed/lower case) labels only where the file uses the name often enough."""
+    accepted = soft_label_names(cues)
+    return join_continued([p for cue in cues for p in pieces_of(cue, accepted)])
 
 
 def join_continued(pieces: list[Piece], max_gap: float = 1.0) -> list[Piece]:
@@ -154,7 +198,7 @@ def join_continued(pieces: list[Piece], max_gap: float = 1.0) -> list[Piece]:
 
 
 def read_pieces(path: Path) -> list[Piece]:
-    return join_continued([p for cue in parse_cues(path) for p in pieces_of(cue)])
+    return file_pieces(parse_cues(path))
 
 
 def subtitle_kind(pieces: Sequence[Piece]) -> str:
@@ -275,6 +319,8 @@ def turn_marks(pinned: Sequence[PinnedPiece]) -> list[int]:
 # ---- finding subtitles of an episode: inside the video, next to it, in a local archive, online
 
 SOURCE_SRT = "subs.source.en.srt"
+BASE_INDEX = "index.json"
+ARCHIVE_IMDB = "tt0239195"  # the hunt archive (``subtitles.archive``) holds Survivor US only
 SOURCE_JSON = "subs.source.json"
 _KIND_RANK = {"labels": 2, "turns": 1, "plain": 0}
 _EPISODE_CODES = (re.compile(r"(?<![a-z0-9])s(\d{1,2})[\s._-]?e(\d{1,3})(?!\d)", re.I),
@@ -342,9 +388,11 @@ def describe_text(text: str) -> dict[str, Any]:
     """What a subtitle text can tell about who speaks: kind, named lines, turn marks, cues."""
     text = to_srt_text(text)
     cues = parse_cue_text(text)
-    pieces = join_continued([p for cue in cues for p in pieces_of(cue)])
+    pieces = file_pieces(cues)
     return {"kind": subtitle_kind(pieces), "labels": sum(names_person(p.person) for p in pieces),
-            "turns": sum(p.opens_turn and not p.person for p in pieces), "cues": len(cues)}
+            "turns": sum(p.opens_turn and not p.person for p in pieces), "cues": len(cues),
+            "names": len({p.person for p in pieces if names_person(p.person)}),
+            "turn_marks": sum(p.turn_mark for p in pieces)}
 
 
 def _rank(info: dict[str, Any]) -> tuple[int, int, int]:
@@ -372,6 +420,15 @@ def _candidate(origin: str, where: str, text: str) -> Candidate | None:
 
 def _best(found: Sequence[Candidate | None]) -> Candidate | None:
     return max((c for c in found if c is not None), key=lambda c: _rank(c.info), default=None)
+
+
+def file_candidate(origin: str, path: Path) -> Candidate | None:
+    """``_candidate`` for a subtitle file on disk; None when it cannot be read or is not usable English subtitles."""
+    try:
+        return _candidate(origin, str(path), decode_subtitle(path.read_bytes()[:MAX_TEXT_BYTES]))
+    except OSError as error:
+        log.warning("Cannot read %s: %s", path, error)
+        return None
 
 
 # -- inside the video
@@ -476,6 +533,51 @@ def sidecar_candidates(media: Path) -> list[Candidate]:
     return [c for c in out if c is not None]
 
 
+# -- the season's own subtitle folder and the subtitle base
+
+def folder_candidates(folder: Path, code: tuple[int, int], limit: int = 12) -> list[Candidate]:
+    """.srt / .vtt files of one episode (matched by its SxxEyy code) in the season's own subtitle folder."""
+    try:
+        paths = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _SIDECAR_SUFFIXES
+                       and not is_our_product(p.name) and episode_code(p.name) == code)
+    except OSError as error:
+        log.warning("Cannot list %s: %s", folder, error)
+        return []
+    return [c for p in paths[:limit] if (c := file_candidate("season folder", p)) is not None]
+
+
+def show_allows(media: Path, imdb: str | dict[str, str | None] | None, show_imdb: str) -> bool:
+    """Whether a file collection of the show ``show_imdb`` may serve this video. The ``imdb`` map decides when it names
+    the video's show (another show or null: no); when it does not, the show is unknown and the collection is used."""
+    if isinstance(imdb, dict):
+        path = path_words(media)
+        match = [value for part, value in imdb.items() if path_words(part) in path]
+        return not match or match[0] == show_imdb
+    return imdb is None or imdb == show_imdb
+
+
+def base_candidates(base: Path, media: Path, imdb: str | dict[str, str | None] | None, season: int, episode: int) -> list[Candidate]:
+    """The base's file for this episode (``<base>/<show>/index.json`` made by ``stt.subtitle_base``): the first show
+    folder whose IMDb id suits the video. Its alternates are not used here, they are for a person to look at."""
+    key = f"S{season:02d}E{episode:02d}"
+    try:
+        folders = sorted(d for d in base.iterdir() if (d / BASE_INDEX).is_file())
+    except OSError as error:
+        log.warning("Subtitle base %s not read: %s", base, error)
+        return []
+    for folder in folders:
+        try:
+            index = json.loads((folder / BASE_INDEX).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            log.warning("Subtitle base index %s not read: %s", folder / BASE_INDEX, error)
+            continue
+        entry = (index.get("episodes") or {}).get(key)
+        if entry and show_allows(media, imdb, str(index.get("imdb") or "")):
+            found = file_candidate("base", base / str(entry.get("file", "")))
+            return [found] if found is not None else []
+    return []
+
+
 # -- local archive
 
 def archive_candidates(archive: Path, season: int, episode: int, limit: int = 4) -> list[Candidate]:
@@ -497,11 +599,7 @@ def archive_candidates(archive: Path, season: int, episode: int, limit: int = 4)
     out = []
     for row in rows[:limit]:
         path = Path(str(row.get("path", "")))
-        path = path if path.is_absolute() else archive / path
-        try:
-            out.append(_candidate("archive", str(path), decode_subtitle(path.read_bytes()[:MAX_TEXT_BYTES])))
-        except OSError as error:
-            log.warning("Archive file %s not read: %s", path, error)
+        out.append(file_candidate("archive", path if path.is_absolute() else archive / path))
     return [c for c in out if c is not None]
 
 
@@ -595,24 +693,32 @@ def online_candidates(imdb: str, season: int, episode: int, budget: int = 8, per
 
 # -- all together
 
+def path_words(media: Path | str) -> str:
+    """The video's path in lower case with ``.``, ``_`` and ``-`` as spaces: "The.Amazing.Race" -> "the amazing race"."""
+    return re.sub(r"[._\-]+", " ", str(media).lower())
+
+
 def imdb_of(media: Path, imdb: str | dict[str, str | None] | None) -> str | None:
     """The show's IMDb id: as given, or from ``{"part of the path": id}`` (the first part found; null: no online search)."""
     if not isinstance(imdb, dict):
         return imdb
-    path = str(media).lower()
-    return next((value for part, value in imdb.items() if part in path), None)
+    path = path_words(media)
+    return next((value for part, value in imdb.items() if path_words(part) in path), None)
 
 
 def find_subtitles(media: Path, out_dir: Path, cfg: dict[str, Any]) -> dict[str, Any] | None:
     """The best existing English subtitles of the episode, written as ``out_dir/subs.source.en.srt``
     (+ ``subs.source.json``: origin, path_or_url, kind, labels, turns, cues); None when there are none.
 
-    Order: inside the video, next to it, the local archive (``cfg["archive"]``), online (``cfg["online"]``, ``cfg["imdb"]``).
+    Order: the season's own folder (``cfg["folder"]``), inside the video, next to it, the subtitle base (``cfg["base"]``,
+    made by ``stt.subtitle_base``), the local archive (``cfg["archive"]``; Survivor US only, see ``show_allows``), online
+    (``cfg["online"]``, ``cfg["imdb"]``).
     The best kind wins (labels > turns > plain), then the most named lines / marks; a source that gives named lines
     ends the search. The answer, "nothing found" too, is cached in ``subs.source.json`` for the same search settings.
     """
     media, out_dir = Path(media), Path(out_dir)
     searched = {"online": bool(cfg.get("online", False)), "imdb": imdb_of(media, cfg.get("imdb", "tt0239195")), "archive": str(cfg.get("archive") or "")}
+    searched.update({k: str(cfg[k]) for k in ("folder", "base") if cfg.get(k)})  # only when set: older caches stay valid
     cache, text_path = out_dir / SOURCE_JSON, out_dir / SOURCE_SRT
     if cache.is_file():
         try:
@@ -630,8 +736,12 @@ def find_subtitles(media: Path, out_dir: Path, cfg: dict[str, Any]) -> dict[str,
         best = top
         return best is not None and best.info["kind"] == "labels"
 
-    done = consider(embedded_candidates(media)) or consider(sidecar_candidates(media))
-    if not done and code and searched["archive"]:
+    imdb_cfg = cfg.get("imdb", "tt0239195")
+    done = bool(code and searched.get("folder") and consider(folder_candidates(Path(searched["folder"]).expanduser(), code)))
+    done = done or consider(embedded_candidates(media)) or consider(sidecar_candidates(media))
+    if not done and code and searched.get("base"):
+        done = consider(base_candidates(Path(searched["base"]).expanduser(), media, imdb_cfg, *code))
+    if not done and code and searched["archive"] and show_allows(media, imdb_cfg, ARCHIVE_IMDB):
         done = consider(archive_candidates(Path(searched["archive"]).expanduser(), *code))
     if not done and code and searched["online"] and searched["imdb"]:
         consider(online_candidates(str(searched["imdb"]), *code))

@@ -192,6 +192,7 @@ class Episode:
         self.engine = str(getattr(args, "engine", None) or vo.get("engine", "vosk")).split(",")[0].strip()
         self.vo_dir = self.out / f"voiceover.{self.engine}"
         self._subtitles: dict[str, Any] | None | bool = False  # False: not looked up yet
+        self._kept_subtitles_logged = False
 
     def subtitle_source(self) -> dict[str, Any] | None:
         """Existing English subtitles of the episode that tell who speaks ("labels" or "turns"), else None.
@@ -278,9 +279,17 @@ class Episode:
         if stage == "transcribe" and self.subtitle_stamp.exists():
             used = self.subtitle_stamp.read_text(encoding="utf-8").strip()
             if self.subtitle_key() != used:
-                log.info("[%s] subtitles changed (%s -> %s): speakers are assigned again", self.media.stem, used,
-                         self.subtitle_key())
-                return True
+                if (self.out / "subs.ru.json").exists():
+                    # A translated episode keeps the subtitles it was assembled with: assembling again would mean a new
+                    # translation and a new voice-over. A forced run (--force transcribe) takes the new ones.
+                    if not self._kept_subtitles_logged:
+                        self._kept_subtitles_logged = True
+                        log.info("[%s] subtitles changed (%s -> %s), but the episode is translated: it keeps the old ones "
+                                 "(--force transcribe takes the new)", self.media.stem, used, self.subtitle_key())
+                else:
+                    log.info("[%s] subtitles changed (%s -> %s): speakers are assigned again", self.media.stem, used,
+                             self.subtitle_key())
+                    return True
         mark = self.stamp(stage)
         if mark.exists() and any(p.exists() and p.stat().st_mtime > mark.stat().st_mtime for p in inputs or []):
             return True

@@ -28,7 +28,7 @@
   "gpu": {"parallel": "auto"},
   "overlap_episodes": true,
   "on_screen": {"voice": "text", "neutral_gender": "male", "track": true, "burn_in_when_compressing": false},
-  "subtitles": {"enabled": true, "online": true, "imdb": {"amazing race": "tt0285335", "australia": null, "survivor": "tt0239195"}, "archive": null, "turn_bonus": 0.3},
+  "subtitles": {"enabled": true, "online": true, "imdb": {"amazing race": "tt0285335", "australia": null, "survivor": "tt0239195"}, "folder": null, "base": null, "archive": null, "turn_bonus": 0.3},
   "llm": {
     "model": "openai/gpt-6-luna",
     "router": "openrouter",
