@@ -113,11 +113,20 @@ def fuse(
             + f"Previous context: {context}\nChunks:\n"
             + "\n".join(json.dumps(x, ensure_ascii=False) for x in items)
         )
-        answer = client.chat_json(SYSTEM_PROMPT, prompt)
+        try:
+            answer = client.chat_json(SYSTEM_PROMPT, prompt)
+        except RuntimeError as error:  # a refusal (S01E05: "content_filter" on every route) or a dead transport
+            log.warning("fusion: chunks %d-%d keep the first recognition (%s)", ids[0], ids[-1], error)
+            failed.append(start)
+            answer = {}
         got = {c.get("id"): str(c.get("text", "")).strip() for c in answer.get("chunks", []) if isinstance(c, dict)}
         return [restored(got[j], j) if got.get(j) else first[j] for j in ids]
 
+    failed: list[int] = []
+    starts = range(0, len(chunks), batch_size)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        batches = list(pool.map(run, range(0, len(chunks), batch_size)))
+        batches = list(pool.map(run, starts))
+    if starts and len(failed) == len(starts):  # nothing fused at all: the LLM is down, not one passage refused
+        raise RuntimeError(f"fusion: every batch failed ({len(failed)})")
     fused = [text for batch in batches for text in batch]
     return [Segment(start=s, end=e, text=t) for (s, e), t in zip(chunks, fused) if t.strip()]

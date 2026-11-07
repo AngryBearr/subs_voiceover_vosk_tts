@@ -26,7 +26,9 @@ def test_host_role_gets_cast_host() -> None:
     speakers = [card("S01", "host and narrator", gender="unknown"), card("S02", "narrator of the show"),
                 card("S03", "contestant"), card("S04", "merged contestant voices, with occasional host dialogue",
                                                 gender="unknown"),
-                card("S05", "host", name="Someone Else")]
+                card("S05", "host", name="Someone Else"),
+                card("S06", "Host and narrator; cluster also includes contestant dialogue"),  # S01E01, no names
+                card("S07", "contestant (with some host speech)")]
     sp.apply_cast_host(speakers, CAST)
     s = by_id(speakers)
     assert s["S01"]["name"] == "Jeff Probst" and s["S01"]["name_source"] == "cast_host"
@@ -34,6 +36,7 @@ def test_host_role_gets_cast_host() -> None:
     assert s["S02"]["name"] == "Jeff Probst"
     assert s["S03"]["name"] is None and s["S04"]["name"] is None
     assert s["S05"]["name"] == "Someone Else"  # a name already there stays
+    assert s["S06"]["name"] == "Jeff Probst" and s["S07"]["name"] is None  # the role's first clause decides
 
 
 def test_no_host_without_one_host_in_cast() -> None:

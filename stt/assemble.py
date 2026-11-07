@@ -366,18 +366,91 @@ def merge_captions(
     return out, stats
 
 
+ROLL_GAP_S = 6.0  # cards of a title roll (opening roster, end credits) follow each other within this
+ROLL_MIN_CARDS = 4  # different first words that make a roll (OCR variants of one card share it)
+ROLL_MAX_WORDS = 3  # median words spoken under a card of a roll: nobody on it is talking
+PLACE_WORDS = frozenset({"tribal", "council", "survivor", "camp", "previously"})
+
+
+def title_roll_cards(cards: list[dict[str, Any]], words: list[Word]) -> set[int]:
+    """Indices of the cards of a title roll: a run of cards of at least ``ROLL_MIN_CARDS`` different first words (one card
+    read three ways, "BIANCA" / "BIANCA PR CONSULTAN" / "PR CONSULTANT", is not a roll), each shown within
+    ``ROLL_GAP_S`` of the one before, with at most ``ROLL_MAX_WORDS`` words spoken under a card (median). The opening
+    roster of S01E01 shows 16 names in 37 s over the narration (0-3 words each), the end credits the crew; a card of an
+    interview has the person talking under it (10-25 words) and the cards of a vote come 9-16 s apart."""
+    order = sorted(range(len(cards)), key=lambda k: cards[k]["start"])
+    middles = sorted((w.start + w.end) / 2 for w in words)
+    runs: list[list[int]] = []
+    end = float("-inf")
+    for k in order:
+        if not runs or cards[k]["start"] - end > ROLL_GAP_S:
+            runs.append([])
+            end = float("-inf")
+        runs[-1].append(k)
+        end = max(end, cards[k]["end"])
+    out: set[int] = set()
+    for run in runs:
+        firsts = {str(cards[k]["text"]).split()[0].upper() for k in run if str(cards[k]["text"]).split()}
+        if len(firsts) < ROLL_MIN_CARDS:
+            continue
+        spoken = sorted(bisect.bisect_right(middles, cards[k]["end"]) - bisect.bisect_left(middles, cards[k]["start"])
+                        for k in run)
+        if spoken[len(spoken) // 2] <= ROLL_MAX_WORDS:
+            out.update(run)
+    return out
+
+
+def place_card(card: dict[str, Any], tribes: set[str]) -> bool:
+    """A card of a tribe, day or place ("TAGI TRIBE", "VULA (DAY4)", "TRIBAL COUNCIL"): it says where the scene is, not
+    who speaks. ``tribes``: the tribe names of the episode (``stt.onscreen._tribe_words``)."""
+    from stt.onscreen import _generic_line
+
+    text = str(card.get("text") or "")
+    return _generic_line(text, tribes) or bool({w.lower() for w in re.findall(r"[^\W_]+", text)} & PLACE_WORDS)
+
+
+def all_cards(ocr: dict[str, Any], screen_items: list[dict[str, Any]] | None = None, offset: float = 0.0) -> list[dict[str, Any]]:
+    """The OCR's cards plus the name cards ``stt.onscreen`` assembles from several lines ("Rudy" over "Retired Navy SEAL -
+    Tagi Tribe"): S01 shows its interview cards only that way, in mixed case, and the OCR's own list had none of them.
+    ``screen_items`` (``onscreen.json``) are on the media timeline: ``offset`` (the audio's start) is taken off. A name
+    card the OCR list already has at that time (same first word) is not added twice."""
+    cards = list(ocr.get("cards", []))
+    for item in screen_items or []:
+        text = str(item.get("text") or "").strip()
+        if item.get("kind") != "name_card" or not text:
+            continue
+        start, end = float(item["start"]) - offset, float(item["end"]) - offset
+        first = text.split()[0].upper()
+        if any(str(c.get("text") or "").split()[:1] == [first] and min(end, c["end"]) - max(start, c["start"]) > 0
+               for c in cards):
+            continue
+        cards.append({"start": start, "end": end, "kind": "name_card", "text": text, "descriptor": item.get("descriptor")})
+    return cards
+
+
 def on_screen_hints(ocr: dict[str, Any], words: list[Word], diarization: Diarization,
-                    max_hints: int = 8, after_s: float = 10.0) -> dict[str, list[str]]:
+                    max_hints: int = 8, after_s: float = 10.0, screen_items: list[dict[str, Any]] | None = None,
+                    offset: float = 0.0) -> dict[str, list[str]]:
     """Per diarizer speaker: names shown on screen while they talked and caption labels of their lines.
 
     A card goes to the speaker talking most while it is shown; a card shown in a pause (no diarized
     speech under it) goes to the speaker of most of the words in the `after_s` seconds after it
     (on S51E01-E02 the four such cards all belonged to that speaker). Repeated hints are counted
     ("title: SHAUN x3"); OCR spacing variants count as one; the `max_hints` most frequent are kept.
+    The cards of a title roll (``title_roll_cards``) and of a tribe, day or place (``place_card``) name nobody talking:
+    on S01E01 the opening roster gave six names to one voice, which the naming then called mixed voices. With
+    ``screen_items`` the multi-line name cards of ``stt.onscreen`` count too (``all_cards``).
     """
+    from stt.onscreen import _tribe_words
+
     index = _TurnIndex(diarization.exclusive or diarization.turns)
     found: dict[str, list[str]] = {}
-    for card in ocr.get("cards", []):
+    cards = all_cards(ocr, screen_items, offset)
+    tribes = _tribe_words([{"text": f"{c.get('text') or ''} {c.get('descriptor') or ''}"} for c in cards])
+    roll = title_roll_cards(cards, words)
+    for k, card in enumerate(cards):
+        if k in roll or place_card(card, tribes):
+            continue
         talk: dict[str, float] = {}
         for t in index.overlapping(card["start"], card["end"]):
             talk[t.speaker] = talk.get(t.speaker, 0.0) + min(card["end"], t.end) - max(card["start"], t.start)

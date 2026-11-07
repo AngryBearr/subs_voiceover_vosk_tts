@@ -507,3 +507,127 @@ def test_translated_episode_named_again_gets_the_stage(tmp_path: Path, monkeypat
     assert episode.named_after_translation()
     run.run_season_voices(files, out, args, config, ["vosk"])
     assert sv.before_path(e1, "words").exists()
+
+
+# ---------------------------------------------------------------- people only the subtitles name (7.11)
+def test_person_only_the_subtitles_name_gets_a_season_voice(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    """S01E01: "DIRK:" lines pinned 25 words, the first pass never named a speaker Dirk, so he had no season voice."""
+    hints = WordHints(persons={"CAZ": list(range(42, 57)), "MAN": list(range(30, 42))})  # Z is Carol; "MAN" is nobody
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: hints if episode.folder.name == "e1" else None)
+    voices = sv.build_voices(season, MODEL, 10, cast=CAST)
+    assert "Carol Wu" in voices.names and voices.counts[voices.names.index("Carol Wu")] == 15
+    assert not any(n.lower().startswith("man") for n in voices.names)
+    assert voices.by_first_name("CAZ") == "Carol Wu"
+    sv.apply_episode(season[0], voices, model=MODEL)
+    carol = next(c for c in load_json(season[0] / "speakers.json") if c.get("name") == "Carol Wu")
+    assert (carol["diarizer_label"], carol["gender"], carol["gender_source"]) == ("V:Carol Wu", "female", "cast")
+    assert carol["name_source"] == "season_voices" and carol["label_ru"] is None  # no glossary in the folder
+    assert spoken(season[0])[42:57] == ["Carol Wu"] * 15
+
+
+def test_person_without_a_cast_is_left_to_the_first_pass(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: WordHints(persons={"CAZ": list(range(42, 57))}))
+    assert "Carol Wu" not in sv.build_voices(season, MODEL, 10).names  # who "CAZ" is, only a cast can say
+
+
+def test_dry_run_computes_no_embeddings(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a dry run must not compute word embeddings")
+
+    monkeypatch.setattr(sv, "prepare_embeddings", boom)
+    results = sv.apply_season(season, season[:1], None, model=MODEL, min_words=20, dry_run=True)
+    assert results["e1"].status in ("would-apply", "unchanged")
+
+
+def test_caption_marks_get_their_own_bonus(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Any] = []
+    real = sv._viterbi
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["turns"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sv, "_viterbi", spy)
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: WordHints(turns={5, 12}))
+    voices = sv.build_voices(season, MODEL, 20)
+    sv.apply_episode(season[0], voices, model=MODEL, dry_run=True, caption_bonus=0.3)
+    turns = seen[-1]
+    assert turns[5] == 0.3 and turns[12] == 0.3  # 12 is also a diarizer change (X -> ... no: inside X): the larger bonus
+    assert all(v == sv.TURN_BONUS for i, v in turns.items() if i not in (5, 12))
+
+
+def test_name_cards_give_a_voice_to_a_person_without_one(season: list[Path]) -> None:
+    """S01E01: Susan's interview fell into a mixed cluster; the words under her name card are her voice."""
+    words = load_json(season[0] / "words.json")
+    cards = [{"start": words[42]["start"], "end": words[56]["end"], "kind": "name_card", "text": "CAROL", "descriptor": None},
+             {"start": 0.0, "end": 0.5, "kind": "name_card", "text": "TAGI TRIBE", "descriptor": None}]
+    save_json(season[0] / "ocr.json", {"cards": cards, "captions": []})
+    assert "Carol Wu" not in sv.build_voices(season, MODEL, 10).names  # without a cast nobody knows whose card it is
+    voices = sv.build_voices(season, MODEL, 10, cast=CAST)
+    assert "Carol Wu" in voices.names and voices.counts[voices.names.index("Carol Wu")] == 15
+    sv.apply_episode(season[0], voices, model=MODEL)
+    assert spoken(season[0])[42:57] == ["Carol Wu"] * 15
+    carol = next(c for c in load_json(season[0] / "speakers.json") if c.get("name") == "Carol Wu")
+    assert (carol["gender"], carol["name_source"]) == ("female", "season_voices")
+
+
+def test_name_cards_do_not_change_a_person_with_enough_words(season: list[Path]) -> None:
+    words = load_json(season[0] / "words.json")
+    save_json(season[0] / "ocr.json", {"cards": [{"start": words[42]["start"], "end": words[56]["end"], "kind": "name_card",
+                                                   "text": "BOB"}], "captions": []})
+    plain = sv.build_voices(season, MODEL, 10, cast=CAST)
+    assert plain.counts[plain.names.index("Bob Jones")] == 12 + 40 + 30  # the card's 15 words (Carol's) are not added
+
+
+def test_a_cluster_the_naming_calls_mixed_gives_no_words_to_the_voice(season: list[Path]) -> None:
+    """S02E05: the naming called a 151-cue cluster of several people Kimmi ("mixed-speaker cluster"); her voice must
+    not be the average of all of them."""
+    plain = sv.build_voices(season, MODEL, 20)
+    cards = load_json(season[0] / "speakers.json")
+    for card in cards:
+        if card["diarizer_label"] == "X":
+            card["role"] = "contestant; mixed-speaker cluster"
+    save_json(season[0] / "speakers.json", cards)
+    clean = sv.build_voices(season, MODEL, 20)
+    alice = clean.names.index("Alice Smith")
+    assert plain.counts[plain.names.index("Alice Smith")] - clean.counts[alice] == 30  # X: 12 + 8 + 10 words
+    assert clean.vectors[alice][AXIS["B"]] < plain.vectors[plain.names.index("Alice Smith")][AXIS["B"]]
+    assert clean.cards["Alice Smith"]["diarizer_label"] == "P"  # a clean card describes her
+
+
+def test_multi_line_name_cards_of_onscreen_count(season: list[Path]) -> None:
+    """S01: "Susan" over "Truck Driver - Tagi Tribe" is only in onscreen.json (media timeline)."""
+    words = load_json(season[0] / "words.json")
+    save_json(season[0] / "ocr.json", {"cards": [], "captions": []})
+    save_json(season[0] / "onscreen.json", [{"start": words[42]["start"], "end": words[56]["end"], "kind": "name_card",
+                                             "text": "Carol", "descriptor": "Truck Driver - Tagi Tribe"}])
+    voices = sv.build_voices(season, MODEL, 10, cast=CAST)
+    assert "Carol Wu" in voices.names and voices.counts[voices.names.index("Carol Wu")] == 15
+
+
+def test_dissolved_clusters_give_their_words_to_the_people(season: list[Path]) -> None:
+    voices = sv.build_voices(season, MODEL, 20)
+    sv.apply_episode(season[0], voices, model=MODEL, dry_run=False)
+    assert set(spoken(season[0])[42:57]) == {"Z"}  # an unnamed cluster stays a voice of its own
+    sv.apply_episode(season[0], voices, model=MODEL, dissolve="mixed")
+    assert set(spoken(season[0])[42:57]) == {"Z"}  # Z is not called mixed
+    cards = load_json(sv.before_path(season[0], "speakers"))
+    for card in cards:
+        if card["diarizer_label"] == "Z":
+            card["role"] = "merged contestant voices"
+    save_json(sv.before_path(season[0], "speakers"), cards)
+    sv.apply_episode(season[0], voices, model=MODEL, dissolve="mixed")
+    assert set(spoken(season[0])[42:57]) <= {"Alice Smith", "Bob Jones"}
+
+
+def test_clean_voices_come_from_cards_and_named_lines(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    """S02E05: a mixed cluster named after one card made the person's voice an average of several people."""
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: WordHints(persons={"ALI": list(range(0, 12)) + list(range(20, 30))})
+                        if episode.folder.name == "e1" else None)
+    plain = sv.build_voices(season, MODEL, 20, cast=CAST)
+    clean = sv.build_voices(season, MODEL, 20, cast=CAST, source="clean")
+    alice = clean.names.index("Alice Smith")
+    assert clean.counts[alice] == 22  # her 22 named words, not the 30 + 60 + 30 under her name
+    assert clean.vectors[alice][AXIS["B"]] < plain.vectors[plain.names.index("Alice Smith")][AXIS["B"]]
+    assert clean.counts[clean.names.index("Bob Jones")] == plain.counts[plain.names.index("Bob Jones")]  # no clean words: as before
+    assert clean.fingerprint != plain.fingerprint

@@ -660,6 +660,16 @@ What it does, after every episode has its transcript and names (`speakers` stage
    `season_voices.json` records what moved. The first-pass files are kept once as `*.before_voices.json`; the stage always
    starts from them, so a rerun (also with more episodes in the season) gives the same result as a first run.
 
+Since 7.11.2026 (old seasons, `docs/roadmap.md` plan of 7.11): a person only the subtitles or the season's cast name
+(S01E01 "DIRK:" lines) gets a voice too; a person with fewer than `min_words` words gets one from the words spoken under
+their name cards (`ocr.json` and the multi-line cards of `onscreen.json`; title rolls and tribe / day / place cards do not
+count); a cluster the naming calls mixed ("merged contestant voices") gives no words to the voice of the person it is
+named after. Options in `season_voices` (numbers in `docs/experiments.md`): `dissolve` (on, "mixed" since 7.11, approved by
+ear: 
+the unnamed clusters the naming calls mixed are no state, their words go to the season's people; "unnamed": every
+unnamed cluster; "none": off), and off by default: `voice_source` ("clean": voices from card and named-line words only), `tribe_prior` (people of other
+tribes less likely at a tribe's camp, `stt.tribes`), `caption_bonus` (the switch bonus at ">>" marks, 0.15).
+
 `speakers.llm.json` and the naming are not touched. The stage touches the `speakers` mark of an episode it changed, so the
 stages after it (translation, dubbing, ...) run again and the earlier ones do not. If `corrections.json` or
 `speakers.override.json` exists, the stage warns: line numbers and speaker ids of the first pass no longer apply.

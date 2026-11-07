@@ -6,7 +6,8 @@
 Jobs it knows: DiariZen fine-tuning runs (output/exp_finetune/run*/train.log), the training-data build
 (output/subs_train/build_audio.log), the word times (output/subs_train/build_words.log), the subtitle extraction
 (output/subs_train/extract.log), the speaker model runs (output/exp_spk/*/train.log, output/exp_spk/run_*.log), the
-experiment harness runs (output/exp_boundary/run_*.log, output/exp_tse/run_*.log). A job is "running" while its log changed in the last 3 minutes.
+experiment harness runs (output/exp_boundary/run_*.log, output/exp_tse/run_*.log), the old-season speaker
+harness (output/exp_old_seasons/logs/*.log). A job is "running" while its log changed in the last 3 minutes.
 """
 from __future__ import annotations
 
@@ -162,6 +163,17 @@ def collect() -> list[dict]:
             rows.append(row)
     for log in sorted(HERE.glob("exp_boundary/run_*.log")):
         if (row := line_counter(log, f"harness {log.stem}", r"^=== ", None, "stt.transcribe per episode / variant")):
+            rows.append(row)
+    for log in sorted(HERE.glob("exp_old_seasons/logs/*.log")):  # one harness run: the first pass of 6-7 episodes
+        if log.stem.startswith("queue"):
+            if (row := line_counter(log, f"old seasons {log.stem}", r"\] done ", 9, "harness runs (code x subtitles)")):
+                if "queue done" in log.read_text(encoding="utf-8", errors="replace"):
+                    row.update(stage="finished", remaining="0", running=False)
+                rows.append(row)
+        elif (row := line_counter(log, f"old seasons {log.stem}", r"\] speakers: finished", 7 if "modern" not in log.stem else 6,
+                                  "stt.run --prepare per episode")):
+            if re.search(r"\] \S+ done$", log.read_text(encoding="utf-8", errors="replace"), re.M):
+                row.update(stage="finished", remaining="0", running=False)
             rows.append(row)
     for log in sorted(HERE.glob("exp_tse/run_*.log")):
         if (row := line_counter(log, f"voice sample {log.stem}", r"^=== ", None, "per line or episode")):

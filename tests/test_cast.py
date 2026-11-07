@@ -182,3 +182,14 @@ def test_subtitle_names_take_the_cast_spelling() -> None:
     plain = [{"id": "S1", "subtitle_person": "SEAN"}]
     apply_subtitle_names(plain)  # without a cast: as before
     assert plain[0]["name"] == "Sean"
+
+
+def test_first_name_and_initial_find_one_of_two_namesakes() -> None:
+    from stt.cast import member_for_label
+
+    cast = {"cast": [{"name": "Jeff Probst", "aliases": ["Jeff"], "role": "Host"},
+                     {"name": "Jeff Varner", "aliases": ["Jeff"], "role": "Contestant"},
+                     {"name": "Kel Gleason", "aliases": [], "role": "Contestant"}]}
+    assert member_for_label("JEFF V.", cast)["name"] == "Jeff Varner"  # S02 subtitles tell the two Jeffs apart so
+    assert member_for_label("JEFF P", cast)["name"] == "Jeff Probst"
+    assert member_for_label("JEFF", cast) is None and member_for_label("KEL G.", cast)["name"] == "Kel Gleason"

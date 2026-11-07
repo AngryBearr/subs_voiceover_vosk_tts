@@ -146,3 +146,17 @@ def test_change_prior_keeps_a_short_interjection() -> None:
     assert without == list("AAAAAAAAA")
     with_prior = _viterbi(words, own, emb, centroids, RelabelParams(switch_penalty=0.2, prior=0.1, change_prior=0.5))
     assert with_prior == list("AAAABAAAA")
+
+
+def test_turn_bonus_per_word() -> None:
+    """``turns`` as word index -> bonus: a strong mark makes a switch the plain bonus does not."""
+    from stt.boundaries import _viterbi
+
+    words = [Word(i * 0.4, i * 0.4 + 0.3, f"w{i}") for i in range(6)]
+    a, b = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    emb = np.stack([0.6 * a + 0.4 * b] * 3 + [0.45 * a + 0.55 * b] * 3)
+    emb /= np.linalg.norm(emb, axis=1, keepdims=True)
+    params = RelabelParams(switch_penalty=2.0, turn_bonus=0.0)
+    own: list[str | None] = [None] * 6
+    assert _viterbi(words, own, emb, {"A": a, "B": b}, params) == ["A"] * 6  # a switch costs more than it gains
+    assert _viterbi(words, own, emb, {"A": a, "B": b}, params, turns={3: 0.5}) == ["A"] * 3 + ["B"] * 3

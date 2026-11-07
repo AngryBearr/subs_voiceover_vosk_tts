@@ -23,7 +23,7 @@
   "diarizer_options": {"median_filter": true, "exclusive": true, "ahc_threshold": 0.5},
   "speaker_refine": {"model": "resnet293", "margin": 0.1},
   "word_speakers": {"enabled": true, "model": "resnet293", "switch_penalty": 0.3, "prior": 0.0, "change_prior": 0.15, "window_s": 1.0, "passes": 1},
-  "season_voices": {"enabled": true, "model": "resnet293-ft", "min_words": 20},
+  "season_voices": {"enabled": true, "model": "resnet293-ft", "min_words": 20, "dissolve": "mixed"},
   "ocr": {"enabled": true, "fps": 2.0},
   "gpu": {"parallel": "auto"},
   "overlap_episodes": true,

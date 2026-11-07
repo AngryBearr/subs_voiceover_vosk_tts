@@ -379,6 +379,7 @@ def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Pa
     if loop_words:
         log.info("Repetition guard removed %d looped words", loop_words)
     words = collect_words(segments)
+    screen_items: list[dict[str, Any]] = []
     if ocr_data:
         # rules may have changed since the (slow) scan; the spoken words help to repair the OCR text
         ocr_data = reclassify(ocr_data, [w.text for w in words])
@@ -439,7 +440,8 @@ def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Pa
         from stt.boundaries import restore_fixed
 
         words = restore_fixed(words, word_hints.fixed)  # smoothing must not undo a named line
-    hints = on_screen_hints(ocr_data, words, diarization) if ocr_data else {}
+    hints = (on_screen_hints(ocr_data, words, diarization, screen_items=screen_items, offset=args.start or 0.0)
+             if ocr_data else {})
     named_by_subtitles: dict[str, str] = {}
     if word_hints is not None and sub_info is not None:
         from stt.subtitle_hints import evidence, report, subtitle_persons

@@ -1324,7 +1324,11 @@ def run_season_voices(files: list[Path], out_root: Path, args: argparse.Namespac
             continue
         targets = [episodes[m].out for m in fresh]
         results = season_voices.apply_season(every, targets, episodes[fresh[0]].season_voices, model=model,
-                                             min_words=int(cfg.get("min_words", season_voices.MIN_WORDS)))
+                                             min_words=int(cfg.get("min_words", season_voices.MIN_WORDS)),
+                                             caption_bonus=float(cfg.get("caption_bonus", season_voices.TURN_BONUS)),
+                                             tribe_prior=float(cfg.get("tribe_prior", 0.0)),
+                                             dissolve=str(cfg.get("dissolve", "none")),
+                                             voice_source=str(cfg.get("voice_source", "all")))
         for media in fresh:
             episode = episodes[media]
             result = results[episode.out.name]

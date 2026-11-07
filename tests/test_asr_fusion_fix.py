@@ -101,3 +101,30 @@ def test_fuse_restores_from_the_timed_recognition_not_the_first() -> None:
                               Word(3.7, 3.9, "now!")])]
     fused = fuse([(0.0, 4.0)], {"cohere-transcribe": cohere, "whisper-large-v3": whisper}, Client())
     assert fused[0].text == "We are going to win this. Pull him up now!"
+
+
+class _Refusing:
+    """Refuses the batches whose prompt holds ``bad`` (an LLM content filter), answers the others."""
+
+    def __init__(self, bad: str) -> None:
+        self.bad = bad
+
+    def chat_json(self, system: str, prompt: str) -> dict:
+        if self.bad in prompt:
+            raise RuntimeError("no JSON in answer (finish_reason=content_filter)")
+        import json
+        ids = [json.loads(line)["id"] for line in prompt.splitlines() if line.startswith("{")]
+        return {"chunks": [{"id": j, "text": f"fused {j}"} for j in ids]}
+
+
+def test_a_refused_batch_keeps_the_first_recognition() -> None:
+    """S01E05: a content filter refused one batch on every route and the whole season preparation stopped."""
+    import pytest
+
+    chunks = [(float(i), float(i + 1)) for i in range(4)]
+    hyp = {"cohere": [Segment(float(i), float(i + 1), f"first {i}" + (" knife" if i == 2 else "")) for i in range(4)],
+           "whisper": [Segment(float(i), float(i + 1), f"second {i}") for i in range(4)]}
+    out = fuse(chunks, hyp, _Refusing("knife"), batch_size=2)  # type: ignore[arg-type]
+    assert [s.text for s in out] == ["fused 0", "fused 1", "first 2 knife", "first 3"]
+    with pytest.raises(RuntimeError):  # every batch refused: the LLM is down, the stage fails as before
+        fuse(chunks, hyp, _Refusing("first"), batch_size=2)  # type: ignore[arg-type]

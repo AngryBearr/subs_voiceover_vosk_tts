@@ -352,25 +352,63 @@ def subtitle_hints(data: EpisodeData) -> Any:
 
 
 # ---------------------------------------------------------------- build
-def fingerprint(folders: list[Path], model: str, min_words: int, cast: dict[str, Any] | None = None) -> str:
+def fingerprint(folders: list[Path], model: str, min_words: int, cast: dict[str, Any] | None = None,
+                source: str = "all") -> str:
     """What the voices depend on: the first-pass files, the word embeddings and the subtitles of every episode, and the
     season's cast (it turns subtitle labels into people)."""
     from stt.refine_speakers import model_cache_key
 
-    digest = hashlib.sha256(f"{SCHEMA}|{model_cache_key(model)}|{min_words}".encode())
+    digest = hashlib.sha256(f"{SCHEMA}|{model_cache_key(model)}|{min_words}{'' if source == 'all' else '|' + source}".encode())
     digest.update(json.dumps(cast or {}, sort_keys=True, ensure_ascii=False).encode())
     for folder in sorted(folders):
         sources, _ = first_pass_files(folder)
-        parts = [sources["words"], sources["speakers"], embedding_path(folder, model), folder / "subs.source.en.srt"]
+        parts = [sources["words"], sources["speakers"], embedding_path(folder, model), folder / "subs.source.en.srt",
+                 folder / "ocr.json", folder / "onscreen.json"]
         digest.update(folder.name.encode())
         for path in parts:
             digest.update((_sha(path) if path.exists() else "-").encode())
     return digest.hexdigest()
 
 
+def card_words(episode: EpisodeData, voices: SeasonVoices) -> dict[str, list[int]]:
+    """Person -> the words spoken while a name card of that person was on screen (``ocr.json``): an interview card shows
+    the person talking. The cards of title rolls and of tribes, days and places are left out (``stt.assemble``); a card
+    counts only when the season's cast says whose it is ("SUSAN" -> Susan Hawk), so this needs the cast."""
+    from stt.assemble import all_cards, place_card, title_roll_cards
+    from stt.onscreen import _tribe_words
+
+    path, screen = episode.folder / "ocr.json", episode.folder / "onscreen.json"
+    if not voices.cast or not path.exists():
+        return {}
+    try:
+        items = load_json(screen) if screen.exists() else []
+        cards = all_cards(load_json(path), items if isinstance(items, list) else [], episode.offset)
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return {}
+    cards = [c for c in cards if c.get("kind") == "name_card" and c.get("text")]
+    roll = title_roll_cards(cards, episode.words)
+    tribes = _tribe_words([{"text": f"{c.get('text') or ''} {c.get('descriptor') or ''}"} for c in cards])
+    middles = [(w.start + w.end) / 2 for w in episode.words]
+    out: dict[str, list[int]] = defaultdict(list)
+    for k, card in enumerate(cards):
+        if k in roll or place_card(card, tribes):
+            continue
+        text = str(card["text"])
+        member = voices.own_member(text) or voices.own_member(text.split()[0])
+        if member is None:
+            continue
+        key = voices.person_of(member["name"]) or clean_name(member["name"])
+        out[key] += [i for i, m in enumerate(middles) if card["start"] <= m <= card["end"]
+                     and episode.words[i].source != "ocr"]
+    return {key: sorted(set(idx)) for key, idx in out.items() if idx}
+
+
 def build_voices(folders: list[Path], model: str = "resnet293", min_words: int = MIN_WORDS,
-                 aliases: dict[str, str] | None = None, cast: dict[str, Any] | None = None) -> SeasonVoices:
-    """The season's people from the named speakers (and named subtitle lines) of the episodes with a first pass."""
+                 aliases: dict[str, str] | None = None, cast: dict[str, Any] | None = None, source: str = "all") -> SeasonVoices:
+    """The season's people from the named speakers (and named subtitle lines) of the episodes with a first pass.
+    ``source`` "clean": a person with ``min_words`` words under their name cards and on their named subtitle lines gets a
+    voice of those words only, not of the whole clusters named after them (S02E05: a 151-cue cluster of several people
+    named Kimmi after one card made her voice an average of them all); "all": every word under the person's name."""
     episodes = [e for e in (load_episode(f, model) for f in folders) if e is not None]
     totals: Counter[str] = Counter()
     for episode in episodes:
@@ -381,33 +419,64 @@ def build_voices(folders: list[Path], model: str = "resnet293", min_words: int =
                        cast=cast or {})
     sums: dict[str, np.ndarray] = {}
     counts: Counter[str] = Counter()
+    card_sums: dict[str, np.ndarray] = {}  # words under name cards: a voice only for people with too few words otherwise
+    card_counts: Counter[str] = Counter()
+    label_sums: dict[str, np.ndarray] = {}  # words of named subtitle lines (for ``source`` "clean")
+    label_counts: Counter[str] = Counter()
     cards: dict[str, tuple[int, dict[str, Any]]] = {}
+    from stt.speakers import _is_mixed
+
     for episode in episodes:
         person: dict[int, str] = {}
-        for i, (name, word) in enumerate(zip(episode.word_names(), episode.words)):
-            if name and word.source != "ocr":
+        # a card the naming itself calls mixed ("contestant; mixed-speaker cluster", S02E05: 151 cues of several people
+        # named Kimmi) keeps its name but gives the person's voice no words: they would pull other people's words to it
+        mixed = {c["id"] for c in episode.cards if _is_mixed(c)}
+        for i, (name, word, raw) in enumerate(zip(episode.word_names(), episode.words, episode.raw_words)):
+            if name and word.source != "ocr" and raw.get("speaker") not in mixed:
                 person[i] = key_of[name]
         hints = subtitle_hints(episode)
+        labelled: dict[int, str] = {}
         for label, idx in (hints.persons.items() if hints else ()):
             key = keys.by_first_name(label)
+            if key is None:  # a person only the subtitles name ("DIRK:" on S01E01): a voice of their own when the cast
+                member = keys.own_member(label)  # says who it is (labels like "MAN" or "BOTH" are nobody's)
+                key = clean_name(member["name"]) if member else None
             if key is None:
                 continue
             for i in idx:
                 if episode.words[i].source != "ocr":
-                    person[i] = key  # a named subtitle line beats the speaker's name
+                    person[i] = labelled[i] = key  # a named subtitle line beats the speaker's name
         for key, idx in _group(person).items():
             sums[key] = sums.get(key, 0.0) + episode.emb[idx].sum(axis=0)
             counts[key] += len(idx)
+        for key, idx in card_words(episode, keys).items():
+            card_sums[key] = card_sums.get(key, 0.0) + episode.emb[idx].sum(axis=0)
+            card_counts[key] += len(idx)
+        for key, idx in _group(labelled).items():
+            label_sums[key] = label_sums.get(key, 0.0) + episode.emb[idx].sum(axis=0)
+            label_counts[key] += len(idx)
         for card in episode.cards:
             key = key_of.get(clean_name(card["name"])) if card.get("name") else None
-            if key and (card.get("words") or 0) > cards.get(key, (-1, {}))[0]:
-                cards[key] = (card.get("words") or 0, card)
+            weight = (card.get("words") or 0) - (10 ** 9 if card["id"] in mixed else 0)  # a clean card first
+            if key and weight > cards.get(key, (-(10 ** 10), {}))[0]:
+                cards[key] = (weight, card)
+    # People the names and subtitles give too few words (S01E01: Susan's interview fell into a mixed cluster) get a voice
+    # from the words under their name cards; the Viterbi pass then decides which words are theirs.
+    for key in sorted(set(card_counts) | set(label_counts)):
+        if card_counts[key] and counts[key] < min_words <= counts[key] + card_counts[key]:
+            sums[key] = sums.get(key, 0.0) + card_sums[key]
+            counts[key] += card_counts[key]
+            log.info("season voices: %s from name cards (%d words)", key, card_counts[key])
+        elif source == "clean" and card_counts[key] + label_counts[key] >= min_words:
+            sums[key] = card_sums.get(key, 0.0) + label_sums.get(key, 0.0)
+            counts[key] = card_counts[key] + label_counts[key]
+            log.info("season voices: %s from name cards and named lines only (%d words)", key, counts[key])
     kept = sorted((k for k in counts if counts[k] >= min_words), key=lambda k: (-counts[k], k))
     vectors = np.stack([sums[k] / (np.linalg.norm(sums[k]) + 1e-9) for k in kept]) if kept else np.zeros((0, 0))
     log.info("season voices: %d people from %d episodes (%d with fewer than %d words left out)", len(kept), len(episodes),
              len(counts) - len(kept), min_words)
     return SeasonVoices(kept, vectors, [counts[k] for k in kept], model, [e.folder.name for e in episodes],
-                        fingerprint(folders, model, min_words, cast),
+                        fingerprint(folders, model, min_words, cast, source),
                         {k: {f: v for f, v in cards[k][1].items() if f != "voice_bank"} for k in kept if k in cards},
                         aliases=dict(aliases or {}), cast=cast or {})
 
@@ -439,17 +508,18 @@ def _group(person: dict[int, str]) -> dict[str, list[int]]:
     return out
 
 
-def ensure_voices(folders: list[Path], path: Path | None, model: str, min_words: int, *, save: bool = True) -> SeasonVoices:
+def ensure_voices(folders: list[Path], path: Path | None, model: str, min_words: int, *, save: bool = True,
+                  source: str = "all") -> SeasonVoices:
     """The saved season voices when they were made from exactly these inputs, else built (and saved to ``path``)."""
     aliases, cast = cast_aliases(path), load_cast(path)
-    wanted = fingerprint(folders, model, min_words, cast)
+    wanted = fingerprint(folders, model, min_words, cast, source)
     if path is not None and path.exists():
         saved = SeasonVoices.load(path)
         if saved is not None and saved.fingerprint == wanted and saved.model == model:
             log.info("season voices: %s is up to date (%d people)", path.name, len(saved))
             saved.aliases, saved.cast = aliases, cast
             return saved
-    voices = build_voices(folders, model, min_words, aliases, cast)
+    voices = build_voices(folders, model, min_words, aliases, cast, source)
     voices.aliases, voices.cast = aliases, cast
     if save and path is not None:
         voices.save(path)
@@ -467,6 +537,13 @@ def _weighted_embedding(cards: list[dict[str, Any]]) -> list[float] | None:
     mean = sum(w * u for w, u in units) / sum(w for w, _ in units)
     scale = float(np.linalg.norm(max(prints, key=lambda wp: wp[0])[1]))
     return [float(x) for x in mean / (np.linalg.norm(mean) + 1e-9) * scale]
+
+
+def russian_names(folder: Path) -> dict[str, str]:
+    """Lower-case English name -> Russian spelling from the episode's glossary (``stt.speakers.russian_names``)."""
+    from stt.speakers import russian_names as names
+
+    return names(folder)
 
 
 def _cast_gender(voices: SeasonVoices, name: str) -> str | None:
@@ -488,6 +565,12 @@ def _card_for(label: str, ids: dict[str, str], cues: list[Cue], old: EpisodeData
         card = copy.deepcopy(base)
         card.update({"name": person, "diarizer_label": label, "diarizer_labels": labels_of.get(person, []),
                      "season_voice": True})
+        if not mine and person not in voices.cards:  # named only by subtitles or name cards: no speaker card in the season
+            gender = _cast_gender(voices, person)
+            if gender and card.get("gender") not in ("male", "female"):
+                card.update(gender=gender, gender_source="cast")
+            card.update(name_source="season_voices", label_ru=russian_names(old.folder).get(person.lower()),
+                        name_evidence="a season voice from named subtitle lines or name cards")
         card["on_screen"] = list(dict.fromkeys(s for c in mine for s in c.get("on_screen") or [])) or card.get("on_screen", [])
         embedding = _weighted_embedding(mine)
         if embedding is not None:
@@ -499,7 +582,8 @@ def _card_for(label: str, ids: dict[str, str], cues: list[Cue], old: EpisodeData
         card.update({"diarizer_label": label, "diarizer_labels": [label]})
         if label.startswith(OWN_STATE):  # a person only the subtitles name (the name is the cast's spelling when known)
             if not card.get("name"):
-                card.update(name=label[len(OWN_STATE):], name_source="subtitles",
+                name = label[len(OWN_STATE):]
+                card.update(name=name, name_source="subtitles", label_ru=russian_names(old.folder).get(name.lower()),
                             name_evidence="the subtitles name this voice: " + ", ".join(
                                 x[len(OWN_STATE):] for x in wanted[1:] or wanted))
             gender = _cast_gender(voices, label[len(OWN_STATE):])
@@ -510,6 +594,24 @@ def _card_for(label: str, ids: dict[str, str], cues: list[Cue], old: EpisodeData
         "first_seen": round(own[0].start + old.offset, 3) if own else None, "sample": own[0].text[:120] if own else None,
     })
     return card
+
+
+def _tribe_bias(old: EpisodeData, voices: SeasonVoices, prior: float) -> dict[str, np.ndarray]:
+    """State -> per-word score change of the season's people at the camps of other tribes (``stt.tribes``)."""
+    if prior <= 0 or not voices.cast or not (old.folder / "ocr.json").exists():
+        return {}
+    from stt.tribes import tribe_penalties
+
+    try:
+        cards = list(load_json(old.folder / "ocr.json").get("cards") or [])
+    except (OSError, ValueError, AttributeError):
+        return {}
+    members = {voices.person_of(str(p.get("name"))): str(p.get("name")) for p in voices.cast.get("cast") or [] if p.get("name")}
+    people = {members[name]: name for name in voices.names if name in members}  # cast name -> season person
+    changes = tribe_penalties(old.words, cards, voices.cast, list(people), prior)
+    if changes:
+        log.info("[%s] tribe camps: %d people less likely at other tribes' camps", old.folder.name, len(changes))
+    return {STATE_PREFIX + people[name]: vec for name, vec in changes.items()}
 
 
 def _overlap_s(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -546,8 +648,13 @@ def _tally(states: list[str | None], words: list[Word]) -> dict[str, int]:
 
 
 def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293", dry_run: bool = False,
-                  options: CueOptions | None = None) -> Result:
-    """Assign the words of one episode again over the season's people and rewrite its transcript (see the module doc)."""
+                  options: CueOptions | None = None, caption_bonus: float = TURN_BONUS, tribe_prior: float = 0.0,
+                  dissolve: str = "none") -> Result:
+    """Assign the words of one episode again over the season's people and rewrite its transcript (see the module doc).
+    ``caption_bonus``: the reward of a switch at a ">>" caption mark (a diarizer change gets ``TURN_BONUS``).
+    ``tribe_prior``: how much less likely a person is at the camp of a tribe they were never in (``stt.tribes``; 0: off).
+    ``dissolve``: unnamed clusters that are no state of their own, so their words go to the season's people: "mixed" (the
+    ones the naming calls a mix of voices), "unnamed" (all of them) or "none"."""
     from stt.speakers import update_records
     from stt.transcribe import assemble_cues, write_transcript
 
@@ -582,7 +689,11 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
     own = [w.speaker for w in assign_speakers(old.words, diarization, options)]
     clusters = _centroids(old.words, own, old.emb, RelabelParams())
     states: dict[str, np.ndarray] = {STATE_PREFIX + name: voices.vectors[j] for j, name in enumerate(voices.names)}
-    states.update({label: vec for label, vec in clusters.items() if label not in named_clusters})
+    from stt.speakers import _is_mixed
+
+    gone = {str(c["diarizer_label"]) for c in old.cards if not card_person[c["id"]]
+            and (dissolve == "unnamed" or (dissolve == "mixed" and _is_mixed(c)))}
+    states.update({label: vec for label, vec in clusters.items() if label not in named_clusters and label not in gone})
     fixed: dict[int, str] = {}
     hints = subtitle_hints(old)
     own_lines: dict[str, list[int]] = defaultdict(list)  # a name only the subtitles give -> its words
@@ -601,10 +712,12 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
             total = old.emb[usable].sum(axis=0)
             states[OWN_STATE + name] = total / (np.linalg.norm(total) + 1e-9)
             fixed.update({i: OWN_STATE + name for i in usable})
-    turns = {i for i in range(1, n) if own[i] and own[i - 1] and own[i] != own[i - 1]}
-    turns |= set(hints.turns) if hints else set()  # the ">>" marks of captions
+    turns = {i: TURN_BONUS for i in range(1, n) if own[i] and own[i - 1] and own[i] != own[i - 1]}
+    for i in (hints.turns if hints else ()):  # the ">>" marks of captions; the larger bonus where both say so
+        turns[i] = max(turns.get(i, 0.0), caption_bonus)
     params = RelabelParams(switch_penalty=SWITCH_PENALTY, turn_bonus=TURN_BONUS)
-    path = _viterbi(old.words, [None] * n, old.emb, states, params, fixed=fixed, turns=turns)
+    bias = _tribe_bias(old, voices, tribe_prior)
+    path = _viterbi(old.words, [None] * n, old.emb, states, params, fixed=fixed, turns=turns, bias=bias)
     for i, word in enumerate(old.words):
         if word.source == "ocr":
             path[i] = old_state[i]  # on-screen captions keep the speaker they had (the viterbi pass leaves them open)
@@ -620,6 +733,8 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
         gender = str(base.get("gender") or "unknown")
         if gender not in ("male", "female") and label.startswith(OWN_STATE):  # the cast knows the person's gender
             gender = _cast_gender(voices, label[len(OWN_STATE):]) or gender
+        if gender not in ("male", "female") and person:
+            gender = _cast_gender(voices, person) or gender
         return gender
 
     cues, ids, records = assemble_cues(words, diarization, options, offset=old.offset, gender_of=gender_of)
@@ -718,14 +833,18 @@ def prepare_embeddings(folders: list[Path], model: str, device: str = "cuda") ->
 
 
 def apply_season(all_folders: list[Path], targets: list[Path], voices_path: Path | None, *, model: str = "resnet293",
-                 min_words: int = MIN_WORDS, dry_run: bool = False) -> dict[str, Result]:
-    """Build (or reuse) the season voices from ``all_folders`` and apply them to ``targets``. Returns a Result per folder."""
-    prepare_embeddings(all_folders, model)
-    voices = ensure_voices(all_folders, voices_path, model, min_words, save=not dry_run)
+                 min_words: int = MIN_WORDS, dry_run: bool = False, caption_bonus: float = TURN_BONUS,
+                 tribe_prior: float = 0.0, dissolve: str = "none", voice_source: str = "all") -> dict[str, Result]:
+    """Build (or reuse) the season voices from ``all_folders`` and apply them to ``targets``. Returns a Result per folder.
+    A dry run computes no word embeddings (episodes without them are left out) and writes nothing."""
+    if not dry_run:
+        prepare_embeddings(all_folders, model)
+    voices = ensure_voices(all_folders, voices_path, model, min_words, save=not dry_run, source=voice_source)
     results: dict[str, Result] = {}
     for folder in targets:
         try:
-            results[folder.name] = apply_episode(folder, voices, model=model, dry_run=dry_run)
+            results[folder.name] = apply_episode(folder, voices, model=model, dry_run=dry_run, caption_bonus=caption_bonus,
+                                                 tribe_prior=tribe_prior, dissolve=dissolve)
         except Exception as error:  # noqa: BLE001 - one episode must not stop the season; the first pass stays
             log.exception("[%s] season voices failed", folder.name)
             results[folder.name] = Result("skipped", f"error: {error}")
@@ -748,6 +867,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print what would move; write nothing")
     parser.add_argument("--model", default="resnet293", help="Word embedding model (words.emb.<model>.npz)")
     parser.add_argument("--min-words", type=int, default=MIN_WORDS, help="Words a person needs over the season")
+    parser.add_argument("--caption-bonus", type=float, default=TURN_BONUS,
+                        help="Reward of a speaker switch at a '>>' caption mark (a diarizer change gets %(default)s)")
+    parser.add_argument("--voice-source", choices=["all", "clean"], default="all",
+                        help="clean: a person's voice from the words under their name cards and named lines when enough")
+    parser.add_argument("--dissolve", choices=["none", "mixed", "unnamed"], default="none",
+                        help="Unnamed clusters whose words go to the season's people: the mixed ones, all, or none")
+    parser.add_argument("--tribe-prior", type=float, default=0.0,
+                        help="How much less likely a person is at another tribe's camp (stt.tribes); 0: off")
     parser.add_argument("--voices", type=Path, default=None, help="Where the season voices are saved (default: <root>/<root name>.season_voices.npz)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
@@ -760,7 +887,9 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"No episode folders with words.json and speakers.json in {root}")
     path = args.voices or root / f"{root.resolve().name}.season_voices.npz"
     for name, result in apply_season(everything, targets, path, model=args.model, min_words=args.min_words,
-                                     dry_run=args.dry_run).items():
+                                     dry_run=args.dry_run, caption_bonus=args.caption_bonus,
+                                     tribe_prior=args.tribe_prior, dissolve=args.dissolve,
+                                     voice_source=args.voice_source).items():
         print(summary(name, result))  # CLI output
     if args.dry_run:
         print("dry run: nothing written")

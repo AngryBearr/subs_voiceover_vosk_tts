@@ -225,6 +225,39 @@ class OcrTest(unittest.TestCase):
                          {"start": 40.0, "end": 41.0, "kind": "name_card", "text": "NOBODY"}]}
         self.assertEqual(on_screen_hints(ocr, words, diarization), {"B": ["name_card: BRADY"]})
 
+    def test_on_screen_hints_take_the_multi_line_name_cards(self) -> None:
+        """S01 shows "Rudy" over "Retired Navy SEAL - Tagi Tribe" in mixed case: only stt.onscreen has those cards."""
+        diarization = Diarization(turns=[Turn(100.0, 110.0, "R"), Turn(200.0, 210.0, "B")])
+        words = [Word(100.0 + 0.4 * i, 100.3 + 0.4 * i, "w", speaker="R") for i in range(20)]
+        words += [Word(200.0 + 0.4 * i, 200.3 + 0.4 * i, "w", speaker="B") for i in range(20)]
+        ocr = {"cards": [{"start": 201.0, "end": 204.0, "kind": "name_card", "text": "B.B."}]}
+        screen = [{"start": 111.0, "end": 114.5, "kind": "name_card", "text": "Rudy", "descriptor": "Retired Navy SEAL - Tagi Tribe"},
+                  {"start": 211.0, "end": 214.0, "kind": "name_card", "text": "B.B.", "descriptor": None},  # the OCR card again
+                  {"start": 150.0, "end": 152.0, "kind": "caption", "text": "Hello"}]
+        self.assertEqual(on_screen_hints(ocr, words, diarization), {"B": ["name_card: B.B."]})
+        self.assertEqual(on_screen_hints(ocr, words, diarization, screen_items=screen, offset=10.0),
+                         {"R": ["name_card: Rudy (Retired Navy SEAL - Tagi Tribe)"], "B": ["name_card: B.B."]})
+
+    def test_on_screen_hints_skip_title_rolls_and_places(self) -> None:
+        """S01E01: the opening roster (a name every 1.5-2 s over the narration) gave six names to one voice."""
+        diarization = Diarization(turns=[Turn(0.0, 30.0, "N"), Turn(40.0, 60.0, "R"), Turn(70.0, 75.0, "T")])
+        words = [Word(1.0 + 4 * i, 1.4 + 4 * i, "w", speaker="N") for i in range(7)]  # narration, 1 word per card
+        words += [Word(40.0 + 0.4 * i, 40.3 + 0.4 * i, "w", speaker="R") for i in range(30)]  # an interview
+        words += [Word(70.0 + 0.4 * i, 70.3 + 0.4 * i, "w", speaker="T") for i in range(10)]
+        roster = [{"start": 2.0 * i, "end": 2.0 * i + 1.8, "kind": "name_card", "text": name}
+                  for i, name in enumerate(["B.B.", "COLLEEN", "GERVASE", "GRETCHEN", "JENNA"])]
+        ocr = {"cards": roster + [
+            {"start": 41.0, "end": 44.5, "kind": "name_card", "text": "RUDY"},
+            {"start": 47.0, "end": 50.0, "kind": "name_card", "text": "RICHARD"},
+            {"start": 53.0, "end": 56.0, "kind": "name_card", "text": "SONJA"},  # vote cards, but people talk: kept
+            {"start": 58.0, "end": 60.0, "kind": "name_card", "text": "SUE"},
+            {"start": 70.0, "end": 73.0, "kind": "name_card", "text": "TAGI TRIBE"},
+            {"start": 71.0, "end": 74.0, "kind": "name_card", "text": "VULA", "descriptor": "DAY4"},
+            {"start": 72.0, "end": 74.0, "kind": "name_card", "text": "TRIBAL COUNCIL"},
+            {"start": 72.0, "end": 74.0, "kind": "lower_third", "text": "VULA TRIBE"}]}
+        self.assertEqual(on_screen_hints(ocr, words, diarization),
+                         {"R": ["name_card: RUDY", "name_card: RICHARD", "name_card: SONJA", "name_card: SUE"]})
+
 
 class RunTest(unittest.TestCase):
     def _episode(self, tmp: str, force: str | None = None) -> Episode:

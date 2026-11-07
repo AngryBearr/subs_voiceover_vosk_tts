@@ -169,9 +169,13 @@ def _centroids(words: list[Word], labels: list[str | None], emb: np.ndarray,
 
 
 def _viterbi(words: list[Word], own: list[str | None], emb: np.ndarray, centroids: dict[str, np.ndarray],
-             params: RelabelParams, fixed: dict[int, str] | None = None, turns: set[int] | None = None) -> list[str | None]:
+             params: RelabelParams, fixed: dict[int, str] | None = None,
+             turns: set[int] | dict[int, float] | None = None,
+             bias: dict[str, np.ndarray] | None = None) -> list[str | None]:
     """The best speaker per word. ``fixed``: word index -> state it must take (a subtitle names the speaker).
-    ``turns``: words where the subtitles open another voice; a switch there is rewarded like a diarizer change."""
+    ``turns``: words where the subtitles open another voice; a switch there is rewarded like a diarizer change
+    (``params.turn_bonus``, or a bonus per word when ``turns`` maps word index -> bonus). ``bias``: state -> a score
+    change per word (``stt.tribes``: the people of another tribe at a camp)."""
     # states: labels with a centroid, then the other labels seen (they only keep their own words)
     states: list[str | None] = sorted(centroids)
     states += [s for s in dict.fromkeys(own) if s not in centroids and s is not None]
@@ -190,6 +194,9 @@ def _viterbi(words: list[Word], own: list[str | None], emb: np.ndarray, centroid
         emis[i, :len(cent)] = sims[i]
         if own[i] is not None:
             emis[i, index[own[i]]] += params.prior
+    for state, change in (bias or {}).items():
+        if state in index:
+            emis[:, index[state]] += change
     for i, state in (fixed or {}).items():
         emis[i, :] = _FORBIDDEN
         emis[i, index[state]] = 0.0
@@ -198,7 +205,7 @@ def _viterbi(words: list[Word], own: list[str | None], emb: np.ndarray, centroid
     for i in range(1, n):
         gap = max(words[i].start - words[i - 1].end, 0.0)
         if turns is not None and i in turns:
-            penalty = -params.turn_bonus
+            penalty = -(turns[i] if isinstance(turns, dict) else params.turn_bonus)
         elif own[i] != own[i - 1] and own[i] is not None and own[i - 1] is not None:
             penalty = -params.change_prior  # the diarizer changes speaker here: a switch is rewarded
         else:

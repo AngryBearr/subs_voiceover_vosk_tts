@@ -271,3 +271,28 @@ def test_captions_with_many_host_lines_are_labels_and_keep_their_marks(tmp_path:
     assert info.kind == "labels"
     assert len(hints.persons) == 1
     assert len(hints.turns) == 50
+
+
+def test_own_state_is_its_person_even_with_one_named_line() -> None:
+    """``plan_states`` makes "P:SEAN" from Sean's named words: the state is his even when one line holds them all."""
+    hints = WordHints(state_of={"SEAN": "P:SEAN", "ONCE": "Z"})
+    info = SubtitleInfo("labels", 0.0, 2, 0, ["SEAN", "ONCE"])
+    assert subtitle_persons(hints, info) == {"P:SEAN": "SEAN"}  # a cluster Z with one line still needs two
+    assert evidence(hints, info) == {"P:SEAN": ["caption label: SEAN x1"]}
+
+
+def test_subtitle_name_takes_the_russian_spelling_of_the_glossary(tmp_path: Path) -> None:
+    from stt.runner import save_json
+    from stt.speakers import russian_names
+
+    save_json(tmp_path / "glossary.json", [
+        {"en": "Sean Kenniff", "variants": ["Sean"], "ru": "Шон Кеннифф", "type": "person"},
+        {"en": "Tagi", "variants": [], "ru": "Таги", "type": "tribe"}])
+    names = russian_names(tmp_path)
+    assert names == {"sean kenniff": "Шон Кеннифф", "sean": "Шон Кеннифф"}
+    speakers = [{"id": "S1", "subtitle_person": "SEAN", "name": None, "label_ru": "Мастер костра"},
+                {"id": "S2", "subtitle_person": "DIRK", "name": None, "label_ru": "Скептик Рича"},
+                {"id": "S3", "subtitle_person": "RICH", "name": "Richard Hatch", "label_ru": "Ричард Хэтч"}]
+    apply_subtitle_names(speakers, None, names)
+    assert [s["label_ru"] for s in speakers] == ["Шон Кеннифф", None, "Ричард Хэтч"]  # no glossary spelling: the name shows
+    assert russian_names(tmp_path / "missing") == {}

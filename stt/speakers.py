@@ -127,17 +127,39 @@ def apply_cards(speakers: list[dict[str, Any]], cards: list[dict[str, Any]]) -> 
         )
 
 
-def apply_subtitle_names(speakers: list[dict[str, Any]], cast: dict[str, Any] | None = None) -> None:
+def russian_names(folder: Path) -> dict[str, str]:
+    """Lower-case English name or variant -> Russian spelling, from the episode's glossary (``glossary.json``, people)."""
+    path = folder / "glossary.json"
+    try:
+        entries = load_json(path) if path.exists() else []
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or entry.get("type") != "person" or not entry.get("ru") or not entry.get("en"):
+            continue
+        for spelling in [entry["en"], *(entry.get("variants") or [])]:
+            out.setdefault(str(spelling).lower(), str(entry["ru"]))
+    return out
+
+
+def apply_subtitle_names(speakers: list[dict[str, Any]], cast: dict[str, Any] | None = None,
+                         ru_names: dict[str, str] | None = None) -> None:
     """A speaker whose lines the subtitles mostly name ("SANDRA:", ``subtitle_person`` from stt.transcribe) gets that name
     when the LLM left it open; with the season ``cast`` a first name, nickname or initials ("B.B") become the cast
-    member's name. No LLM call: the card's own name, a voice-bank name or an override win."""
+    member's name. No LLM call: the card's own name, a voice-bank name or an override win. The Russian label becomes
+    the name's glossary spelling (``ru_names``, see ``russian_names``); without one it is dropped, so the English name
+    shows instead of the LLM's description of an unnamed voice (S01E01: Sean Kenniff shown as «Мастер костра»)."""
     from stt.cast import member_for_label
 
     for speaker in speakers:
         person = speaker.get("subtitle_person")
         if person and not speaker.get("name"):
             member = member_for_label(person, cast) if cast else None
-            speaker.update({"name": member["name"] if member else person.title(), "name_source": "subtitles",
+            name = member["name"] if member else person.title()
+            known = ru_names or {}
+            label_ru = known.get(name.lower()) or known.get(person.lower()) or known.get(name.split()[0].lower())
+            speaker.update({"name": name, "name_source": "subtitles", "label_ru": label_ru,
                             "name_evidence": f"the subtitles name this voice: {person}"})
 
 
@@ -162,7 +184,9 @@ def apply_cast_host(speakers: list[dict[str, Any]], cast: dict[str, Any] | None,
     if host is None or not host.get("name"):
         return
     for speaker in speakers:
-        role = str(speaker.get("role") or "")
+        # the role's first clause says who it is; a note after it ("Host and narrator; cluster also includes contestant
+        # dialogue", S01E01 without subtitle names) left the host unnamed: 168 lines in a generic voice
+        role = re.split(r"[;(]", str(speaker.get("role") or ""))[0]
         if (speaker.get("name") or not speaker.get("cues") or speaker["id"] in protected
                 or not HOST_ROLE.search(role) or NOT_HOST_ROLE.search(role)):
             continue
@@ -261,7 +285,7 @@ def name_speakers(
     override_path = folder / "speakers.override.json"
     overrides = load_json(override_path) if override_path.exists() else {}
     protected = frozenset(i for i, o in overrides.items() if "name" in o)  # a person's name is never replaced
-    apply_subtitle_names(speakers, cast)
+    apply_subtitle_names(speakers, cast, russian_names(folder))
     if bank is not None:
         for note in voice_bank.resolve(speakers):
             log.info("voice bank: %s", note)

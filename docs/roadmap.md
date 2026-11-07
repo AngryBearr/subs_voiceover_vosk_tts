@@ -5,6 +5,64 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan of 7.11.2026: who speaks in the old seasons (consilium GPT-6 Astra + Claude Fable + Opus)
+
+Asked by the user: old seasons (SD audio, subtitles with few or no names) put many lines on the wrong or a shared voice
+(S01: 22% "mixed voices"). Consilium findings on S01E01: DiariZen finds 8 voices for 17 people; centroids from a
+person's own subtitle-named words find the right person for 85% of those words, DiariZen's clusters 47% (S51: 80 / 62%):
+the grouping and the missing name evidence are the limit, not the voice prints. The S1 audio is narrowband (AAC 48 kbit/s,
+nothing above ~6 kHz). Closed on the way: fan transcripts (the Survivor wiki has none for old seasons), ERes2NetV2 /
+ECAPA2 / WavLM-SV, new diarizers, re-training for old audio, bandwidth extension. Kept for later: ReDimNet2+
+(`lab260/redimnet2-plus`, Apache-2.0, trained for codec and channel shift).
+
+0. **Harness** (`output/exp_old_seasons/`, not in git): S01E01-E03 (tuning), S02E03, S02E05, S05E01, S05E04 (test); the
+   curated base subtitles with every "NAME:" removed (`turns`: only ">>" left, like most old seasons) or the names of every
+   other scene removed (folds `A`, `B`); stock ResNet293 (r3 was trained on S1, S2, S5-S9); the code of `origin/develop`
+   against the new code; score: hidden named lines on their person (`score.py`). Regression set: S48E01-E04, S51E01-E02
+   with the production r3 voices (`sets/modern`).
+1. **Fixes**: a state the subtitles made for a person ("P:SEAN") is that person's even with one named line (S01E01 Sean,
+   Dirk stayed unnamed and never reached the season voices); a person only the subtitles or the cast name gets a season
+   voice; the Russian label of a subtitle name is its glossary spelling (not the LLM's «Мастер костра»); ">>" marks can get
+   their own bonus in the season voices (`season_voices.caption_bonus`, default unchanged 0.15); a dry run computes nothing;
+   the host is named by the first clause of the LLM's role ("Host and narrator; cluster also includes contestant
+   dialogue" left Jeff unnamed on S01E01 without subtitle names: 168 lines in a generic voice).
+2. **Cards**: the cards of a title roll (opening roster, end credits) and of tribes, days and places are no evidence of who
+   talks (`assemble.title_roll_cards`, `place_card`): on S01E01 the roster gave six names to one voice.
+3. **Name-card voices**: a person with too few words otherwise gets a season voice from the words under their name cards
+   (Susan's interview fell into the mixed cluster); the Viterbi pass decides which words are theirs.
+4. **Tribe camps** (`stt.tribes`, `season_voices.tribe_prior`, off): after a tribe's place card the people of other
+   tribes are a little less likely; the cast prompt now asks for the tribes and the episode a contestant left. Measured:
+   no gain, kept off.
+
+5. **Interview cards of old seasons** (`assemble.all_cards`): S01 shows "Rudy" over "Retired Navy SEAL - Tagi Tribe" in
+   mixed case; only `onscreen.json` had those cards, so neither the naming nor the card voices ever saw an interview card of
+   S1. **"JEFF V."** (two Jeffs in S02) now finds Jeff Varner in the cast (`cast.member_for_label`).
+6. **Dissolving mixed clusters** (`season_voices.dissolve`, off): the words of a cluster the naming calls mixed go to the
+   season's people. Old seasons with half the names: 69.2 -> 79.4%; without names about equal; S48/S51 +0.3/+1.1.
+
+7. **Clean voices** (`season_voices.voice_source` "clean", off): a person's voice from card and named-line words only.
+   Old seasons without names +2.4, with half the names +0.4 / S01 -3; S48 / S51 -1.9 / -4.3: not taken.
+8. **A refused fusion batch** keeps the first recognition (`fusion.fuse`): a content filter on S01E05 stopped the whole
+   season preparation.
+
+Results (one run each; hidden named lines on their person; base = `origin/develop` at 3042314, new = 1-3 and 5 with
+`dissolve: mixed`):
+
+| | base | new |
+|---|---:|---:|
+| Old seasons, no names in the subtitles: S02/S05 (710 lines) | 61.0% | 70.6% |
+| ... S01 (207 lines) | 75.8% | 86.0% |
+| Old seasons, half the names hidden (fold A): S02/S05 (471) | 71.3% | 77.9% |
+| ... S01 (98) | 77.6% | 89.8% |
+| The other half of the names hidden (fold B): S02/S05 (239) / S01 (109) | 72.0 / 83.5% | 79.9 / 85.3% |
+| S48E01-E04 / S51E01-E02, half the names hidden, r3 | 84.0 / 78.1% | 84.3 / 78.9% |
+| The shared voice, old seasons without names / with half | 23.7 / 15.3% | 2.4 / 0% |
+
+The LLM naming is not repeatable (one episode moves up to 6 points between runs): the gains hold on every group, single
+episodes do not. Closed: tribe camps (+1 / -0.3..-1.2), ">>" bonus 0.3 (no change), clean voices (above).
+Listening: Season 1 apart from `STT_Season 1` in `Survivor/STT_listen_2026-11-07_speakers/` (E01 voiced, `dissolve: mixed`).
+Listened to and approved by the user on 7.11.2026: in develop, `season_voices.dissolve: "mixed"` on by default.
+
 ## Plan of 5.11.2026: one episode in about an hour; preparing a season; one subtitle base
 
 Measured (S48, 64-min episodes, nothing cached): about 75 min per episode. Transcribe 12 (OCR 5,

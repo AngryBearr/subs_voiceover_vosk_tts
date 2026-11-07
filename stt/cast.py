@@ -63,7 +63,10 @@ Return every person who speaks in the season: hosts, narrators, contestants (all
 those voted out early) and regular guests. For each give the name the person goes by on the show
 in its most common spelling ("Dale Wentworth", not "Bradley \"Dale\" Wentworth"), other
 spellings/nicknames, gender ("male"/"female"), role, and relations to other
-cast members (couple, twins, mother of, ...). Do not invent people; omit what you cannot verify.
+cast members (couple, twins, mother of, ...). For a contestant the role also names every tribe they
+were in, in order, and how and in which episode they left: "Contestant; Pagong and Rattana tribes;
+voted out in episode 9, jury member" or "Contestant; Tagi tribe; winner".
+Do not invent people; omit what you cannot verify.
 Answer JSON only: {"show": "...", "season": "...", "cast": [{"name": "...", "aliases": [...],
 "gender": "...", "role": "...", "relations": "..."}], "sources": ["<url>", ...]}"""
 
@@ -210,6 +213,12 @@ def member_for_label(label: str, cast: dict[str, Any]) -> dict[str, Any] | None:
     words = [p for p in people if key in {_label_key(w) for n in [p["name"], *(p.get("aliases") or [])] for w in n.split()}]
     if words:
         return words[0] if len(words) == 1 else None
+    parts = [_label_key(w) for w in label.replace(".", ". ").split() if _label_key(w)]
+    if len(parts) == 2 and len(parts[1]) == 1:  # "JEFF V." of two Jeffs (S02): the first name and the surname's initial
+        initial = [p for p in people if len(p["name"].split()) > 1 and _label_key(p["name"].split()[0]) == parts[0]
+                   and _label_key(p["name"].split()[-1]).startswith(parts[1])]
+        if len(initial) == 1:
+            return initial[0]
     return find_member(label.title(), cast)
 
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from stt.boundaries import WordHints
+from stt.boundaries import OWN_STATE, WordHints
 from stt.subtitles import HOST, labelled, names_person, pin_pieces, read_pieces, subtitle_kind, turn_marks, turn_starts
 from stt.types import Word
 
@@ -67,7 +67,10 @@ def build_hints(path: Path, words: list[Word], start_s: float = 0.0) -> tuple[Wo
 
 
 def state_persons(hints: WordHints, info: SubtitleInfo) -> dict[str, tuple[str, int]]:
-    """State -> (person, named lines) for the states whose named lines are mostly one person's."""
+    """State -> (person, named lines) for the states whose named lines are mostly one person's. A state of a person's own
+    ("P:SEAN", made by ``plan_states`` from that person's named words, at least ``WordHints.min_words`` of them) is that
+    person's even with a single named line: on S01E01 "P:SEAN" and "P:DIRK" stayed unnamed, so the season voices never
+    got them."""
     lines: dict[str, Counter[str]] = defaultdict(Counter)
     for person in info.line_persons:
         state = hints.state_of.get(person)
@@ -76,7 +79,8 @@ def state_persons(hints: WordHints, info: SubtitleInfo) -> dict[str, tuple[str, 
     out = {}
     for state, votes in lines.items():
         person, n = votes.most_common(1)[0]
-        if n >= MIN_EVIDENCE_LINES and n / sum(votes.values()) >= MIN_EVIDENCE_SHARE:
+        own = state == OWN_STATE + person
+        if own or (n >= MIN_EVIDENCE_LINES and n / sum(votes.values()) >= MIN_EVIDENCE_SHARE):
             out[state] = (person, n)
     return out
 
