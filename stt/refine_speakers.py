@@ -55,6 +55,11 @@ REDIMNET2: dict[str, dict[str, str]] = {
     "redimnet2-b6-vb2": {"model_name": "b6", "train_type": "lm", "dataset": "vb2+vox2_v0"},  # + VoxBlink2
 }
 
+# ReDimNet2+ (lab260, weights Apache-2.0, code MIT): the ReDimNet2-B6 backbone fine-tuned for codec and channel shift
+# (VoxCeleb1-O 0.35% EER, a 26-condition codec stress test 1.99% vs 7.21% for the public ReDimNet2). Not in git: its code
+# (github.com/lab260ru/redimnet2-plus) and weights (huggingface.co/lab260/redimnet2-plus) under models/speaker/redimnet2-plus/
+REDIMNET2_PLUS_DIR = "models/speaker/redimnet2-plus"
+
 Embed = Callable[[np.ndarray], np.ndarray]
 
 
@@ -79,6 +84,8 @@ def model_available(name: str) -> bool:
     """False only for a model whose weights live in this repository's ``models`` and are missing (they are not in git)."""
     if name == "resnet293-ft" and runtime_checkpoint() is not None:
         return True
+    if name == "redimnet2-plus":
+        return (Path(__file__).resolve().parents[1] / REDIMNET2_PLUS_DIR / "repo" / "weights" / "pytorch_model_fsdp.bin").exists()
     repo = WESPEAKER.get(name, ("", ""))[0]
     return not repo.startswith("local:") or (Path(__file__).resolve().parents[1] / repo.removeprefix("local:")).exists()
 
@@ -156,6 +163,47 @@ class ReDimNet2Torch:
         return _embed_batches(self, np.asarray(wavs, dtype=np.float32), size)
 
 
+class ReDimNet2Plus:
+    """ReDimNet2+ (``REDIMNET2_PLUS_DIR``): 16 kHz audio -> unit embedding (192 values); its own mel front end."""
+
+    def __init__(self, device: str = "cuda") -> None:
+        import torch
+
+        root = Path(__file__).resolve().parents[1] / REDIMNET2_PLUS_DIR / "repo"
+        weights = root / "weights" / "pytorch_model_fsdp.bin"
+        if not weights.exists():
+            raise FileNotFoundError(f"Speaker model redimnet2-plus: {weights} is missing (clone lab260ru/redimnet2-plus there)")
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from asv.models.redimnet2 import ReDimNet2Encoder
+
+        state = torch.load(weights, map_location="cpu", weights_only=True)
+        prefix = "_orig_mod.encoder."
+        state = {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
+        head = state["model.backbone.head.weight"]  # the shape tells the variant, as the authors' submission code reads it
+        encoder = ReDimNet2Encoder("b6", pretrained=False,
+                                   model_overrides={"out_channels": int(head.shape[0]), "return_2d_output": head.ndim == 4})
+        encoder.load_state_dict(state, strict=True)
+        log.info("speaker weights loaded: model=redimnet2-plus path=%s sha256=%s", weights,
+                 hashlib.sha256(weights.read_bytes()).hexdigest())
+        self.encoder = encoder.to(device).eval()
+        self.device = device
+        self._torch = torch
+
+    def model(self, wavs: Any) -> Any:
+        return self.encoder(self.encoder.spec_frontend(wavs))
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        wav = self._torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))[None].to(self.device)
+        with self._torch.inference_mode():
+            vector = self.model(wav)[0].float().cpu().numpy()
+        return vector / (np.linalg.norm(vector) + 1e-9)
+
+    def batch(self, wavs: np.ndarray, size: int = 64) -> np.ndarray:
+        """Unit embeddings (n, d) of equal-length windows (n, L)."""
+        return _embed_batches(self, np.asarray(wavs, dtype=np.float32), size)
+
+
 def _embed_batches(embedder: Any, wavs: np.ndarray, size: int) -> np.ndarray:
     """Run ``embedder.model`` over ``wavs`` in chunks of ``size``; rows are L2-normalised."""
     torch = embedder._torch
@@ -171,6 +219,8 @@ def _embed_batches(embedder: Any, wavs: np.ndarray, size: int) -> np.ndarray:
 def make_embedder(name: str, device: str = "cuda") -> Embed:
     if name in REDIMNET2:
         return ReDimNet2Torch(name, device)
+    if name == "redimnet2-plus":
+        return ReDimNet2Plus(device)
     if name == "pyannote":
         from stt.voice_bank import SegmentEmbedder
 
