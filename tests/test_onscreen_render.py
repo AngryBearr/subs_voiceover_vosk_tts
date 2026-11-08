@@ -233,6 +233,17 @@ def test_mux_tracks_video_source_input_follows_ass(monkeypatch: pytest.MonkeyPat
     assert ("-map", "4:v:0") in zip(cmd, cmd[1:])
 
 
+def test_mux_tracks_generates_timestamps_only_for_avi(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+    monkeypatch.setattr(mix.subprocess, "run", lambda cmd, **kw: seen.append(list(cmd)))
+    monkeypatch.setattr(Path, "replace", lambda self, target: None)
+    mix.mux_tracks(tmp_path / "v.AVI", [(tmp_path / "a.m4a", "Русский")], tmp_path / "o.mkv", None)
+    cmd = seen[0]
+    assert ("-fflags", "+genpts") in zip(cmd, cmd[1:])
+    assert cmd.index("+genpts") < cmd.index(str(tmp_path / "v.AVI"))  # an input option: before the video's -i
+    assert "+genpts" not in _run_mux(monkeypatch, tmp_path, srt=None)
+
+
 def _make_video(path: Path, seconds: int = 3) -> None:
     subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                     f"color=c=black:size=320x240:rate=25:duration={seconds}", "-c:v", "libx264", "-pix_fmt",

@@ -240,7 +240,9 @@ def mux_tracks(video: Path, tracks: list[tuple[Path, str]], out: Path, srt: Path
     piece = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}"] if start and duration else []
     # A separate video file keeps its own start time: without -copyts ffmpeg moves each input to zero on its own
     keep_times = ["-copyts"] if video_source and not piece else []
-    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *keep_times, *piece, "-i", str(video)]
+    # AVI (The Amazing Race S1) stores no time stamps for its MP3 packets: matroska refuses them unless ffmpeg makes them
+    stamps = ["-fflags", "+genpts"] if video.suffix.lower() == ".avi" else []
+    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *keep_times, *piece, *stamps, "-i", str(video)]
     for path, _ in tracks:
         cmd += ["-i", str(path)]
     if srt and not piece:  # subtitle times are on the episode timeline
