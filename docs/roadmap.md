@@ -5,6 +5,31 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Trial of 8.11.2026: The Amazing Race (another show, unchanged pipeline)
+
+Asked by the user: how the pipeline works on another show. S01E01 (2001, SD AVI with MP3, online subtitles with 94
+"NAME:" labels) and S20E01 (2012, HD, plain subtitles), the develop pipeline as it is, three voice-overs, one episode per
+season. Finished files: `The Amazing Race/STT_trial_2026-11-08/STT_Season 01|20/`. Time: ~1 h per episode with all three
+engines (ESpeech 21-24 min of it). Fixed on the way: an AVI source has MP3 packets without time stamps, the final mux
+failed (`mux_tracks` now adds `-fflags +genpts` for AVI).
+
+What went well: the cast (LLM) lists the host and all 22 racers of both seasons (S20 with two extra names), the host and the frequent racers are named
+and voiced; timing fits (S01: 2 lines of 747 needed shorter text), the speech check found few faults (mean CER 1.2% /
+2.5%); the S1 band is 11.5 kHz, no widening needed.
+
+What the show breaks:
+- **Team cards.** The Amazing Race captions a team ("ROB & BRENNAN", "BILL & JOE"), not a person; the pipeline treats a
+  two-name card as mixed and takes no voice evidence from it. Not separated: S01 Brennan, Joe, Karyn, Kim (4 of 22
+  racers); S20 Elliot and Andrew (twins), Nary, Jamie, Vanessa, Dave Gregg (6 of 22). Their lines went to the partner or to
+  a same-gender racer; an "Instructor" took 37 lines of several people in the bungee scenes.
+- **Group scenes.** 22 racers shout short lines at one task (S20 balloons): there the speakers are often wrong.
+- **Reference clips.** The interviews are of both team members together, so a solo 8-10 s stretch is rare: own clone
+  voice for 11 of 19 named people on S01 (39% of the F5 lines in a TeraTTS stand-in voice), 12 of 18 on S20 (26%).
+
+Ideas, not started: a team card names two candidates (gender splits a mixed team; the scene after it belongs to that team,
+like the tribe prior but much stronger); reference clips cut from the person's own words inside a team interview; a whole
+season (more episodes per person, fewer racers later).
+
 ## Plan of 7.11.2026: who speaks in the old seasons (consilium GPT-6 Astra + Claude Fable + Opus)
 
 Asked by the user: old seasons (SD audio, subtitles with few or no names) put many lines on the wrong or a shared voice
