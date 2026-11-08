@@ -761,6 +761,13 @@ stage.
    (without `--start` it takes the place where speech meets the loudest original sound, `loudest_spot`). To apply new
    levels to a finished episode without voicing again: `stt.run <video> --engine f5,teratts,vosk --force mix`
    (stages before `mix` that finished earlier are skipped; only the mix and the video are rebuilt).
+   **Old seasons' band** (since 8.11.2026). ESpeech copies the acoustics of its reference, so the clones of a season recorded
+   with a narrow band (S1: AAC 48 kbit/s, nothing above ~5.2 kHz) end there too. When the median band edge of the episode's
+   reference clips (`speaker_voices.f5.json`) is under `mix.widen.max_band_hz` (7600), the mix takes
+   `voiceover.f5/export/track.wide.wav`: the voice track through LavaSR v2 (`stt.widen`; the band above the edge drawn,
+   48 kHz, no denoiser; a 45-min track in ~25 s on the CPU), made once and reused. It needs `lava_env`
+   (`bash scripts/setup_envs.sh lava`; without it the track is mixed as before, with a warning). Blind listening: every
+   one of 12 S01 picks was a widened version; S48 (9.7-11.6 kHz references) is left alone. Off: `"widen": {"enabled": false}`.
    **Smaller video.** `"mix": {"video": {"compress": true, "target_gb": 2.0, "codec": "hevc_nvenc",
    "original_audio_kbps": 160}}` (off by default) re-encodes the picture with the same resolution and the source
    timestamps (PyAV; NVENC on the graphics card, libx265/libx264 if it fails to open) to the bitrate that makes the

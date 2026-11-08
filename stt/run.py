@@ -1028,7 +1028,8 @@ class Episode:
 
         cfg = self.config["mix"]
         out_wav = self.out / f"{self.media.stem}.ru.{self.engine}.wav"
-        argv = [str(self.media), str(self.vo_dir / "export" / "track.wav"), "--out", str(out_wav),
+        voice = self.widened_track(self.vo_dir / "export" / "track.wav")
+        argv = [str(self.media), str(voice), "--out", str(out_wav),
                 "--duck-db", str(cfg["duck_db"])]
         if not self.args.start and not self.args.duration:
             argv.append("--full-duration")
@@ -1055,6 +1056,27 @@ class Episode:
             out_wav.unlink()
         if cfg.get("mux"):  # a test piece gets a short re-encoded video of the piece
             self.mux_when_ready()
+
+    def widened_track(self, track: Path) -> Path:
+        """The voice track to mix: for a cloned engine whose references are narrowband (old seasons), ``track.wide.wav``
+        with the band drawn above their edge (``stt.widen``, ``mix.widen`` in the config); else ``track`` itself."""
+        from stt import widen
+
+        cfg = (self.config.get("mix") or {}).get("widen") or {}
+        if not cfg.get("enabled", False) or self.engine not in cfg.get("engines", ["f5"]) or not track.exists():
+            return track
+        edge = widen.references_edge(self.out / f"speaker_voices.{self.engine}.json")
+        if edge is None or edge >= float(cfg.get("max_band_hz", widen.MAX_BAND_HZ)):
+            return track
+        out = track.with_name("track.wide.wav")
+        if out.exists() and out.stat().st_mtime >= track.stat().st_mtime:
+            return out
+        started = time.monotonic()
+        if not widen.widen_track(track, out, edge):
+            return track
+        log.info("[%s] mix (%s): the voices' band widened above %.0f Hz (LavaSR) in %.0f s", self.media.stem, self.engine,
+                 edge, time.monotonic() - started)
+        return out
 
     def mux_when_ready(self) -> None:
         """Mux the finished video. ``combined``: once, by the engine whose track is the last of this run's engines

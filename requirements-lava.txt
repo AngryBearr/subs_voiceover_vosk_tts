@@ -1,0 +1,11 @@
+# lava_env: LavaSR v2 (speech bandwidth extension; code MIT, weights Apache-2.0) for the cloned voice-over of seasons
+# recorded with a narrow band (stt.widen, "mix.widen" in stt_config.json). Its vocos fork conflicts with f5-tts, hence
+# an environment of its own; CPU torch is enough (a 45-min track in ~25 s). LavaSR itself: bash scripts/setup_envs.sh lava
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0+cpu
+torchaudio==2.11.1+cpu
+librosa==1.0.0
+soundfile==0.14.0
+numpy==2.5.4
+huggingface_hub==2.4.0
+vocos @ git+https://github.com/langtech-bsc/vocos.git@451e522f7a11c3652c9522f63ea6780736d93de0

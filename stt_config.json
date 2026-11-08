@@ -88,6 +88,7 @@
     "track_titles": {"f5": "Многоголосый закадровый (голоса участников, ESpeech)",
                      "teratts": "Двухголосый закадровый (TeraTTS)", "vosk": "Двухголосый закадровый (Vosk)"},
     "keep_wav": false,
+    "widen": {"enabled": true, "engines": ["f5"], "max_band_hz": 7600},
     "video": {"compress": false, "target_gb": 2.0, "codec": "hevc_nvenc", "original_audio_kbps": 160}
   },
   "crowd": {"enabled": false, "voices": 3, "gain_db": -4.0}
