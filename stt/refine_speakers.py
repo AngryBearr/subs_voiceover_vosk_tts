@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -60,6 +61,11 @@ REDIMNET2: dict[str, dict[str, str]] = {
 # (github.com/lab260ru/redimnet2-plus) and weights (huggingface.co/lab260/redimnet2-plus) under models/speaker/redimnet2-plus/
 REDIMNET2_PLUS_DIR = "models/speaker/redimnet2-plus"
 REDIMNET2_PLUS_FT = "models/speaker/redimnet2-plus-ft/avg_model.pt"  # fine-tuned on Survivor (scripts/speaker_training)
+_REDIMNET2_TUNED = re.compile(r"redimnet2-plus-ft\d*")  # redimnet2-plus-ft2 ...: models/speaker/<name>/avg_model.pt
+
+
+def redimnet2_tuned_weights(name: str) -> str:
+    return f"models/speaker/{name}/avg_model.pt"
 
 Embed = Callable[[np.ndarray], np.ndarray]
 
@@ -85,10 +91,10 @@ def model_available(name: str) -> bool:
     """False only for a model whose weights live in this repository's ``models`` and are missing (they are not in git)."""
     if name == "resnet293-ft" and runtime_checkpoint() is not None:
         return True
-    if name in ("redimnet2-plus", "redimnet2-plus-ft"):
+    if name == "redimnet2-plus" or _REDIMNET2_TUNED.fullmatch(name):
         root = Path(__file__).resolve().parents[1]
         base = (root / REDIMNET2_PLUS_DIR / "repo" / "weights" / "pytorch_model_fsdp.bin").exists()
-        return base and (name == "redimnet2-plus" or (root / REDIMNET2_PLUS_FT).exists())
+        return base and (name == "redimnet2-plus" or (root / redimnet2_tuned_weights(name)).exists())
     repo = WESPEAKER.get(name, ("", ""))[0]
     return not repo.startswith("local:") or (Path(__file__).resolve().parents[1] / repo.removeprefix("local:")).exists()
 
@@ -169,7 +175,7 @@ class ReDimNet2Torch:
 class ReDimNet2Plus:
     """ReDimNet2+ (``REDIMNET2_PLUS_DIR``): 16 kHz audio -> unit embedding (192 values); its own mel front end."""
 
-    def __init__(self, device: str = "cuda", tuned: bool = False) -> None:
+    def __init__(self, device: str = "cuda", tuned: str | None = None) -> None:
         import torch
 
         root = Path(__file__).resolve().parents[1] / REDIMNET2_PLUS_DIR / "repo"
@@ -188,9 +194,9 @@ class ReDimNet2Plus:
                                    model_overrides={"out_channels": int(head.shape[0]), "return_2d_output": head.ndim == 4})
         encoder.load_state_dict(state, strict=True)
         if tuned:  # the encoder's own state dict, saved by scripts/speaker_training/train.py --backbone redimnet2-plus
-            weights = Path(__file__).resolve().parents[1] / REDIMNET2_PLUS_FT
+            weights = Path(__file__).resolve().parents[1] / redimnet2_tuned_weights(tuned)
             encoder.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True), strict=True)
-        log.info("speaker weights loaded: model=redimnet2-plus%s path=%s sha256=%s", "-ft" if tuned else "", weights,
+        log.info("speaker weights loaded: model=%s path=%s sha256=%s", tuned or "redimnet2-plus", weights,
                  hashlib.sha256(weights.read_bytes()).hexdigest())
         self.encoder = encoder.to(device).eval()
         self.device = device
@@ -225,8 +231,8 @@ def _embed_batches(embedder: Any, wavs: np.ndarray, size: int) -> np.ndarray:
 def make_embedder(name: str, device: str = "cuda") -> Embed:
     if name in REDIMNET2:
         return ReDimNet2Torch(name, device)
-    if name in ("redimnet2-plus", "redimnet2-plus-ft"):
-        return ReDimNet2Plus(device, tuned=name == "redimnet2-plus-ft")
+    if name == "redimnet2-plus" or _REDIMNET2_TUNED.fullmatch(name):
+        return ReDimNet2Plus(device, tuned=None if name == "redimnet2-plus" else name)
     if name == "pyannote":
         from stt.voice_bank import SegmentEmbedder
 

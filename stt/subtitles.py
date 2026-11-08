@@ -729,7 +729,8 @@ def find_subtitles(media: Path, out_dir: Path, cfg: dict[str, Any]) -> dict[str,
     """The best existing English subtitles of the episode, written as ``out_dir/subs.source.en.srt``
     (+ ``subs.source.json``: origin, path_or_url, kind, labels, turns, cues); None when there are none.
 
-    Order: the season's own folder (``cfg["folder"]``), inside the video, next to it, the subtitle base (``cfg["base"]``,
+    Order: the season's own folder (``cfg["folder"]``; with ``cfg["only_folder"]`` nothing else), inside the video, next to
+    it, the subtitle base (``cfg["base"]``,
     made by ``stt.subtitle_base``), the local archive (``cfg["archive"]``; Survivor US only, see ``show_allows``), online
     (``cfg["online"]``, ``cfg["imdb"]``).
     The best kind wins (labels > turns > plain), then the most named lines / marks; a source that gives named lines
@@ -738,6 +739,8 @@ def find_subtitles(media: Path, out_dir: Path, cfg: dict[str, Any]) -> dict[str,
     media, out_dir = Path(media), Path(out_dir)
     searched = {"online": bool(cfg.get("online", False)), "imdb": imdb_of(media, cfg.get("imdb", "tt0239195")), "archive": str(cfg.get("archive") or "")}
     searched.update({k: str(cfg[k]) for k in ("folder", "base") if cfg.get(k)})  # only when set: older caches stay valid
+    if cfg.get("only_folder") and cfg.get("folder"):  # experiments: nothing but the given folder (no labels from the video)
+        searched["only_folder"] = True
     cache, text_path = out_dir / SOURCE_JSON, out_dir / SOURCE_SRT
     if cache.is_file():
         try:
@@ -757,6 +760,7 @@ def find_subtitles(media: Path, out_dir: Path, cfg: dict[str, Any]) -> dict[str,
 
     imdb_cfg = cfg.get("imdb", "tt0239195")
     done = bool(code and searched.get("folder") and consider(folder_candidates(Path(searched["folder"]).expanduser(), code)))
+    done = done or bool(searched.get("only_folder"))
     done = done or consider(embedded_candidates(media)) or consider(sidecar_candidates(media))
     if not done and code and searched.get("base"):
         done = consider(base_candidates(Path(searched["base"]).expanduser(), media, imdb_cfg, *code))

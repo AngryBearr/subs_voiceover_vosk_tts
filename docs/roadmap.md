@@ -64,7 +64,9 @@ Listening: Season 1 apart from `STT_Season 1` in `Survivor/STT_listen_2026-11-07
 Listened to and approved by the user on 7.11.2026: in develop, `season_voices.dissolve: "mixed"` on by default.
 ReDimNet2+ tested after the commit (the user's wish): `make_embedder("redimnet2-plus")`; on old seasons +3..8 points over the
 stock ResNet293, equal to r3 where r3 was trained on the people, S51 (unseen by r3) 79.5% vs 78.9%, both models together 80.3%.
-Next: fine-tune ReDimNet2+ on the Survivor training set (`output/exp_spk/train.py`, as r3), then decide the default.
+Fine-tuned three times on 8.11 (`scripts/speaker_training/train.py --backbone redimnet2-plus`): on a fair set of people no model
+knew (S51E01-E05, Australian S10 E01-E03, 1441 lines) none beats r3 (78.6%); r3 + stock ReDimNet2+ 79.5% (+13 lines net,
+p = 0.06). r3 stays the default.
 Voice quality (consilium 7.11, `docs/experiments.md`): the clones keep about half of a person's identity (ESpeech), the old
 seasons' clones end at the references' 5.2 kHz, the voice sits 10 dB over the scene. Done 8.11 (the user's blind pick): the
 F5 track of a narrowband season is widened by LavaSR v2 before the mix (`stt.widen`, `mix.widen`, `lava_env`). Next: fine-tune

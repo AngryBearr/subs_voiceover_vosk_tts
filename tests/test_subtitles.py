@@ -527,3 +527,18 @@ def test_the_show_is_found_in_a_dotted_file_name() -> None:
     assert s.imdb_of(Path("/v/Survivor.S48E01.720p.mkv"), imdb) == "tt0239195"
     assert not s.show_allows(Path("/v/The.Amazing.Race.S01E01.mkv"), imdb, "tt0239195")
     assert s.show_allows(Path("/v/Survivor.S48E01.mkv"), imdb, "tt0239195")
+
+
+def test_only_folder_keeps_the_labels_next_to_the_video_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Experiments hide labels in a folder's file: the sidecar (or embedded) labels must not come back through the search."""
+    monkeypatch.setattr(subs, "embedded_candidates", lambda media: [])
+    videos, folder, out = tmp_path / "videos", tmp_path / "folder", tmp_path / "out"
+    videos.mkdir(), folder.mkdir()
+    media = videos / "Survivor.S51E02.mkv"
+    media.write_bytes(b"")
+    (videos / "Survivor.S51E02.srt").write_text(srt_text(LABELLED), encoding="utf-8")
+    (folder / "S51E02.en.srt").write_text(srt_text(TURNS), encoding="utf-8")
+    found = subs.find_subtitles(media, out, {"folder": str(folder)})
+    assert found is not None and found["kind"] == "labels"  # the sidecar's labels win over the folder's marks
+    found = subs.find_subtitles(media, out / "only", {"folder": str(folder), "only_folder": True})
+    assert found is not None and (found["kind"], found["origin"]) == ("turns", "season folder")
