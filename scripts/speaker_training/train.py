@@ -157,7 +157,7 @@ def checkpoint_blocks(model: Any, layers: list[str]) -> None:
         block.forward = lambda x: checkpoint(forward, x, use_reentrant=False)  # type: ignore[method-assign]
 
     for name in layers:
-        for block in getattr(model.resnet, name):
+        for block in model.resnet.get_submodule(name):  # "layer3" (ResNet) or "model.backbone.stage3" (ReDimNet2+)
             wrap(block)
 
 
@@ -166,9 +166,42 @@ def embed(model: Any, wav: torch.Tensor) -> torch.Tensor:
     with torch.no_grad(), torch.autocast("cuda", enabled=False):
         fbank = model.compute_fbank(wav[:, None].float())
     fbank = fbank.detach().clone()
+    chunk = getattr(model, "chunk", 0)
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        vec = model.resnet(fbank)[1]
+        if chunk and torch.is_grad_enabled():  # a piece at a time, recomputed on the way back: one piece in memory
+            from torch.utils.checkpoint import checkpoint
+
+            out = torch.cat([checkpoint(model.resnet, fbank[i:i + chunk], use_reentrant=False)
+                             for i in range(0, len(fbank), chunk)])
+        else:
+            out = model.resnet(fbank)
+    vec = out[1] if isinstance(out, tuple) else out  # WeSpeaker returns (stats, embedding); ReDimNet2+ the embedding
     return F.normalize(vec.float(), dim=-1)
+
+
+class ReDimNetBackbone(torch.nn.Module):
+    """ReDimNet2+ (``stt.refine_speakers.ReDimNet2Plus``) behind the two calls the loop makes of a WeSpeaker model:
+    ``compute_fbank`` (its fixed mel front end) and ``resnet`` (the trainable network). ``resnet.state_dict()`` is the
+    encoder's, so the saved ``avg_model.pt`` loads into ``ReDimNet2Encoder`` as it is."""
+
+    def __init__(self, device: str) -> None:
+        super().__init__()
+        from stt.refine_speakers import ReDimNet2Plus
+
+        self.resnet = ReDimNet2Plus(device).encoder
+        self.chunk = 64  # windows per recomputed piece (``embed``): 384 at once do not fit 16 GB
+
+    def compute_fbank(self, wav: torch.Tensor) -> torch.Tensor:
+        return self.resnet.spec_frontend(wav[:, 0])
+
+    def forward(self, wav: torch.Tensor) -> torch.Tensor:  # (batch, 1, samples) -> embeddings, as a WeSpeaker model
+        return self.resnet(self.compute_fbank(wav))
+
+
+BACKBONES = {  # --backbone: what --freeze / --checkpoint name by default
+    "resnet293": ("layer1,layer2,conv1,bn1", "layer3"),
+    "redimnet2-plus": ("model.backbone.stem,model.backbone.stage0,model.backbone.stage1", ""),
+}
 
 
 def margin_logits(q: torch.Tensor, c: torch.Tensor, target: torch.Tensor,
@@ -221,7 +254,7 @@ class Scorer:
         out = []
         for i in range(0, len(self.windows), size):
             x = torch.from_numpy(self.windows[i:i + size]).to(device)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):  # no graph: evaluation only
                 out.append(model(x[:, None]).float().cpu().numpy())
         emb = np.concatenate(out)
         return emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
@@ -293,12 +326,14 @@ def evaluate(model: Any, scorers: list[Scorer], device: str, size: int) -> dict[
 def head_init(model: Any, dataset: Episodes, device: str) -> torch.Tensor:
     """One unit vector per class from the current model: the loss starts near its real value."""
     rng = np.random.default_rng(1)
-    head = np.zeros((dataset.classes, 256), dtype=np.float32)
     model.eval()
+    with torch.no_grad():  # the embedding size: 256 (ResNet293), 192 (ReDimNet2+)
+        dim = int(model(torch.zeros(1, 1, 16000, device=device)).shape[-1])
+    head = np.zeros((dataset.classes, dim), dtype=np.float32)
     for cls in range(dataset.classes):
         segs = dataset.support.get(cls) or dataset.gold.get(cls)
         if not segs:
-            head[cls] = rng.normal(size=256)
+            head[cls] = rng.normal(size=dim)
             continue
         wav = np.stack([dataset._clip(segs[rng.integers(len(segs))], rng) for _ in range(32)])
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -320,8 +355,11 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--head-lr", type=float, default=1e-2)
     parser.add_argument("--weight-sp", type=float, default=0.01, help="pull to the starting weights (L2-SP)")
-    parser.add_argument("--freeze", default="layer1,layer2,conv1,bn1", help="backbone parts kept fixed")
-    parser.add_argument("--checkpoint", default="layer3", help="stages run with gradient checkpointing (saves memory)")
+    parser.add_argument("--backbone", choices=sorted(BACKBONES), default="resnet293",
+                        help="the speaker model to fine-tune (redimnet2-plus: models/speaker/redimnet2-plus, not in git)")
+    parser.add_argument("--freeze", default=None, help="backbone parts kept fixed (default: by --backbone)")
+    parser.add_argument("--checkpoint", default=None,
+                        help="stages run with gradient checkpointing, saves memory (default: by --backbone)")
     parser.add_argument("--bn", choices=["frozen", "adapt"], default="frozen")
     parser.add_argument("--aam-weight", type=float, default=0.5)
     parser.add_argument("--margin", type=float, default=0.2)
@@ -336,6 +374,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--smoke", action="store_true", help="three steps, then exit: memory and speed check")
     args = parser.parse_args()
+    default_freeze, default_checkpoint = BACKBONES[args.backbone]
+    args.freeze = default_freeze if args.freeze is None else args.freeze
+    args.checkpoint = default_checkpoint if args.checkpoint is None else args.checkpoint
 
     out = Path("output/exp_spk") / args.run
     out.mkdir(parents=True, exist_ok=True)
@@ -345,11 +386,16 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    wrapper = WespeakerTorch("resnet293", args.device)
-    model = wrapper.model
-    if args.init:
-        state = torch.load(args.init, map_location="cpu")
-        model.resnet.load_state_dict({k: v for k, v in state.items() if not k.startswith("projection")})
+    if args.backbone == "redimnet2-plus":
+        model: Any = ReDimNetBackbone(args.device).to(args.device)
+        if args.init:
+            model.resnet.load_state_dict(torch.load(args.init, map_location="cpu"))
+    else:
+        wrapper = WespeakerTorch("resnet293", args.device)
+        model = wrapper.model
+        if args.init:
+            state = torch.load(args.init, map_location="cpu")
+            model.resnet.load_state_dict({k: v for k, v in state.items() if not k.startswith("projection")})
     dataset = Episodes(Path(args.data), args.persons, args.per_person, args.steps, args.overlap_p, args.noise_p, not args.no_pseudo, not args.no_cue_lines)
     loader = DataLoader(dataset, batch_size=None, shuffle=True, num_workers=args.workers, persistent_workers=args.workers > 0,
                         pin_memory=True, prefetch_factor=4 if args.workers else None)
