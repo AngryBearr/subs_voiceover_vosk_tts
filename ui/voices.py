@@ -70,7 +70,7 @@ def detail_text(row: dict[str, Any]) -> str:
 
 
 def table_rows(states: list[dict[str, Any]]) -> list[list[Any]]:
-    return [[r["name"], r.get("label_ru") or "", GENDER_LABEL.get(str(r.get("gender")), "—"),
+    return [[voice_bank.person_key(r), r.get("label_ru") or "", GENDER_LABEL.get(str(r.get("gender")), "—"),
              round(float(r.get("speech_s") or 0.0) / 60, 1), STATE_LABEL[r["state"]], detail_text(r)]
             for r in sort_states(states)]
 
@@ -83,12 +83,12 @@ def read_states(bank: Path) -> list[dict[str, Any]]:
 
 
 def find_state(states: list[dict[str, Any]], name: str | None) -> dict[str, Any] | None:
-    return next((r for r in states if r["name"] == name), None) if name else None
+    return next((r for r in states if voice_bank.person_key(r) == name), None) if name else None
 
 
 def card_text(row: dict[str, Any]) -> str:
     gender = {"male": "мужской голос", "female": "женский голос"}.get(str(row.get("gender")), "пол не известен")
-    who = f"### {row['name']}" + (f" · {row['label_ru']}" if row.get("label_ru") else "")
+    who = f"### {voice_bank.person_key(row)}" + (f" · {row['label_ru']}" if row.get("label_ru") else "")
     minutes = f"речи в сезоне: {float(row.get('speech_s') or 0.0) / 60:.1f} мин"
     return f"{who}\n\n{gender} · {minutes}\n\n**Образец:** {STATE_LABEL[row['state']]}" + (
         f" — {detail_text(row)}" if detail_text(row) else "")
@@ -112,6 +112,15 @@ def _voice_hash(voice: str) -> str:
     return voice.split("#", 1)[-1]
 
 
+def _is_standin(voice: str) -> bool:
+    """A season stand-in voice of the F5 track (``teratts:<voice>`` or a clip made in ``fallback_voices``)."""
+    return voice.startswith("teratts:") or "fallback_voices" in voice
+
+
+def same_key(a: str | None, b: str) -> bool:
+    return bool(a) and voice_bank.same_key(a or "", b)
+
+
 def episode_changes(refs: Path, folder: Path) -> list[str] | None:
     """Names of the people whose clip is not the one this ESpeech episode was scripted with (``speaker_voices.f5.json``
     of the dub stage against the clips now); None when the episode has no such record."""
@@ -129,14 +138,17 @@ def episode_changes(refs: Path, folder: Path) -> list[str] | None:
     index = voice_bank.load_json_list(refs / "references.json")
     changed: set[str] = set()
     for card in people:
-        if not card.get("name") or card.get("id") is None:
+        key = voice_bank.person_key(card)
+        if not key or card.get("id") is None:
             continue
-        entry = next((r for r in index if voice_bank.same_person(r["name"], card["name"])), None)
+        entry = next((r for r in index if same_key(voice_bank.person_key(r), key)), None)
         wav = refs / entry["wav"] if entry else None
         now = _voice_hash(voice_id(wav.resolve())) if wav is not None and wav.is_file() else None
         before = _voice_hash(recorded[card["id"]]) if card["id"] in recorded else None
+        if now is None and before is not None and _is_standin(recorded[card["id"]]):
+            continue  # a pool stand-in is kept for the season, it is not a clip that went away
         if now != before:
-            changed.add(str(entry["name"]) if entry else str(card["name"]))
+            changed.add(str(voice_bank.person_key(entry) if entry else key))
     return sorted(changed)
 
 
@@ -433,7 +445,7 @@ def build(host: Any, folder: Any, out_root: Any, voice_model: Any) -> Tab:
                     "", gr.update(), gr.update(choices=[], value=None))
         source, results, name = season_of(src, res)
         states = states_of(src, res)
-        names = [r["name"] for r in states]
+        names = [voice_bank.person_key(r) for r in states]
         text, todo = banner(results, source, name)
         return (gr.update(value=table_rows(states)),
                 gr.update(choices=names, value=selected if selected in names else None),

@@ -170,8 +170,8 @@ MIXED_ROLE = re.compile(r"merged|mixed|multiple|several|different|background|cro
 
 
 def _is_mixed(speaker: dict[str, Any]) -> bool:
-    """A card whose role the LLM wrote as a group of voices: no one person."""
-    return bool(MIXED_ROLE.search(str(speaker.get("role") or "")))
+    """A card whose role the LLM wrote as a group of voices, or that a ``{"mixed": true}`` override marks: no one person."""
+    return bool(speaker.get("mixed")) or bool(MIXED_ROLE.search(str(speaker.get("role") or "")))
 
 
 def apply_cast_host(speakers: list[dict[str, Any]], cast: dict[str, Any] | None,
@@ -258,6 +258,7 @@ def update_records(records: list[dict[str, Any]], speakers: list[dict[str, Any]]
 def name_speakers(
     folder: Path, model: str, *, use_llm: bool = True, reasoning: str | None = None, glossary: str = "",
     bank_path: Path | None = None, cast_path: Path | None = None, saved_llm: bool = False,
+    identities: bool = True,
 ) -> list[dict[str, Any]]:
     speakers_path, subs_path = folder / "speakers.json", folder / "subs.en.json"
     speakers, records = load_json(speakers_path), load_json(subs_path)
@@ -298,6 +299,9 @@ def name_speakers(
         for note in check_speakers(speakers, cast):
             log.info("cast: %s", note)
     apply_overrides(speakers, overrides)
+    if bank is not None and identities:  # voices without a name: season identities (V01, ...)
+        for note in voice_bank.resolve_identities(speakers, bank, folder.name, records):
+            log.info("voice bank: %s", note)
     if bank is not None:
         added = bank.add_episode(folder.name, speakers, records)
         bank.save()
@@ -322,6 +326,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--glossary", default=None, help="glossary.txt from stt.glossary (canonical names)")
     parser.add_argument("--voice-bank", type=Path, default=None, help="Season voice bank (stt.voice_bank)")
     parser.add_argument("--cast", type=Path, default=None, help="Season cast from the web (stt.cast)")
+    parser.add_argument("--no-identities", action="store_true",
+                        help="Do not give unnamed voices season identities (V01, ...) in the voice bank")
     parser.add_argument("--saved-llm", action="store_true",
                         help="Apply the saved speakers.llm.json instead of asking the LLM again")
     parser.add_argument(
@@ -335,7 +341,8 @@ def main(argv: list[str] | None = None) -> None:
     reasoning = None if args.reasoning == "default" else args.reasoning
     glossary = Path(args.glossary).read_text(encoding="utf-8") if args.glossary else ""
     name_speakers(Path(args.folder), args.model, use_llm=not args.no_llm, reasoning=reasoning, glossary=glossary,
-                  bank_path=args.voice_bank, cast_path=args.cast, saved_llm=args.saved_llm)
+                  bank_path=args.voice_bank, cast_path=args.cast, saved_llm=args.saved_llm,
+                  identities=not args.no_identities)
 
 
 if __name__ == "__main__":

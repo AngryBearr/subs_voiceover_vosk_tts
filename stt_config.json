@@ -29,6 +29,17 @@
   "overlap_episodes": true,
   "on_screen": {"voice": "text", "neutral_gender": "male", "track": true, "burn_in_when_compressing": false},
   "subtitles": {"enabled": true, "online": true, "imdb": {"amazing race": "tt0285335", "australia": null, "survivor": "tt0239195"}, "folder": null, "base": null, "archive": null, "turn_bonus": 0.3, "min_pinned": 0.3},
+  "shows": {
+    "amazing race": {
+      "label": "The Amazing Race",
+      "settings": {
+        "voice_bank": {"identities": true, "stitch": true},
+        "voiceover": {"engines": {"f5": {"standin_pool": {
+          "female": ["teratts:ru_f1+ru_f2", "teratts:ru_f2", "teratts:eng_f3"],
+          "male": ["teratts:ru_m5", "teratts:ru_m1", "teratts:eng_m4"]}}}}
+      }
+    }
+  },
   "llm": {
     "model": "openai/gpt-6-luna",
     "router": "openrouter",
@@ -40,7 +51,7 @@
       "cast": ["openrouter:openai/gpt-6-luna:online", "openrouter:anthropic/claude-haiku-5.5:online"]
     }
   },
-  "voice_bank": {"enabled": true},
+  "voice_bank": {"enabled": true, "identities": false, "stitch": false},
   "cast": {"enabled": true},
   "translate": {
     "cps": 14.0,

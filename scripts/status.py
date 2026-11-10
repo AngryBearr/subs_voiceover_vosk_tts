@@ -175,6 +175,14 @@ def collect() -> list[dict]:
             if re.search(r"\] \S+ done$", log.read_text(encoding="utf-8", errors="replace"), re.M):
                 row.update(stage="finished", remaining="0", running=False)
             rows.append(row)
+    for log in sorted(HERE.glob("exp_identities/logs/*.log")):  # The Amazing Race runs of the voice identities work
+        text = log.read_text(encoding="utf-8", errors="replace")
+        episodes = max(1, len(set(re.findall(r"\[([^\]]+)\] transcribe \.\.\.$", text, re.M))))
+        if (row := line_counter(log, f"amazing race {log.stem}", r"\] [a-z]+(?: \(\w+\))? \.\.\.$", None,
+                                f"stages of stt.run ({episodes} episode{'s' if episodes > 1 else ''})")):
+            if log.with_suffix(".done").exists():
+                row.update(stage="finished", remaining="0", running=False)
+            rows.append(row)
     for log in sorted(HERE.glob("exp_tse/run_*.log")):
         if (row := line_counter(log, f"voice sample {log.stem}", r"^=== ", None, "per line or episode")):
             rows.append(row)

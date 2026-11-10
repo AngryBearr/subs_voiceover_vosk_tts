@@ -350,6 +350,7 @@ def test_manual_clip_revoices_only_that_person(tmp_path: Path, fake_models: None
     voice_bank.export_references(bank, refs, "cpu")
     episode = Episode.__new__(Episode)
     episode.media, episode.out, episode.voice_bank = Path("ep.mkv"), tmp_path / "work", bank.path
+    episode.config = {"voiceover": {}}
     episode.out.mkdir()
     (episode.out / "speakers.json").write_text(json.dumps([{"id": "S1", "name": "Amy Adams"},
                                                            {"id": "S2", "name": "Bea Brown"}]), encoding="utf-8")
@@ -387,3 +388,23 @@ def test_manual_clip_revoices_only_that_person(tmp_path: Path, fake_models: None
     os.utime(stamp, (time.time() - 100, time.time() - 100))
     episode.engine = "f5"
     assert episode.needed("dub", [outputs], None, [refs / "references.json"]) is True
+
+
+def test_export_stitches_short_solo_pieces_when_no_stretch_is_long_enough(tmp_path: Path, fake_models: None) -> None:
+    bank, refs = _season(tmp_path)
+    ep = bank.path.parent / "ep1"
+    cue = lambda s, e, who: {"start": int(s * 1000), "end": int(e * 1000), "speaker": who,  # noqa: E731
+                             "text": ["words here"]}
+    (ep / "subs.en.json").write_text(json.dumps([cue(0, 3, "S1"), cue(4, 7, "S1"), cue(9, 15, "S2")]),
+                                     encoding="utf-8")
+    assert _names(voice_bank.export_references(bank, refs, "cpu", stitch=False)) == {}  # gaps break the stretch
+    assert "склейка" not in voice_bank.reason_text(json.loads((refs / "missing.json").read_text("utf-8"))["Amy Adams"])
+    index = voice_bank.export_references(bank, refs, "cpu")
+    amy = next(r for r in index if r["name"] == "Amy Adams")
+    assert amy["stitched"] is True and amy["pieces"] == [[0.0, 3.0], [4.0, 7.0]] and (amy["start"], amy["end"]) == (0.0, 7.0)
+    assert (refs / amy["wav"]).exists()
+    reject = voice_bank.reject_reference(refs, "Amy Adams")
+    assert reject is not None
+    again = voice_bank.export_references(bank, refs, "cpu")
+    assert all(r["name"] != "Amy Adams" for r in again)
+    assert json.loads((refs / "missing.json").read_text("utf-8"))["Amy Adams"]["stitched_failed"] == 1

@@ -31,7 +31,7 @@ import numpy as np
 
 from stt import voice_bank
 from stt.voice_bank import (CLONE_RATE, MIN_SAMPLE_SCORE, SegmentEmbedder, VoiceBank, _read_media, _safe_name, _unit,
-                            load_manual, same_person, write_index)
+                            load_manual, person_key, same_key, same_person, write_index)
 from utils.atomic_io import fsync_file, write_text_atomic
 
 log = logging.getLogger(__name__)
@@ -260,7 +260,7 @@ def make_manual_clip(media: Path, ranges: list[tuple[float, float]], out_wav: Pa
         warnings.append(f"Речи всего {duration:.1f} с: клонирование лучше работает на 6-10 секундах, "
                         "добавьте ещё отрезок.")
     similarity: float | None = None
-    mine = [_unit(p["embedding"]) for p in bank.prints if person and same_person(p["name"], person)] if bank else []
+    mine = [_unit(p["embedding"]) for p in bank.prints if person and same_key(person_key(p) or "", person)] if bank else []
     if mine:
         vector = models.embedder(soxr.resample(speech, CLONE_RATE, 16_000).astype(np.float32), 16_000)
         similarity = round(max(float(vector @ q) for q in mine), 3)
@@ -283,7 +283,7 @@ def _known_gender(bank: VoiceBank | None, name: str) -> str | None:
     """Gender from the bank's prints, else from the season cast file next to the bank."""
     if bank is None:
         return None
-    person = next((p for p in bank.people() if same_person(p["name"], name)), None)
+    person = next((p for p in bank.people() if same_key(person_key(p) or "", name)), None)
     if person and person.get("gender") in ("male", "female"):
         return str(person["gender"])
     cast = bank.path.with_name(bank.path.name.replace(".voices.json", ".cast.json"))
@@ -322,16 +322,16 @@ def save_manual_clip(refs_dir: Path, name: str, clip: ManualClip | Path, *, text
     text = (text if text is not None else clip.text if isinstance(clip, ManualClip) else "") or ""
     if not text.strip():
         raise ValueError("Нужен текст клипа: впишите, что в нём говорят.")
-    person = next((p for p in bank.people() if same_person(p["name"], name)), None) if bank else None
+    person = next((p for p in bank.people() if same_key(person_key(p) or "", name)), None) if bank else None
     refs_dir.mkdir(parents=True, exist_ok=True)
     existing = next((r for r in voice_bank.load_json_list(refs_dir / "references.json")
-                     if same_person(r["name"], name)), None)
+                     if same_key(person_key(r) or "", name)), None)
     gender = gender or (person or {}).get("gender") or _known_gender(bank, name) or (existing or {}).get("gender")
     if gender not in ("male", "female"):
         raise ValueError("Не знаю пол этого человека: укажите male или female (мужской или женский).")
     full = (person or {}).get("name") or name
     manual = load_manual(refs_dir)
-    previous = next((m for m in manual if same_person(m["name"], name)), None)
+    previous = next((m for m in manual if same_key(person_key(m) or "", name)), None)
     replaced = previous["replaced"] if previous else (existing if existing and existing.get("source") != "manual"
                                                       else None)
     stem = f"{_safe_name(full)}.manual"
@@ -347,12 +347,12 @@ def save_manual_clip(refs_dir: Path, name: str, clip: ManualClip | Path, *, text
              "score": score, "min_window": score, "music_db": music, "replaced": replaced}
     _copy_atomic(wav, refs_dir / f"{stem}.wav")
     write_text_atomic(refs_dir / f"{stem}.txt", entry["text"] + "\n")
-    manual = [m for m in manual if not same_person(m["name"], name)] + [entry]
+    manual = [m for m in manual if not same_key(person_key(m) or "", name)] + [entry]
     write_text_atomic(refs_dir / "manual.json", json.dumps(manual, ensure_ascii=False, indent=1) + "\n")
     missing = voice_bank.load_missing(refs_dir)
-    if any(same_person(k, name) for k in missing):  # the reasons no longer apply
+    if any(same_key(k, name) for k in missing):  # the reasons no longer apply
         write_text_atomic(refs_dir / "missing.json", json.dumps(
-            {k: v for k, v in missing.items() if not same_person(k, name)}, ensure_ascii=False, indent=1) + "\n")
+            {k: v for k, v in missing.items() if not same_key(k, name)}, ensure_ascii=False, indent=1) + "\n")
     write_index(refs_dir, voice_bank.load_json_list(refs_dir / "references.json"))
     return {k: v for k, v in entry.items() if k != "replaced"}
 
@@ -361,7 +361,7 @@ def remove_manual_clip(refs_dir: Path, name: str) -> bool:
     """Delete a person's hand-made clip; the automatic clip it replaced comes back when its file is still
     there, else the next ``--missing`` export looks for one. False when the person had no manual clip."""
     manual = load_manual(refs_dir)
-    entry = next((m for m in manual if same_person(m["name"], name)), None)
+    entry = next((m for m in manual if same_key(person_key(m) or "", name)), None)
     if entry is None:
         return False
     write_text_atomic(refs_dir / "manual.json", json.dumps([m for m in manual if m is not entry],
@@ -370,7 +370,7 @@ def remove_manual_clip(refs_dir: Path, name: str) -> bool:
     (refs_dir / f"{stem}.wav").unlink(missing_ok=True)
     (refs_dir / f"{stem}.txt").unlink(missing_ok=True)
     auto = voice_bank.load_json_list(refs_dir / "references.json")
-    auto = [r for r in auto if not same_person(r["name"], name)]
+    auto = [r for r in auto if not same_key(person_key(r) or "", name)]
     old = entry.get("replaced")
     if old and (refs_dir / old["wav"]).exists():
         auto.append(old)

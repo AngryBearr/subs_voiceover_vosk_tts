@@ -543,6 +543,17 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   ru_m5) instead of a Vosk sentence cloned by F5; the F5 calibration still probes the Vosk clip.
   S29E06 voiced so (with DiariZen and the short-word fix): character errors 1.65% -> 1.03%, lines
   over the flag 12 -> 5, lost first words 62 -> 37 of ~600 lines.
+  **Stand-in pool.** A season person (named, or a voice identity `V03`) without a clip gets a stand-in voice of
+  its own instead of the one generic voice of the gender: `voiceover.engines.f5.standin_pool` is
+  `{"female": [...], "male": [...]}` with entries `teratts:<voice>`, `vosk:<id>` (the Vosk fallback sentence cloned by
+  F5) or a path to a WAV clip (transcript in the `.txt` beside it). The voice with the fewest people so far is taken
+  (ties: pool order) and kept in `<season>.references/standins.json`, so a person sounds the same in every episode
+  of the season; a person who later gets a clip switches to it. No pool: the generic voice, as before. Clusters
+  with neither name nor identity stay on the generic voice.
+  **Stitched clips.** When no single 5-9 s solo stretch of a person passes the checks, the export tries one clip
+  stitched from several shorter solo cues (at least two, 1.5 s each or longer, 0.4 s of silence between them) with
+  the same checks; the index entry has `"stitched": true` and `"pieces"`. `stt.voice_bank --export ... --no-stitch`
+  turns this off.
 
 ## Season voice bank
 
@@ -669,6 +680,21 @@ ear:
 the unnamed clusters the naming calls mixed are no state, their words go to the season's people; "unnamed": every
 unnamed cluster; "none": off), and off by default: `voice_source` ("clean": voices from card and named-line words only), `tribe_prior` (people of other
 tribes less likely at a tribe's camp, `stt.tribes`), `caption_bonus` (the switch bonus at ">>" marks, 0.15).
+
+Voice identities: a cluster without a name, with at least 20 s of speech and not a mix of voices, gets a season identity
+(`V01`, `V02`, ...) in the naming stage. The voice bank keeps its print (`"name": null, "identity": "V03"`,
+`"source": "identity"`) and a later episode with the same voice (strong, clear match) gets the same id; the speaker card
+carries `"identity": "V03"` (and `identity_evidence`) while `name` stays null. This stage treats an identity like a
+named person: it gets a season voice (`diarizer_label` `V:V03`), and its words are assigned over the season. A name
+the pipeline finds later stays the primary key, and nothing changes for named people. Switch off with
+`"voice_bank": {"identities": false}` in `stt_config.json` (`stt.speakers --no-identities`).
+
+**Show profiles.** The base config keeps the Survivor behaviour: `voice_bank.identities` and `voice_bank.stitch` are
+off and `voiceover.engines.f5` has no `standin_pool`. `shows` holds per-show settings that are merged on top when the
+video's path contains the key's words (the same matching as `subtitles.imdb`; `--show <name>` forces a profile,
+`--show none` turns profiles off). The `amazing race` profile turns on voice identities, stitched clips and the
+stand-in pool. A profile may also carry `paths` (e.g. `paths.finished` for the show): put it in
+`stt_config.local.json` under `shows.<key>.settings`.
 
 `speakers.llm.json` and the naming are not touched. The stage touches the `speakers` mark of an episode it changed, so the
 stages after it (translation, dubbing, ...) run again and the earlier ones do not. If `corrections.json` or

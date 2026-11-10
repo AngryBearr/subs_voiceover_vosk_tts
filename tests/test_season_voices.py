@@ -631,3 +631,33 @@ def test_clean_voices_come_from_cards_and_named_lines(season: list[Path], monkey
     assert clean.vectors[alice][AXIS["B"]] < plain.vectors[plain.names.index("Alice Smith")][AXIS["B"]]
     assert clean.counts[clean.names.index("Bob Jones")] == plain.counts[plain.names.index("Bob Jones")]  # no clean words: as before
     assert clean.fingerprint != plain.fingerprint
+
+
+# ---------------------------------------------------------------- voice identities
+def test_an_unnamed_voice_with_an_identity_is_a_season_person(tmp_path: Path) -> None:
+    root = tmp_path / "ids"
+    kinds = {"A": "Alice Smith", "B": "Bob Jones"}
+    folders = []
+    for k, name in enumerate(("e1", "e2")):
+        runs: list[Run] = [("P", "A", 30), ("Q", "B", 30), ("X", "D", 14), ("P", "A", 10), ("X", "D", 14)]
+        folder = make_episode(root, name, runs, {"P": kinds["A"], "Q": kinds["B"], "X": None}, seed=10 + k)
+        cards = load_json(folder / "speakers.json")
+        next(c for c in cards if c["diarizer_label"] == "X")["identity"] = "V01"
+        save_json(folder / "speakers.json", cards)
+        folders.append(folder)
+    voices_path = root / "ids.season_voices.npz"
+    results = sv.apply_season(folders, folders, voices_path, model=MODEL, min_words=20)
+    assert all(r.status == "applied" for r in results.values())
+    voices = sv.SeasonVoices.load(voices_path)
+    assert voices is not None and "V01" in voices.names and voices.person_of("V01") == "V01"
+    assert voices.person_of("V02") is None
+    for folder in folders:
+        cards = {c["id"]: c for c in load_json(folder / "speakers.json")}
+        who = [cards[w["speaker"]] for w in load_json(folder / "words.json")]
+        d_words = [c for c, w in zip(who, range(len(who))) if c.get("identity") == "V01"]
+        assert len(d_words) == 28 and all(c["name"] is None and c["season_voice"] for c in d_words)
+        card = next(c for c in cards.values() if c.get("identity") == "V01")
+        assert card["diarizer_label"] == "V:V01" and card["label_ru"] is None and card["name_source"] is None
+        report = load_json(folder / "season_voices.json")
+        assert report["per_person"]["V01"] == {"before": 28, "after": 28}
+        assert report["people"] == 3

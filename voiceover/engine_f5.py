@@ -57,24 +57,36 @@ def clip_path(voice: str) -> str:
     return voice.split("#", 1)[0]
 
 
-def fallback_references(folder: Path, model_path: Path, voices: dict[str, int]) -> dict[str, str]:
-    """``{gender: wav}``: a Vosk voice per gender saying one sentence, for F5 to clone."""
+def vosk_reference(folder: Path, model_path: Path, label: str, voice: int) -> str:
+    """``fallback_<label>_vosk<voice>.wav`` (+ ``.txt``): a Vosk voice saying one sentence, for F5 to clone."""
     import soundfile as sf
 
     folder.mkdir(parents=True, exist_ok=True)
-    out = {}
-    for gender, voice in voices.items():
-        wav = folder / f"fallback_{gender}_vosk{voice}.wav"
-        if not wav.exists():
-            subprocess.run([str(REPO_ROOT / "subs_env/bin/python"), "-m", "synthesize.synthesize_cli",
-                            "--text", FALLBACK_TEXT, "--model", str(model_path), "--voice", str(voice),
-                            "--output", str(wav), "--output-sample-rate", "24000"],
-                           cwd=REPO_ROOT, check=True, capture_output=True)
-            audio, rate = sf.read(str(wav), dtype="float32")
-            sf.write(str(wav), np.concatenate([audio, np.zeros(rate, dtype=np.float32)]), rate)  # F5 wants 1 s of silence
-            wav.with_suffix(".txt").write_text(FALLBACK_TEXT.replace("ё", "е") + "\n", encoding="utf-8")
-        out[gender] = str(wav)
-    return out
+    wav = folder / f"fallback_{label}_vosk{voice}.wav"
+    if not wav.exists():
+        subprocess.run([str(REPO_ROOT / "subs_env/bin/python"), "-m", "synthesize.synthesize_cli",
+                        "--text", FALLBACK_TEXT, "--model", str(model_path), "--voice", str(voice),
+                        "--output", str(wav), "--output-sample-rate", "24000"],
+                       cwd=REPO_ROOT, check=True, capture_output=True)
+        audio, rate = sf.read(str(wav), dtype="float32")
+        sf.write(str(wav), np.concatenate([audio, np.zeros(rate, dtype=np.float32)]), rate)  # F5 wants 1 s of silence
+        wav.with_suffix(".txt").write_text(FALLBACK_TEXT.replace("ё", "е") + "\n", encoding="utf-8")
+    return str(wav)
+
+
+def fallback_references(folder: Path, model_path: Path, voices: dict[str, int]) -> dict[str, str]:
+    """``{gender: wav}``: a Vosk voice per gender saying one sentence, for F5 to clone."""
+    return {gender: vosk_reference(folder, model_path, gender, voice) for gender, voice in voices.items()}
+
+
+def standin_voice(spec: str, folder: Path, model_path: Path) -> str:
+    """A stand-in pool entry as a line voice: ``teratts:<voice>`` as is, ``vosk:<id>`` as the cloned Vosk
+    sentence, anything else is the path of a reference WAV (transcript ``.txt`` beside it)."""
+    if spec.startswith(TERATTS):
+        return spec
+    if spec.startswith("vosk:"):
+        return voice_id(vosk_reference(folder, model_path, "standin", int(spec.split(":", 1)[1])))
+    return voice_id(spec)
 
 
 class F5Engine(VoskEngine):

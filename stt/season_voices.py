@@ -13,7 +13,9 @@ done) this optional stage
 
 The first-pass files are kept once as ``*.before_voices.json``; the stage always starts from them, so a rerun (also with
 more episodes in the season) gives the same result as a first run. No LLM and no GPU: the word embeddings of the first
-pass are reused (``words.emb.<model>.npz``). Off by default (``season_voices`` in ``stt_config.json``).
+pass are reused (``words.emb.<model>.npz``). A voice without a name that the voice bank gave a season identity
+("V03", ``stt.voice_bank``) is a person of the season too, keyed by that id (``"name": null, "identity": "V03"`` on its
+card). Off by default (``season_voices`` in ``stt_config.json``).
 
     subs_env/bin/python -m stt.season_voices output/stt [--episodes "*S51*"] [--dry-run]
 """
@@ -40,6 +42,7 @@ from stt.boundaries import OWN_STATE, RelabelParams, WordHints, _centroids, _vit
 from stt.diarize import Diarization
 from stt.runner import load_json, save_json
 from stt.types import Word
+from stt.voice_bank import is_identity
 
 log = logging.getLogger("stt.season_voices")
 
@@ -59,13 +62,16 @@ def clean_name(name: str) -> str:
 
 
 def group_names(counts: dict[str, int]) -> dict[str, str]:
-    """Raw speaker name -> person key. Spellings of one name (``voice_bank.same_person``: "Jon"/"John Misch", "Jeff"/"Jeff
+    """Raw speaker name (or identity) -> person key. Spellings of one name (``voice_bank.same_person``: "Jon"/"John Misch", "Jeff"/"Jeff
     Probst") are one person, keyed by the spelling with most words (the longer one on a tie)."""
     from stt.voice_bank import same_person
 
     keys: list[str] = []
     out: dict[str, str] = {}
     for name in sorted(counts, key=lambda n: (-counts[n], -len(n), n)):
+        if is_identity(name):  # a voice identity is its own person
+            out[name] = name
+            continue
         key = next((k for k in keys if k == name or same_person(name, k)), None)
         if key is None:
             keys.append(name)
@@ -92,7 +98,8 @@ class SeasonVoices:
         return len(self.names)
 
     def person_of(self, name: str | None) -> str | None:
-        """The person (key) a speaker name belongs to, or None when the season has no such person."""
+        """The person (key) a speaker name or identity belongs to, or None when the season has no such person.
+        An identity matches exactly only."""
         if not name:
             return None
         from stt.voice_bank import same_person
@@ -100,6 +107,8 @@ class SeasonVoices:
         name = clean_name(name)
         if name in self.names:
             return name
+        if is_identity(name):
+            return None
         order = sorted(range(len(self.names)), key=lambda j: -(self.counts[j] if self.counts else 0))  # no counts while building
         return next((self.names[j] for j in order if same_person(name, self.names[j])), None)
 
@@ -114,14 +123,16 @@ class SeasonVoices:
             if person is not None:
                 return person
         if label == HOST:
-            found = [n for n in self.names if n.upper() in HOST_LABELS or n.upper().split()[0] in HOST_LABELS]
+            found = [n for n in self.names if not is_identity(n)
+                     and (n.upper() in HOST_LABELS or n.upper().split()[0] in HOST_LABELS)]
         else:
             first = label.lower().split()[0] if label.split() else ""
-            found = [n for n in self.names if n.lower().split()[0] == first] if first else []
+            found = [n for n in self.names if not is_identity(n) and n.lower().split()[0] == first] if first else []
         if not found and label != HOST:  # subtitles also use surnames and nicknames: "KILBY", "JELLY"
             wanted = label.lower()
             person = self.aliases.get(wanted)
-            found = [person] if person in self.names else [n for n in self.names if wanted in n.lower().split()]
+            found = [person] if person in self.names else [n for n in self.names
+                                                           if not is_identity(n) and wanted in n.lower().split()]
         return found[0] if len(found) == 1 else None
 
     def own_member(self, label: str) -> dict[str, Any] | None:
@@ -261,6 +272,13 @@ class EpisodeData:
         """The name of the speaker of every word (None: no speaker, or one without a name)."""
         names = {c["id"]: clean_name(c["name"]) for c in self.cards if c.get("name")}
         return [names.get(w.get("speaker")) for w in self.raw_words]
+
+    def word_keys(self) -> list[str | None]:
+        """The person key (name, else identity) of the speaker of every word (None: no speaker, or neither)."""
+        from stt.voice_bank import person_key
+
+        keys = {c["id"]: person_key(c) for c in self.cards if person_key(c)}
+        return [keys.get(w.get("speaker")) for w in self.raw_words]
 
 
 def _offset(folder: Path) -> float:
@@ -412,7 +430,7 @@ def build_voices(folders: list[Path], model: str = "resnet293", min_words: int =
     episodes = [e for e in (load_episode(f, model) for f in folders) if e is not None]
     totals: Counter[str] = Counter()
     for episode in episodes:
-        for name, n in Counter(n for n, w in zip(episode.word_names(), episode.words) if n and w.source != "ocr").items():
+        for name, n in Counter(n for n, w in zip(episode.word_keys(), episode.words) if n and w.source != "ocr").items():
             totals[name] += n
     key_of = group_names(dict(totals))
     keys = SeasonVoices(sorted(set(key_of.values())), np.zeros((0, 0)), [], model, aliases=dict(aliases or {}),
@@ -425,13 +443,14 @@ def build_voices(folders: list[Path], model: str = "resnet293", min_words: int =
     label_counts: Counter[str] = Counter()
     cards: dict[str, tuple[int, dict[str, Any]]] = {}
     from stt.speakers import _is_mixed
+    from stt.voice_bank import person_key
 
     for episode in episodes:
         person: dict[int, str] = {}
         # a card the naming itself calls mixed ("contestant; mixed-speaker cluster", S02E05: 151 cues of several people
         # named Kimmi) keeps its name but gives the person's voice no words: they would pull other people's words to it
         mixed = {c["id"] for c in episode.cards if _is_mixed(c)}
-        for i, (name, word, raw) in enumerate(zip(episode.word_names(), episode.words, episode.raw_words)):
+        for i, (name, word, raw) in enumerate(zip(episode.word_keys(), episode.words, episode.raw_words)):
             if name and word.source != "ocr" and raw.get("speaker") not in mixed:
                 person[i] = key_of[name]
         hints = subtitle_hints(episode)
@@ -456,7 +475,7 @@ def build_voices(folders: list[Path], model: str = "resnet293", min_words: int =
             label_sums[key] = label_sums.get(key, 0.0) + episode.emb[idx].sum(axis=0)
             label_counts[key] += len(idx)
         for card in episode.cards:
-            key = key_of.get(clean_name(card["name"])) if card.get("name") else None
+            key = key_of.get(person_key(card) or "")
             weight = (card.get("words") or 0) - (10 ** 9 if card["id"] in mixed else 0)  # a clean card first
             if key and weight > cards.get(key, (-(10 ** 10), {}))[0]:
                 cards[key] = (weight, card)
@@ -547,7 +566,9 @@ def russian_names(folder: Path) -> dict[str, str]:
 
 
 def _cast_gender(voices: SeasonVoices, name: str) -> str | None:
-    """The cast's gender of a person named only by the subtitles (None when the cast does not say)."""
+    """The cast's gender of a person named only by the subtitles (None when the cast does not say, or for an identity)."""
+    if is_identity(name):
+        return None
     member = voices.own_member(name)
     gender = member.get("gender") if member else None
     return gender if gender in ("male", "female") else None
@@ -563,9 +584,12 @@ def _card_for(label: str, ids: dict[str, str], cues: list[Cue], old: EpisodeData
         mine = [c for c in old.cards if card_person[c["id"]] == person]
         base = max(mine, key=lambda c: c.get("words") or 0) if mine else voices.cards.get(person, {"gender": "unknown"})
         card = copy.deepcopy(base)
-        card.update({"name": person, "diarizer_label": label, "diarizer_labels": labels_of.get(person, []),
-                     "season_voice": True})
-        if not mine and person not in voices.cards:  # named only by subtitles or name cards: no speaker card in the season
+        identity = is_identity(person)
+        card.update({"name": None if identity else person, "diarizer_label": label,
+                     "diarizer_labels": labels_of.get(person, []), "season_voice": True})
+        if identity:  # a voice without a name: the id is its only key
+            card.update(identity=person, label_ru=None, name_source=None)
+        if not identity and not mine and person not in voices.cards:  # named only by subtitles or name cards: no speaker card in the season
             gender = _cast_gender(voices, person)
             if gender and card.get("gender") not in ("male", "female"):
                 card.update(gender=gender, gender_source="cast")
@@ -672,7 +696,7 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
         return Result("skipped", "no words")
 
     # the first pass's state of every word: a person with a voice in the season, else the diarizer cluster
-    card_person = {c["id"]: voices.person_of(c.get("name")) for c in old.cards}
+    card_person = {c["id"]: voices.person_of(c.get("name")) or voices.person_of(c.get("identity")) for c in old.cards}
     state_of_card: dict[str, str] = {}
     for c in old.cards:
         person = card_person[c["id"]]

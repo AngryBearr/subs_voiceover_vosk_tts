@@ -40,6 +40,7 @@ both lanes share (stress check, review list, the finished video) take turns.
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
 import functools
 import glob
@@ -95,6 +96,29 @@ def apply_preset(config: dict[str, Any], name: str | None) -> dict[str, Any]:
     if name not in presets:
         raise SystemExit(f"Unknown preset {name!r}; the config has: {', '.join(presets) or 'none'}")
     return deep_merge(config, presets[name].get("settings") or {})
+
+
+def show_of(config: dict[str, Any], media: Path, forced: str | None = None) -> str | None:
+    """The show's profile key (``shows`` in the config): the first key whose words are in the video's path.
+    ``forced``: that profile by name ("none": no profile)."""
+    shows = config.get("shows") or {}
+    if forced:
+        if forced.lower() == "none":
+            return None
+        if forced not in shows:
+            raise SystemExit(f"Unknown show {forced!r}; the config has: {', '.join(shows) or 'none'}")
+        return forced
+    from stt.subtitles import path_words
+
+    path = path_words(media)
+    return next((key for key in shows if path_words(key) in path), None)
+
+
+def apply_show(config: dict[str, Any], name: str | None) -> dict[str, Any]:
+    """The config with the show's settings (``shows.<name>.settings``) on top; no name: as it is."""
+    if not name:
+        return config
+    return deep_merge(copy.deepcopy(config), (config.get("shows") or {})[name].get("settings") or {})
 
 
 def dotenv(path: Path = REPO_ROOT / ".env") -> dict[str, str]:
@@ -180,7 +204,10 @@ class Episode:
         self.lock = lock  # shared with the other lane's Episode of the same video (parallel engines)
         self.out = out_root / media.stem
         self.args = args
-        self.config = config
+        self.show = show_of(config, media, getattr(args, "show", None))
+        self.config = config = apply_show(config, self.show)
+        if self.show:
+            log.info("[%s] show profile: %s", media.stem, (config["shows"][self.show].get("label") or self.show))
         paths = config.get("paths") or {}
         season_dir = Path(paths["season"]).expanduser() if paths.get("season") else out_root
         default_season = season_dir / f"{media.parent.name}.glossary.json"
@@ -517,6 +544,8 @@ class Episode:
         argv =[str(self.out), "--glossary", str(self.out / "glossary.txt"), "--model", self.llm("speakers")]
         if (self.config.get("voice_bank") or {}).get("enabled", True):
             argv += ["--voice-bank", str(self.voice_bank)]
+        if not (self.config.get("voice_bank") or {}).get("identities", True):
+            argv.append("--no-identities")
         if self._find_cast():
             argv += ["--cast", str(self.cast)]
         speakers.main(argv)
@@ -631,26 +660,60 @@ class Episode:
         return self.voice_bank.with_name(self.voice_bank.name.replace(".voices.json", ".references"))
 
     def _speaker_voices(self) -> Path:
-        """{speaker id: reference clip} of this episode's people with a clip (F5 engine)."""
-        from stt.voice_bank import same_person
+        """{speaker id: voice} of this episode's people (F5 engine): their own clip, else a season stand-in."""
+        from stt.voice_bank import person_key, same_key
+        from utils.atomic_io import write_text_atomic
+        from voiceover.engine_f5 import standin_voice, voice_id
 
         if self.voice_bank.exists():  # people new in this episode get a clip; others keep theirs
             # prints for everyone the final speakers name (subtitles, season voices), not only the LLM-sure first pass
             self._module("voices_refresh", "stt.voice_bank", [str(self.voice_bank), "--refresh-episode", str(self.out)])
-            self._module("voices", "stt.voice_bank", [str(self.voice_bank), "--export", str(self.references),
-                                                       "--missing"])
+            export = [str(self.voice_bank), "--export", str(self.references), "--missing"]
+            if not (self.config.get("voice_bank") or {}).get("stitch", False):
+                export.append("--no-stitch")
+            self._module("voices", "stt.voice_bank", export)
         index = self.references / "references.json"
         refs = load_json(index) if index.exists() else []
-        mapping = {}
-        for card in load_json(self.out / "speakers.json"):
-            ref = next((r for r in refs if card.get("name") and same_person(r["name"], card["name"])), None)
+        cards = load_json(self.out / "speakers.json")
+        subs = self.out / "subs.en.json"
+        spoken = {c.get("speaker") for c in load_json(subs)} if subs.exists() else None  # None: do not filter
+        pool: dict[str, list[str]] = self.config["voiceover"].get("engines", {}).get("f5", {}).get("standin_pool") or {}
+        standins_path = self.references / "standins.json"
+        standins: dict[str, dict[str, Any]] = load_json(standins_path) if standins_path.exists() else {}
+        before = json.dumps(standins, sort_keys=True)
+        mapping: dict[str, str] = {}
+        own = stand = generic = 0
+        for card in cards:
+            key = person_key(card)
+            if spoken is not None and card["id"] not in spoken:
+                continue
+            ref = next((r for r in refs if key and (rk := person_key(r)) and same_key(rk, key)), None)
             if ref:
-                from voiceover.engine_f5 import voice_id
-
                 mapping[card["id"]] = voice_id((self.references / ref["wav"]).resolve())
+                own += 1
+                continue
+            gender = card.get("gender") if card.get("gender") in pool else "male"
+            if not key or not pool.get(gender):
+                generic += 1
+                continue
+            known = next((k for k in standins if same_key(k, key)), None)
+            if known is None:  # the pool voice of this gender that the fewest people have so far
+                taken = [v["voice"] for v in standins.values() if v.get("gender") == gender]
+                spec = min(pool[gender], key=lambda x: taken.count(x))
+                known = key
+                standins[key] = {"voice": spec, "gender": gender, "episode": self.out.name}
+            spec = standins[known]["voice"]
+            model = REPO_ROOT / load_json(REPO_ROOT / self.config["voiceover"].get(
+                "config", "voiceover_config.json"))["engine"]["model_path"] if spec.startswith("vosk:") else Path()
+            mapping[card["id"]] = standin_voice(spec, self.references.parent / "fallback_voices", model)
+            stand += 1
+        if json.dumps(standins, sort_keys=True) != before:
+            self.references.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(standins_path, json.dumps(standins, ensure_ascii=False, indent=1) + "\n")
         path = self.out / "speaker_voices.f5.json"
         save_json(path, mapping)
-        log.info("[%s] F5 voices: %d speakers with their own clip", self.media.stem, len(mapping))
+        log.info("[%s] F5 voices: %d speakers with their own clip, %d stand-ins from the pool, %d on the generic voice",
+                 self.media.stem, own, stand, generic)
         return path
 
     def _host_speakers(self) -> list[str]:
@@ -1442,6 +1505,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="One sub-folder per episode (default: paths.work in the config, else output/stt)")
     parser.add_argument("--config", default=str(REPO_ROOT / "stt_config.json"))
     parser.add_argument("--preset", default=None, help="A named set of settings (presets in the config): main, upload, fast, previous")
+    parser.add_argument("--show", default=None,
+                        help="Settings profile of a show (shows in the config; auto by the video's path; none: no profile)")
     parser.add_argument("--mode", choices=["fast", "accurate"], default=None, help="Default from the config")
     parser.add_argument("--until", choices=STAGES, default=None, help="Last stage to run (default: mix)")
     parser.add_argument("--prepare", action="store_true",

@@ -1,7 +1,9 @@
 """Season voice bank: voice prints of the named people of a season, shared by its episodes.
 
 Each episode adds one print per named speaker cluster: the pyannote (WeSpeaker) embedding of
-the cluster with its name, Russian label and gender. A later episode compares its clusters
+the cluster with its name, Russian label and gender. A well-heard cluster without a name (not a mix of voices)
+gets a voice identity ("V01", "V02", ...) instead: the id is kept across the season's episodes by voice print,
+and a print of it is stored like a named one (``"name": null, "identity": "V03"``). A later episode compares its clusters
 with the prints of the other episodes:
 
 - the closest names (cosine similarity) go to the speaker-naming LLM as evidence: people
@@ -89,6 +91,29 @@ def same_person(a: str, b: str) -> bool:
     return _similar(ta[-1], tb[-1], 0.85)
 
 
+IDENTITY = re.compile(r"^V\d{2,}$")  # id of a voice without a name
+
+
+def is_identity(key: str | None) -> bool:
+    return bool(key) and IDENTITY.match(str(key)) is not None
+
+
+def person_key(item: dict[str, Any]) -> str | None:
+    """The key of a person in a speaker card, print or clip index entry: the cleaned name, else the identity."""
+    name = " ".join(str(item.get("name") or "").split())
+    if name:
+        return name
+    identity = item.get("identity")
+    return str(identity) if is_identity(identity) else None
+
+
+def same_key(a: str, b: str) -> bool:
+    """Keys of one person: identities compare exactly, names by ``same_person``; an identity is never a name."""
+    if is_identity(a) or is_identity(b):
+        return a == b
+    return same_person(a, b)
+
+
 def relatives(a: str, b: str) -> bool:
     """Different first names, one surname: family members sound alike (Nadiya/Natalie Anderson)."""
     ta, tb = re.findall(r"[^\W\d_]+", a.lower()), re.findall(r"[^\W\d_]+", b.lower())
@@ -133,6 +158,34 @@ def reference_samples(speaker: str | Collection[str], records: list[dict[str, An
     return out[:limit] if limit else out
 
 
+def stitched_sample(speaker: str | Collection[str], records: list[dict[str, Any]], *, min_s: float = SAMPLE_MIN_S,
+                    max_s: float = SAMPLE_MAX_S, piece_min_s: float = MIN_PIECE_S) -> dict[str, Any] | None:
+    """A clip stitched from several short solo cues of one person (when no single stretch is long enough).
+
+    The longest cues (at least ``piece_min_s``) are taken until the total reaches ``min_s`` (and there are two); a cue that would
+    push the total past ``max_s`` is skipped. Needs two pieces at least. Times are seconds, ``pieces`` in time order.
+    """
+    ids = {speaker} if isinstance(speaker, str) else set(speaker)
+    solo = [r for r in records if r.get("speaker") in ids and not r.get("overlap") and not r.get("ocr")
+            and (r["end"] - r["start"]) / 1000 >= piece_min_s]
+    chosen: list[dict[str, Any]] = []
+    total = 0.0
+    for r in sorted(solo, key=lambda r: (-(r["end"] - r["start"]), r["start"])):
+        length = (r["end"] - r["start"]) / 1000
+        if total + length > max_s:
+            continue
+        chosen.append(r)
+        total += length
+        if total >= min_s and len(chosen) >= 2:
+            break
+    if total < min_s or len(chosen) < 2:
+        return None
+    chosen.sort(key=lambda r: r["start"])
+    return {"start": chosen[0]["start"] / 1000, "end": chosen[-1]["end"] / 1000,
+            "pieces": [[r["start"] / 1000, r["end"] / 1000] for r in chosen],
+            "text": " ".join(" ".join(r["text"]) for r in chosen), "cues": len(chosen), "stitched": True}
+
+
 def cue_speech_s(speaker: str, records: list[dict[str, Any]]) -> float:
     """Seconds of a speaker's cues (burned-in captions left out); for speakers the diarizer gave no talk time
     (people only the subtitles name)."""
@@ -174,11 +227,11 @@ class VoiceBank:
         return self.data["prints"]
 
     def match(self, embedding: list[float], episode: str) -> list[dict[str, Any]]:
-        """Names of other episodes' prints, best similarity first (one entry per person)."""
+        """Names of other episodes' named prints, best similarity first (one entry per person)."""
         probe = _unit(embedding)
         best: list[dict[str, Any]] = []
         for p in self.prints:
-            if p["episode"] == episode:
+            if p["episode"] == episode or not p.get("name"):
                 continue
             score = round(float(probe @ _unit(p["embedding"])), 3)
             entry = next((b for b in best if same_person(b["name"], p["name"])), None)
@@ -192,24 +245,54 @@ class VoiceBank:
                 entry.update(score=score, episode=p["episode"], speaker=p["speaker"])
         return sorted(best, key=lambda m: -m["score"])
 
-    def add_episode(self, episode: str, speakers: list[dict[str, Any]], records: list[dict[str, Any]]) -> int:
-        """Replace this episode's prints by its named, well-heard speakers; returns their number.
+    def match_identities(self, embedding: list[float], episode: str) -> list[dict[str, Any]]:
+        """Identities of other episodes' prints, best similarity first (one entry per identity)."""
+        probe = _unit(embedding)
+        best: dict[str, dict[str, Any]] = {}
+        for p in self.prints:
+            if p["episode"] == episode or p.get("name") or not is_identity(p.get("identity")):
+                continue
+            score = round(float(probe @ _unit(p["embedding"])), 3)
+            entry = best.get(p["identity"])
+            if entry is None or score > entry["score"]:
+                best[p["identity"]] = {"identity": p["identity"], "score": score, "episode": p["episode"],
+                                       "speaker": p["speaker"], "gender": p.get("gender")}
+        return sorted(best.values(), key=lambda m: -m["score"])
 
-        A speaker needs a name, an embedding and ``MIN_SPEECH_S`` of speech (the card's, else the length of its cues).
-        A name counts as sure when the subtitles, the voice bank or a person gave it, when the speaker is a person of
-        the season voices, or when the LLM was at least ``MIN_CONFIDENCE`` sure. The ids are the ones in ``speakers``
-        (the current numbering), so run it with the final cards of the episode.
+    def new_identity(self) -> str:
+        """Issue the next identity id ("V01", ...); a bank file without ``next_identity`` continues after its largest."""
+        used = [int(p["identity"][1:]) for p in self.prints if is_identity(p.get("identity"))]
+        number = max(int(self.data.get("next_identity") or 1), max(used, default=0) + 1)
+        self.data["next_identity"] = number + 1
+        return f"V{number:02d}"
+
+    def add_episode(self, episode: str, speakers: list[dict[str, Any]], records: list[dict[str, Any]]) -> int:
+        """Replace this episode's prints by its named or identified, well-heard speakers; returns their number.
+
+        A speaker needs a name (or an identity), an embedding and ``MIN_SPEECH_S`` of speech (the card's, else the length
+        of its cues). A name counts as sure when the subtitles, the voice bank or a person gave it, when the speaker is
+        a person of the season voices, or when the LLM was at least ``MIN_CONFIDENCE`` sure; an identity needs no
+        confidence. The ids are the ones in ``speakers`` (the current numbering), so run it with the final cards of
+        the episode.
         """
         self.data["prints"] = [p for p in self.prints if p["episode"] != episode]
         self.data["conflicts"] = [c for c in self.data.get("conflicts", []) if c["episode"] != episode]
         added = 0
         for s in speakers:
             speech_s = print_speech_s(s, records)
-            if not s.get("name") or not s.get("embedding") or speech_s < MIN_SPEECH_S or not sure_name(s):
+            identity = None if s.get("name") else s.get("identity")
+            if not s.get("embedding") or speech_s < MIN_SPEECH_S:
+                continue
+            if identity:
+                if not is_identity(identity):
+                    continue
+            elif not s.get("name") or not sure_name(s):
                 continue
             self.prints.append({
-                "episode": episode, "speaker": s["id"], "name": s["name"], "label_ru": s.get("label_ru"),
-                "gender": s.get("gender"), "speech_s": round(speech_s, 2), "source": s.get("name_source") or "llm",
+                "episode": episode, "speaker": s["id"], "name": s.get("name") if not identity else None,
+                "identity": identity, "label_ru": s.get("label_ru") if not identity else None,
+                "gender": s.get("gender"), "speech_s": round(speech_s, 2),
+                "source": "identity" if identity else s.get("name_source") or "llm",
                 "confidence": s.get("llm_confidence"), "embedding": s["embedding"],
                 "cues": s.get("cues"), "samples": reference_samples(s["id"], records),
             })
@@ -221,15 +304,19 @@ class VoiceBank:
         return added
 
     def people(self) -> list[dict[str, Any]]:
-        """Per name: episodes, total speech and the reference stretches, longest first."""
+        """Per person (name, else identity): episodes, total speech and the reference stretches, longest first."""
         people: list[dict[str, Any]] = []
         for p in self.prints:
-            person = next((x for x in people if same_person(x["name"], p["name"])), None)
+            key = person_key(p)
+            if key is None:
+                continue
+            person = next((x for x in people if same_key(person_key(x) or "", key)), None)
             if person is None:
-                person = {"name": p["name"], "label_ru": p.get("label_ru"), "gender": p.get("gender"),
+                person = {"name": p.get("name"), "identity": None if p.get("name") else key,
+                          "label_ru": p.get("label_ru"), "gender": p.get("gender"),
                           "episodes": [], "speech_s": 0.0, "samples": []}
                 people.append(person)
-            elif len(p["name"]) > len(person["name"]):
+            elif p.get("name") and len(p["name"]) > len(person["name"] or ""):
                 person.update(name=p["name"], label_ru=p.get("label_ru") or person["label_ru"])
             person["episodes"].append(p["episode"])
             person["speech_s"] += p.get("speech_s") or 0
@@ -278,14 +365,56 @@ def resolve(speakers: list[dict[str, Any]]) -> list[str]:
     return notes
 
 
+def resolve_identities(speakers: list[dict[str, Any]], bank: VoiceBank, episode: str,
+                       records: list[dict[str, Any]]) -> list[str]:
+    """Give every unnamed, well-heard, single-voice cluster a season identity ("V03"); returns notes for the log.
+
+    The identity of the closest print of another episode is taken when the match is strong and clear (like a name in
+    ``resolve``); else the cluster gets the identity this episode's earlier run issued for the same voice, else a new
+    one. Two clusters of one episode never share an identity. Earlier ``identity`` fields are dropped first, on every
+    card, so a rerun starts clean.
+    """
+    from stt.speakers import _is_mixed
+
+    for s in speakers:
+        s.pop("identity", None)
+        s.pop("identity_evidence", None)
+    eligible = [s for s in speakers
+                if s.get("cues") and not s.get("name") and s.get("embedding") and not _is_mixed(s)
+                and not (s.get("same_as") and s["same_as"] != s["id"])
+                and print_speech_s(s, records) >= MIN_SPEECH_S]
+    earlier = [p for p in bank.prints if p["episode"] == episode and not p.get("name") and is_identity(p.get("identity"))]
+    taken: set[str] = set()
+    notes = []
+    for s in sorted(eligible, key=lambda c: -print_speech_s(c, records)):
+        matches = [m for m in bank.match_identities(s["embedding"], episode) if m["identity"] not in taken]
+        if matches and matches[0]["score"] >= STRONG and (len(matches) < 2 or matches[0]["score"] - matches[1]["score"] >= MARGIN):
+            top = matches[0]
+            identity = top["identity"]
+            evidence = f"voice bank: {top['score']:.2f} with {top['speaker']} of {short(top['episode'])}"
+        else:
+            probe = _unit(s["embedding"])
+            own = [p for p in earlier if p["identity"] not in taken and float(probe @ _unit(p["embedding"])) >= STRONG]
+            if own:  # the same voice as in the last run of this episode: keep its id
+                identity = max(own, key=lambda p: float(probe @ _unit(p["embedding"])))["identity"]
+            else:
+                identity = bank.new_identity()
+            evidence = "a new voice of the season"
+        taken.add(identity)
+        s.update(identity=identity, identity_evidence=evidence)
+        notes.append(f"{s['id']} is the voice {identity} ({evidence})")
+    return notes
+
+
 def recheck(bank: VoiceBank) -> list[dict[str, Any]]:
     """Prints whose voice more other episodes know under another name (in at least MIN_SUPPORT, with a
     similarity of RECHECK_SCORE or more); relatives with one surname are never renamed into each other."""
     suggestions = []
-    for p in bank.prints:
+    named = [p for p in bank.prints if p.get("name")]  # identities have no name to suggest or to suggest against
+    for p in named:
         probe = _unit(p["embedding"])
         groups: list[dict[str, Any]] = []
-        for q in bank.prints:
+        for q in named:
             if q["episode"] == p["episode"]:
                 continue
             score = float(probe @ _unit(q["embedding"]))
@@ -431,7 +560,7 @@ def refresh_episode(bank_path: Path, episode_dir: Path, device: str = "cuda",
     """Rebuild the bank's prints of one episode from its final ``speakers.json`` / ``subs.en.json`` (after the season
     voices stage, which renumbers the speakers and gives every person one speaker). Returns the number of prints.
 
-    Every named speaker with enough speech and a sure name gets a print, also the people only the subtitles or the
+    Every named speaker (or speaker with an identity) with enough speech and a sure name gets a print, also the people only the subtitles or the
     season voices name. A speaker without an embedding gets one from its cues' audio (the model loads only then; an
     earlier print of the same name, id and cue count is reused). The episode's earlier prints are replaced, so a
     rerun never doubles them and no print keeps an id of the first pass. ``speakers.json`` is not touched.
@@ -441,9 +570,11 @@ def refresh_episode(bank_path: Path, episode_dir: Path, device: str = "cuda",
     bank = VoiceBank.load(bank_path)
     earlier = [p for p in bank.prints if p["episode"] == episode_dir.name]
     for s in speakers:
-        if not s.get("name") or s.get("embedding") or not sure_name(s) or print_speech_s(s, records) < MIN_SPEECH_S:
+        key = person_key(s)
+        if (key is None or s.get("embedding") or not (is_identity(key) or sure_name(s))
+                or print_speech_s(s, records) < MIN_SPEECH_S):
             continue
-        kept = next((p for p in earlier if p["speaker"] == s["id"] and same_person(p["name"], s["name"])
+        kept = next((p for p in earlier if p["speaker"] == s["id"] and same_key(person_key(p) or "", key)
                      and p.get("cues") == s.get("cues")), None)
         if kept is not None:
             s["embedding"] = kept["embedding"]
@@ -452,7 +583,7 @@ def refresh_episode(bank_path: Path, episode_dir: Path, device: str = "cuda",
             embed = SegmentEmbedder(device)
         s["embedding"] = person_embedding(episode_dir, s["id"], records, embed)
         if s["embedding"] is None:
-            log.warning("%s: no print for %s (no audio or no long cue)", episode_dir.name, s["name"])
+            log.warning("%s: no print for %s (no audio or no long cue)", episode_dir.name, key)
     added = bank.add_episode(episode_dir.name, speakers, records)
     bank.save()
     log.info("voice bank: %d prints from %s, %d in %s", added, episode_dir.name, len(bank.prints), bank.path)
@@ -483,17 +614,17 @@ def _read_media(media: str, start: float, duration: float, rate: int, channels: 
     return np.frombuffer(raw, dtype=np.float32).reshape(-1, channels).T
 
 
-def locate_person(episode_dir: Path, name: str, speaker: str) -> tuple[set[str], str, str]:
+def locate_person(episode_dir: Path, key: str, speaker: str) -> tuple[set[str], str, str]:
     """Where a person speaks in an episode: (speaker ids, cues file, speakers file).
 
     A print carries the speaker id of the first pass, but the season voices stage (``stt.season_voices``)
-    renumbers the speakers of the current files. So the person is found by name among the current cards;
-    without a card of that name the first-pass files (``*.before_voices.json``) are read with the print's id.
+    renumbers the speakers of the current files. So the person is found by name (or identity) among the current
+    cards; without a card of that person the first-pass files (``*.before_voices.json``) are read with the print's id.
     """
     speakers_path = episode_dir / "speakers.json"
     if speakers_path.exists():
         cards = json.loads(speakers_path.read_text(encoding="utf-8"))
-        ids = {s["id"] for s in cards if s.get("name") and same_person(s["name"], name)}
+        ids = {s["id"] for s in cards if person_key(s) and same_key(person_key(s) or "", key)}
         if ids:
             return ids, "subs.en.json", "speakers.json"
     first = ("subs.en" + FIRST_PASS + ".json", "speakers" + FIRST_PASS + ".json")
@@ -530,14 +661,14 @@ def load_rejected(out_dir: Path) -> list[dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
 
-def reject_reference(out_dir: Path, name: str) -> dict[str, Any] | None:
+def reject_reference(out_dir: Path, key: str) -> dict[str, Any] | None:
     """Mark a person's current clip as rejected (``rejected.json``); the next export picks another."""
     index = json.loads((out_dir / "references.json").read_text(encoding="utf-8"))
-    current = next((r for r in index if r["name"] == name), None)
+    current = next((r for r in index if person_key(r) == key), None)
     if current is None or current.get("source") == "manual":  # a hand-made clip is removed, not rejected
         return None
     rejected = load_rejected(out_dir)
-    rejected.append({"name": name, "episode": current["episode"], "start": current["start"]})
+    rejected.append({"name": key, "episode": current["episode"], "start": current["start"]})
     write_text_atomic(out_dir / "rejected.json", json.dumps(rejected, ensure_ascii=False, indent=1) + "\n")
     return current
 
@@ -556,8 +687,8 @@ def load_manual(out_dir: Path) -> list[dict[str, Any]]:
     return load_json_list(out_dir / "manual.json")
 
 
-def has_manual(manual: list[dict[str, Any]], name: str) -> bool:
-    return any(same_person(m["name"], name) for m in manual)
+def has_manual(manual: list[dict[str, Any]], key: str) -> bool:
+    return any(same_key(person_key(m) or "", key) for m in manual)
 
 
 def write_index(out_dir: Path, auto: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -566,9 +697,9 @@ def write_index(out_dir: Path, auto: list[dict[str, Any]]) -> list[dict[str, Any
     Always the last file a clip change writes: stt.run compares its time to decide which episodes to voice again.
     """
     manual = load_manual(out_dir)
-    index = [r for r in auto if r.get("source") != "manual" and not has_manual(manual, r["name"])]
+    index = [r for r in auto if r.get("source") != "manual" and not has_manual(manual, person_key(r) or "")]
     index += [{k: v for k, v in m.items() if k != "replaced"} for m in manual]
-    index.sort(key=lambda r: r["name"])
+    index.sort(key=lambda r: person_key(r) or "")
     write_if_changed(out_dir / "references.json", json.dumps(index, ensure_ascii=False, indent=1) + "\n")
     return index
 
@@ -593,8 +724,9 @@ def reason_text(why: dict[str, int]) -> str:
         return "в банке нет эпизодов с аудио и репликами этого человека"
     if not stretches:
         n = int(why["episodes"])
-        return (f"нет ни одного отрезка в {SAMPLE_MIN_S:.0f}-{SAMPLE_MAX_S:.0f} секунд, где человек говорит один "
+        text = (f"нет ни одного отрезка в {SAMPLE_MIN_S:.0f}-{SAMPLE_MAX_S:.0f} секунд, где человек говорит один "
                 f"(просмотрено {n} {_plural(n, 'эпизод', 'эпизода', 'эпизодов')})")
+        return text + (", склейка коротких кусков тоже не прошла" if why.get("stitched_failed") else "")
     parts = []
     if why.get("rejected"):
         parts.append(f"{why['rejected']} отклонено вручную")
@@ -603,6 +735,8 @@ def reason_text(why: dict[str, int]) -> str:
                       ("unchecked", "не проверено")):
         if why.get(key):
             parts.append(f"в {why[key]} {text}" if key != "unchecked" else f"{why[key]} {text}")
+    if why.get("stitched_failed"):
+        parts.append("склейка коротких кусков тоже не прошла")
     word = _plural(stretches, "кандидат", "кандидата", "кандидатов")
     return f"{stretches} {word}" + (": " + ", ".join(parts) if parts else "")
 
@@ -619,28 +753,74 @@ def clip_states(bank_path: Path, out_dir: Path | None = None) -> list[dict[str, 
     index = load_json_list(out_dir / "references.json")
     missing = load_missing(out_dir)
     rows: list[dict[str, Any]] = []
-    names = [p["name"] for p in bank.people()]
-    extra = [r["name"] for r in index if not any(same_person(r["name"], n) for n in names)]
-    people = {p["name"]: p for p in bank.people()}
-    for name in names + extra:
-        person = people.get(name, {})
-        ref = next((r for r in index if same_person(r["name"], name)), None)
+    people = {person_key(p) or "": p for p in bank.people()}
+    extra = [k for k in dict.fromkeys(person_key(r) for r in index)
+             if k and not any(same_key(k, n) for n in people)]
+    for key in [*people, *extra]:
+        person = people.get(key, {})
+        ref = next((r for r in index if same_key(person_key(r) or "", key)), None)
         known = ref or person
-        row: dict[str, Any] = {"name": name, "label_ru": known.get("label_ru"), "gender": known.get("gender"),
+        row: dict[str, Any] = {"name": None if is_identity(key) else key, "identity": key if is_identity(key) else None,
+                               "label_ru": known.get("label_ru"), "gender": known.get("gender"),
                                "speech_s": round(person.get("speech_s", 0.0), 1)}
         if ref:
             row.update(state="manual" if ref.get("source") == "manual" else "auto", wav=str(out_dir / ref["wav"]),
                        text=ref.get("text"), episode=ref.get("episode"), start=ref.get("start"), score=ref.get("score"),
                        music_db=ref.get("music_db"), duration=ref.get("duration"))
         else:
-            why = next((v for k, v in missing.items() if same_person(k, name)), None)
+            why = next((v for k, v in missing.items() if same_key(k, key)), None)
             row.update(state="missing", reasons=why, reason_ru=reason_text(why) if why else None)
         rows.append(row)
     return rows
 
 
+def stitched_best(places: list[tuple[str, Path, set[str], str, str, list[dict[str, Any]], float]],
+                  prints: list[np.ndarray], rejected: set[tuple[str, float]], embed: "SegmentEmbedder",
+                  audio_cache: dict[str, tuple[np.ndarray, int]], choose: Callable[..., tuple[Any, int]],
+                  why: dict[str, int], root: Path, rate: int) -> dict[str, Any] | None:
+    """The best clip stitched from a person's short solo cues, one candidate per episode (``None`` if none passes).
+
+    Every piece must have no other diarized voice inside; the probe audio and the media are the pieces joined with
+    ``SAMPLE_GAP_S`` of silence. Failures are counted into ``why["stitched_failed"]``.
+    """
+    candidates: list[dict[str, Any]] = []
+    failed = 0
+    for episode, episode_dir, ids, subs_file, speakers_file, records, offset in places:
+        sample = stitched_sample(ids, records)
+        if sample is None:
+            continue
+        pieces = [(a - offset, b - offset) for a, b in sample["pieces"]]
+        if (episode, round(sample["start"], 2)) in rejected or pieces[0][0] < 0 or any(
+                other_voice_seconds(episode_dir, ids, a, b, speakers_file) > MAX_OTHER_VOICE_S for a, b in pieces):
+            failed += 1
+            continue
+        audio, sr = audio_cache[episode]
+        silence = np.zeros(int(SAMPLE_GAP_S * sr), dtype=audio.dtype)
+        probe = np.concatenate([x for a, b in pieces for x in (audio[int(a * sr):int(b * sr)], silence)][:-1])
+        vector = embed(probe, sr)
+        score = round(max(float(vector @ q) for q in prints), 3)
+        if score < MIN_SAMPLE_SCORE:
+            failed += 1
+            continue
+        candidates.append({**sample, "episode": episode, "speaker": min(ids), "score": score})
+    candidates.sort(key=lambda c: -c["score"])
+
+    def read(c: dict[str, Any]) -> np.ndarray:
+        media = json.loads((root / c["episode"] / "source.json").read_text(encoding="utf-8"))["media"]
+        gap = np.zeros((2, int(SAMPLE_GAP_S * rate)), dtype=np.float32)
+        parts: list[np.ndarray] = []
+        for a, b in c["pieces"]:
+            parts += [_read_media(media, a, b - a, rate, 2), gap]
+        return np.concatenate(parts[:-1], axis=1)
+
+    best, noisy = choose(candidates, read)
+    if best is None:
+        why["stitched_failed"] = failed + len(candidates)
+    return best
+
+
 def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only: str | None = None,
-                      missing: bool = False) -> list[dict[str, Any]]:
+                      missing: bool = False, stitch: bool = True) -> list[dict[str, Any]]:
     """Cut the cleanest reference stretch of every person (or only ``only``) into ``out_dir``.
 
     Returns the index (``references.json``; other people's entries are kept when ``only`` is set).
@@ -651,7 +831,8 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
     a candidate needs every 3 s window of its vocals to sound like the person. Clean ones
     (accompaniment more than 20 dB under the voice) win, then the most similar. The clip is
     the separated vocals, 24 kHz mono, with 1 s of silence at the end. For a person left without
-    a clip the reasons are counted into ``missing.json``.
+    a clip the reasons are counted into ``missing.json``. When no single stretch passes and ``stitch`` is on,
+    one clip stitched from several short solo cues of the person is tried per episode (same checks).
     """
     import soundfile as sf
     import soxr
@@ -666,33 +847,34 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
     index_path = out_dir / "references.json"
     index: list[dict[str, Any]] = []
     if (only or missing) and index_path.exists():  # keep the other people's clips
-        index = [r for r in json.loads(index_path.read_text(encoding="utf-8")) if r["name"] != only]
-    have = {r["name"] for r in index} if missing else set()
+        index = [r for r in json.loads(index_path.read_text(encoding="utf-8")) if person_key(r) != only]
+    have = {person_key(r) for r in index} if missing else set()
     manual = load_manual(out_dir)
     why_missing = load_missing(out_dir) if (only or missing) else {}
     rejected = {(r["episode"], round(r["start"], 2)) for r in load_rejected(out_dir)}
     for person in bank.people():
-        if (only and person["name"] != only) or person["name"] in have:
-            if person["name"] in have:
-                why_missing.pop(person["name"], None)
+        key = person_key(person) or ""
+        if (only and key != only) or key in have:
+            if key in have:
+                why_missing.pop(key, None)
             continue
-        if has_manual(manual, person["name"]):
-            log.info("%s: has a clip made by hand, kept (stt.voice_bank --remove-manual returns to automatic)",
-                     person["name"])
-            why_missing.pop(person["name"], None)
+        if has_manual(manual, key):
+            log.info("%s: has a clip made by hand, kept (stt.voice_bank --remove-manual returns to automatic)", key)
+            why_missing.pop(key, None)
             continue
-        mine = [p for p in bank.prints if same_person(p["name"], person["name"])]
+        mine = [p for p in bank.prints if same_key(person_key(p) or "", key)]
         prints = [_unit(p["embedding"]) for p in mine]
         why = {"episodes": 0, "stretches": 0, "rejected": 0, "other_voices": 0, "low_score": 0, "noisy": 0,
                "unchecked": 0}
         looked: set[str] = set()
         searched: set[tuple[str, tuple[str, ...], str]] = set()
         candidates = []
+        places: list[tuple[str, Path, set[str], str, str, list[dict[str, Any]], float]] = []
         for p in mine:
             episode_dir = bank.path.parent / p["episode"]
             if not (episode_dir / "audio.wav").exists() or not (episode_dir / "subs.en.json").exists():
                 continue
-            ids, subs_file, speakers_file = locate_person(episode_dir, person["name"], p["speaker"])
+            ids, subs_file, speakers_file = locate_person(episode_dir, key, p["speaker"])
             if (p["episode"], tuple(sorted(ids)), subs_file) in searched:  # two prints of one person
                 continue
             searched.add((p["episode"], tuple(sorted(ids)), subs_file))
@@ -703,6 +885,7 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
             audio, sr = audio_cache[p["episode"]]
             source = episode_dir / "source.json"  # a test piece's audio and diarization start mid-episode
             offset = float(json.loads(source.read_text(encoding="utf-8")).get("start") or 0.0) if source.exists() else 0.0
+            places.append((p["episode"], episode_dir, ids, subs_file, speakers_file, records, offset))
             for sample in reference_samples(ids, records, limit=None):
                 if (p["episode"], round(sample["start"], 2)) in rejected:
                     why["stretches"] += 1
@@ -721,41 +904,56 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
         why["episodes"] = len(looked)
         candidates.sort(key=lambda c: -c["score"])
         why["low_score"] = sum(1 for c in candidates if c["score"] < MIN_SAMPLE_SCORE)
-        best: dict[str, Any] | None = None
-        for c in candidates[:SEPARATE_TOP]:
-            if c["score"] < MIN_SAMPLE_SCORE:
-                break
+        def choose(pool: list[dict[str, Any]], read: Callable[[dict[str, Any]], np.ndarray]) -> tuple[Any, int]:
+            """The best candidate that survives vocal separation, and how many fell out as noisy."""
+            found: dict[str, Any] | None = None
+            noisy = 0
+            for c in pool[:SEPARATE_TOP]:
+                if c["score"] < MIN_SAMPLE_SCORE:
+                    break
+                vocals, music_db = separate(read(c))
+                mono16 = soxr.resample(vocals.mean(0), separate.rate, 16_000)
+                windows = _window_scores(embed, mono16, 16_000, prints)
+                if min(windows) < MIN_WINDOW_SCORE:
+                    noisy += 1
+                    continue
+                c = {**c, "music_db": music_db, "min_window": round(min(windows), 3), "_vocals": vocals}
+                if found is None or (c["music_db"] < MUSIC_DB, c["score"]) > (found["music_db"] < MUSIC_DB, found["score"]):
+                    found = c
+            return found, noisy
+
+        def read_contiguous(c: dict[str, Any]) -> np.ndarray:
             media = json.loads((bank.path.parent / c["episode"] / "source.json").read_text(encoding="utf-8"))["media"]
-            stereo = _read_media(media, c["start"], c["end"] - c["start"], separate.rate, 2)
-            vocals, music_db = separate(stereo)
-            mono16 = soxr.resample(vocals.mean(0), separate.rate, 16_000)
-            windows = _window_scores(embed, mono16, 16_000, prints)
-            if min(windows) < MIN_WINDOW_SCORE:
-                why["noisy"] += 1
-                continue
-            c = {**c, "music_db": music_db, "min_window": round(min(windows), 3), "_vocals": vocals}
-            if best is None or (c["music_db"] < MUSIC_DB, c["score"]) > (best["music_db"] < MUSIC_DB, best["score"]):
-                best = c
+            return _read_media(media, c["start"], c["end"] - c["start"], separate.rate, 2)
+
+        best, noisy = choose(candidates, read_contiguous)
+        why["noisy"] += noisy
+        if best is None and stitch:
+            best = stitched_best(places, prints, rejected, embed, audio_cache, choose, why, bank.path.parent,
+                                 separate.rate)
         if best is None:
             why["unchecked"] = max(0, len(candidates) - why["low_score"] - why["noisy"])
-            why_missing[person["name"]] = why
-            log.info("%s: no clean reference among %d candidates (%s)", person["name"], len(candidates),
-                     reason_text(why))
-            (out_dir / f"{_safe_name(person['name'])}.wav").unlink(missing_ok=True)
+            why_missing[key] = why
+            log.info("%s: no clean reference among %d candidates (%s)", key, len(candidates), reason_text(why))
+            (out_dir / f"{_safe_name(key)}.wav").unlink(missing_ok=True)
             continue
-        why_missing.pop(person["name"], None)
+        why_missing.pop(key, None)
         voice = _finish_voice(soxr.resample(best.pop("_vocals").mean(0), separate.rate, CLONE_RATE))
-        stem = _safe_name(person["name"])
+        stem = _safe_name(key)
         sf.write(str(out_dir / f"{stem}.wav"), voice, CLONE_RATE, subtype="PCM_16")
         if transcriber is None:  # what is actually said in the clip: its edges may cut a word of the cue
             transcriber = load_transcriber(device)
         heard = transcribe_clip(transcriber, voice)
         text = heard or _words(bank.path.parent / best["episode"], best["start"], best["end"]) or best["text"]
         write_text_atomic(out_dir / f"{stem}.txt", text + "\n")
-        index.append({"name": person["name"], "label_ru": person.get("label_ru"), "gender": person.get("gender"),
+        index.append({"name": person.get("name"), "identity": person.get("identity"), "label_ru": person.get("label_ru"), "gender": person.get("gender"),
                       "wav": f"{stem}.wav", "text": text, "candidates": len(candidates),
-                      **{k: best[k] for k in ("episode", "speaker", "start", "end", "score", "min_window", "music_db")}})
-        log.info("%-24s %s %.1f-%.1fs score %.2f, windows >= %.2f, music %+.0f dB (%d candidates)", person["name"],
+                      **{k: best[k] for k in ("episode", "speaker", "start", "end", "score", "min_window", "music_db")},
+                      **({"stitched": True, "pieces": best["pieces"]} if best.get("stitched") else {})})
+        if best.get("stitched"):
+            log.info("%s: stitched from %d pieces, %s %.1f-%.1fs, score %.2f", key, len(best["pieces"]),
+                     short(best["episode"]), best["start"], best["end"], best["score"])
+        log.info("%-24s %s %.1f-%.1fs score %.2f, windows >= %.2f, music %+.0f dB (%d candidates)", key,
                  short(best["episode"]), best["start"], best["end"], best["score"], best["min_window"],
                  best["music_db"], len(candidates))
     write_text_atomic(out_dir / "missing.json", json.dumps(dict(sorted(why_missing.items())), ensure_ascii=False,
@@ -810,6 +1008,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--person", default=None, help="With --export: only this person's clip")
     parser.add_argument("--missing", action="store_true",
                         help="With --export: only people without a clip yet (a person keeps one voice)")
+    parser.add_argument("--no-stitch", action="store_true",
+                        help="With --export: do not try a clip stitched from short cues when no stretch is long enough")
     parser.add_argument("--reject", action="store_true",
                         help="With --export and --person: reject the current clip and pick another")
     parser.add_argument("--manual-clip", action="store_true",
@@ -848,7 +1048,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.export:
         if args.reject and args.person:
             reject_reference(args.export, args.person)
-        export_references(bank, args.export, args.device, only=args.person, missing=args.missing)
+        export_references(bank, args.export, args.device, only=args.person, missing=args.missing,
+                          stitch=not args.no_stitch)
         return 0
     if args.recheck:
         suggestions = recheck(bank)
@@ -865,7 +1066,7 @@ def main(argv: list[str] | None = None) -> int:
     for person in bank.people():
         best = person["samples"][0] if person["samples"] else None
         sample = f"{short(best['episode'])} {best['start']:.1f}-{best['end']:.1f}s" if best else "-"
-        print(f"{person['name']:24} {person.get('gender') or '?':7} {person['speech_s']:7.0f}s "
+        print(f"{person_key(person):24} {person.get('gender') or '?':7} {person['speech_s']:7.0f}s "
               f"{len(person['episodes'])} ep  best sample: {sample}")
     for c in bank.data.get("conflicts", []):
         print(f"conflict: {short(c['episode'])} {c['speaker']} {c['name']} sounds like {c['bank_name']} "

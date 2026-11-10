@@ -291,7 +291,9 @@ hearing-impaired name the speaker ("SANDRA: ..."), and broadcast captions mark a
 `subtitles.imdb` is either one IMDb id or a map `{"part of the video path": id}` (the first part
 found in the path wins; `null` means no online search). The shared config maps Survivor and The
 Amazing Race; Australian Survivor has `null`. For another show, add your own entry in
-`stt_config.local.json`.
+`stt_config.local.json`. Блок `shows` в `stt_config.json` хранит настройки отдельных шоу, он выбирается по тем же
+словам пути (The Amazing Race: голосовые идентичности, склеенные клипы и пул запасных голосов); принудительно:
+`--show <имя>`, отключить: `--show none`.
 
 What they change: each subtitle line is pinned to the words really heard. Named lines fix their
 words to that person; `>>` marks make a speaker change cheaper at that place. The answer,

@@ -5,6 +5,90 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Proposal of 10.11.2026: who speaks in any show (voice identities first, names second)
+
+Done on 10.11.2026 (branch `docs/universal-speaker-identification`): steps 1-3 of the plan below (identities in the voice
+bank and the season voices, clips keyed by name or identity, a clip stitched from short solo pieces when no 5 s stretch
+passes, a stand-in pool per person; `voice_bank.identities`, `voiceover.engines.f5.standin_pool`, `--no-stitch`); the
+Survivor stand (`output/exp_identities/`) and The Amazing Race S01E01-E03 (E01 voiced): numbers in `docs/experiments.md`
+(10.11 rows). Show profiles (the user's request after listening, 10.11 evening): the base config keeps the Survivor behaviour
+(`voice_bank.identities` and `voice_bank.stitch` false, no `standin_pool`); `shows` in `stt_config.json` holds per-show
+settings matched by the video's path words (`stt.run.show_of`, `--show <name>` / `--show none`); The Amazing Race turns
+the three features on. Not done: the card parser for team cards, the generic cast prompt (step 4), the self-clone
+fallback; a whole season.
+
+Asked by the user: the Survivor way of finding the speaker does not carry over to another show (The Amazing Race trial
+below: 4-6 of 22 racers per episode not separated, 26-39% of the F5 lines in a stand-in voice), and future shows need a
+way that does not depend on knowing who speaks: collect the voices of the season, clone each, and give every line to a
+voice by its print. Not started; nothing below is measured yet.
+
+Where the Survivor way is tied to the name (the facts behind the plan):
+- A person exists only with a name. `voice_bank.add_episode` keeps a print only for a named cluster (`MIN_SPEECH_S`,
+  `sure_name`); `season_voices.build_voices` builds a season centroid only for a named person (`min_words`); an unnamed
+  cluster stays a diarizer state of its own episode and is forgotten in the next one.
+- An unnamed cluster is voiced by the one generic voice of its gender (`dub.py`): every unnamed person of a gender
+  shares one voice for the whole season (S01E01 of The Amazing Race: clusters 23, named 19, with an own clone 11).
+- The name evidence is Survivor-shaped: a card with one name (a two-name team card counts as mixed and gives no voice
+  evidence); tribe, host and place regexes (`stt/tribes.py`, `assemble.PLACE_WORDS`, `subtitles.HOST_LABELS`,
+  `GENERIC_LABELS`); the cast prompt ("tribes", "voted out", `stt/cast.py`); the "Survivor-style" prompt of
+  `stt/onscreen.py`; `subtitle_base` defaults to `show="survivor"`.
+- A reference clip needs 5-9 s of one person (`SAMPLE_MIN_S`); an interview of a team rarely has it.
+- What is already show-independent: diarization, the ResNet293 refinement, the word-level Viterbi, the season voices
+  pass itself, the subtitle labels, the voice-bank thresholds, the line gender, the reference-clip gates.
+
+The plan: an identity is a voice print of the season; a name is a label on it.
+1. **Identity bank** (audio only, no show knowledge). Prints from the clean solo stretches of every cluster with enough
+   speech, named or not (`solo_stretches`: one diarized speaker, no overlap, music gate, pieces >= 1.5 s), matched across
+   episodes with the voice-bank thresholds (`STRONG` 0.75, `MARGIN` 0.1); no match = a new identity `V<k>`. Per identity:
+   centroid (interview / field sub-centroids when they split), audio gender (`line_gender` votes), speech seconds,
+   episodes, reference clips, the Russian voice. The season bank grows episode by episode, as the voice bank does now.
+2. **Word pass over identities** + the episode's clusters: the season voices Viterbi as it is, with identities as the
+   people. A cluster is dissolved when its words spread over several identities (a voice measure), not only when the
+   LLM's role text says "mixed".
+3. **Voice-over per identity.** A clone for every identity with a usable clip. When no 5 s solo stretch exists (team
+   interviews), a clip stitched from several 2-4 s solo pieces of the identity's own words. Identities without a clip
+   get a fixed stand-in from a pool (several Vosk voices cloned by F5 through `fallback_references`, the TeraTTS voices),
+   chosen once per identity for the season, so two unnamed people never share one voice.
+4. **Names as labels.** Evidence, all show-independent: subtitle labels ("NAME:"); any on-screen text near speech parsed
+   into {names, kind} (one name; "A & B" team; "NAME, city" lower third; place; title roll), a team card giving two
+   candidates split by gender, by the two voices under the card and by the dialogue; the cast list from a generic prompt
+   (host, participants, gender, relations); the dialogue itself (self-introductions, being addressed). A name attaches to
+   an identity with a confidence; two identities with the same sure name merge when their voices allow, else they stay
+   two voices of one person. Names feed the glossary, the translation and the UI; the voice-over needs none.
+5. **Show profile** in the config (`show`: cast prompt wording, card grammar, generic and host labels, IMDb id); the
+   Survivor-only pieces (tribes, place words, the "Survivor-style" prompt) move behind it. Nothing changes for Survivor.
+
+Measurement first. The experiments already show the risks: the diarizer's merges go into identities built without labels
+(cluster centroids put 61.9% of the words on their person, a person's own labelled words 79.8%); interview and field
+speech of one person sit apart (cosine 0.335 vs 0.428) and may become two identities; stitched clips are untested in
+ESpeech; r3 and the gender model were trained on Survivor.
+0. Harness: S51E01-E05 (SDH labels), The Amazing Race S01E01 (97 "NAME:" lines, 25 labels; S07 has labels too), old
+   S02/S05 (no names); stock ResNet293 and r3. Scores: hidden labelled lines on their person; identities per person and
+   persons per identity (B-cubed, `output/exp_spk/cluster_quality.py`); lines in a shared or stand-in voice; a new one,
+   the share of a person's lines voiced by the same Russian voice over the season (what the viewer hears).
+1. Identities without names on that harness against the named season voices (S51 71.6%). Decides the design: identities
+   alone, or identities + names (the expected answer; Survivor loses nothing either way). A day of agent work: the word
+   embeddings of those episodes are cached (`words.emb.<model>.npz`).
+2. The stand-in pool per identity: small, show-independent, a listening check.
+3. Stitched reference clips: blind listening against the 8 s clip of the same person (8 people x 6 lines, as in
+   `output/exp_voice/`).
+4. The card parser and the team split; the generic cast prompt; the show profile.
+5. A whole season of The Amazing Race S01 (more episodes per person, fewer racers later); the user's listening.
+
+Cloning from the line itself (the user's idea, 10.11: the diarizer cuts the stretch, the TTS clones the voice of that
+stretch, no identification at all). Cost is not the obstacle: `f5_worker` loads the reference inside every
+`infer_process` call and generates reference + line seconds each time, so a reference per line costs the same F5 time as
+one per person; cutting and gating a clip per line is seconds per episode. The obstacle is the audio: on S01E01 of The
+Amazing Race the median line is 1.8 s, 6% of the lines are 5 s or longer, and 25% have 5 s of clean speech of their
+own speaker around them (same cluster, gaps under 1 s, no overlap; 41% have 3 s). ESpeech needs 5-9 s (`SAMPLE_MIN_S`).
+A clip taken in the moment also copies the moment (shouting, laughing, music, wind, a second voice): the person's voice
+would change from line to line, which the user already refused for the mood clips (29.10). Kept as the fallback of step
+3: a line no identity claims, with 5 s of clean speech of its own, is cloned from itself before a stand-in is used.
+
+Not in the plan: audio LLMs as the judge (21% vs 64% for the prints, 5.11); faces (dropped by the user); per-show
+fine-tuning (per-season training dropped 1.11; adding the labelled Amazing Race seasons to r3's training set is a
+later idea, measured on `sets/fair` first).
+
 ## Trial of 8.11.2026: The Amazing Race (another show, unchanged pipeline)
 
 Asked by the user: how the pipeline works on another show. S01E01 (2001, SD AVI with MP3, online subtitles with 94

@@ -245,3 +245,26 @@ def test_the_host_gets_the_host_voice(tmp_path: Path) -> None:
     assert json.loads(episode._host_voices().read_text()) == {"S01": "ru_m1+eng_m3"}
     episode.engine = "f5"
     assert episode._host_voices() is None  # the host's own cloned voice there
+
+
+def test_standin_voice_for_the_three_spec_kinds(tmp_path: Path) -> None:
+    from unittest import mock
+
+    from voiceover import engine_f5
+
+    assert engine_f5.standin_voice("teratts:ru_f2", tmp_path, tmp_path) == "teratts:ru_f2"
+    clip = _ref(tmp_path, "mine")
+    assert engine_f5.standin_voice(clip, tmp_path, tmp_path) == engine_f5.voice_id(clip)
+
+    def synth(cmd: list[str], **kwargs: Any) -> None:
+        sf.write(cmd[cmd.index("--output") + 1], np.zeros(24000, dtype=np.float32), 24000)
+
+    with mock.patch.object(engine_f5.subprocess, "run", side_effect=synth) as run:
+        voice = engine_f5.standin_voice("vosk:12", tmp_path / "fb", tmp_path)
+        again = engine_f5.standin_voice("vosk:12", tmp_path / "fb", tmp_path)
+    wav = tmp_path / "fb" / "fallback_standin_vosk12.wav"
+    assert voice == again == engine_f5.voice_id(wav) and wav.with_suffix(".txt").exists()
+    assert run.call_count == 1 and "12" in run.call_args.args[0]
+    with mock.patch.object(engine_f5.subprocess, "run", side_effect=synth):  # file names of the generic voices stay
+        refs = engine_f5.fallback_references(tmp_path / "fb", tmp_path, {"female": 49})
+    assert refs == {"female": str(tmp_path / "fb" / "fallback_female_vosk49.wav")}
