@@ -72,7 +72,7 @@ class DubTest(unittest.TestCase):
              "gender": "male"},
             {"index": 4, "start": 9000, "end": 9500, "text": ["Ух ты."], "text_en": ["Wow."], "gender": "unknown"},
         ]
-        voiced, skipped = plan(records, {"female": 49, "male": 56, "unknown": 56})
+        voiced, skipped = plan(records, {"female": 49, "male": 56, "unknown": 56}, interjections="dense")
         self.assertEqual([r["source_index"] for r in voiced], [1, 3, 4])  # isolated "Wow." is kept
         self.assertEqual([r["voice"] for r in voiced], [49, 56, 56])
         self.assertEqual([r["index"] for r in voiced], [1, 2, 3])
@@ -697,9 +697,11 @@ class CrowdTest(unittest.TestCase):
 
         from stt.crowd import groups, pick_voices, render
 
-        skipped = [{"start": 1000, "end": 1500, "text": ["Давай!"], "gender": "male", "speaker": "S01"},
-                   {"start": 2500, "end": 3200, "text": ["Давай, давай!"], "gender": "female", "speaker": "S02"},
-                   {"start": 9000, "end": 9400, "text": ["Боже мой!"], "gender": "male", "speaker": "S03"}]
+        reason = "interjection over another speaker"
+        skipped = [{"start": 1000, "end": 1500, "text": ["Давай!"], "gender": "male", "speaker": "S01", "reason": reason},
+                   {"start": 2500, "end": 3200, "text": ["Давай, давай!"], "gender": "female", "speaker": "S02",
+                    "reason": reason},
+                   {"start": 9000, "end": 9400, "text": ["Боже мой!"], "gender": "male", "speaker": "S03", "reason": reason}]
         found = groups(skipped)
         self.assertEqual([(g["start"], g["end"], g["text"], g["crowd"]) for g in found],
                          [(1000, 3200, "Давай, давай!", True), (9000, 9400, "Боже мой!", False)])

@@ -124,6 +124,17 @@ def test_pinning_gets_the_words_of_each_voice() -> None:
     assert turn_starts(pinned) == [0, 5]
 
 
+def test_pinned_piece_keeps_the_matched_blocks_and_the_offset() -> None:
+    from stt.subtitles import WordIndex, pin_piece
+
+    words = _words("noise get on the mat", 10.9)
+    index = WordIndex(words)
+    pin = pin_piece(pieces_of((10.0, 12.0, ["Come on get on the mat"]))[0], index, 0.5)
+    assert pin is not None and pin.offset == 0.5 and pin.blocks == [(2, 1, 4)]
+    short = pin_piece(Piece("", "color", 10.9, 11.5, tokens=["color"]), WordIndex(_words("colour", 10.9)))
+    assert short is not None and short.blocks == [(0, 0, 1)]
+
+
 def test_text_the_audio_does_not_confirm_is_dropped() -> None:
     words = _words("we should vote out nick")
     pinned, _ = pin_pieces(pieces_of((10.0, 12.0, ["SANDRA: Completely different sentence here today."])), words)

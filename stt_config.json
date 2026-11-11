@@ -10,6 +10,7 @@
     "previous": {"label": "Прежний: без голосов сезона и субтитров, старая громкость",
                  "settings": {"season_voices": {"enabled": false}, "subtitles": {"enabled": false},
                               "on_screen": {"voice": "hero", "track": false},
+                              "dub": {"interjections": "dense"}, "crowd": {"enabled": false}, "fill": {"enabled": false},
                               "mix": {"rest_duck_db": 3.0, "voice_gain_db": 0.0, "loudness_lufs": null}}}
   },
   "ui": {"engines": ["vosk", "teratts", "f5"]},
@@ -62,8 +63,9 @@
   },
   "line_gender": {"enabled": true, "override": true, "voice_override": 0.9},
   "dub": {
-    "interjections": "dense"
+    "interjections": "overlap"
   },
+  "fill": {"enabled": true, "model": "whisper-large-v3", "min_s": 1.0, "min_score": 0.7, "subtitles": true, "edges": true, "voice": "neutral"},
   "voiceover": {
     "config": "voiceover_config.json",
     "engine": "f5,teratts,vosk",
@@ -102,5 +104,5 @@
     "widen": {"enabled": true, "engines": ["f5"], "max_band_hz": 7600},
     "video": {"compress": false, "target_gb": 2.0, "codec": "hevc_nvenc", "original_audio_kbps": 160}
   },
-  "crowd": {"enabled": false, "voices": 3, "gain_db": -4.0}
+  "crowd": {"enabled": true, "solo": true, "voices": 1, "gain_db": -3.0}
 }

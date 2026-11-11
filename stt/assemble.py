@@ -537,7 +537,8 @@ def build_cues(words: list[Word], options: CueOptions) -> list[Cue]:
             chars = sum(len(w.text) + 1 for w in current) + len(word.text)
             gap = word.start - prev.end
             limit = options.max_gap_s if _ends_sentence(prev) else options.max_gap_mid_s
-            if word.speaker != prev.speaker or word.caption != prev.caption or (gap > limit and not _fragment_pause(words, i, current, options)):
+            if word.speaker != prev.speaker or word.caption != prev.caption \
+                    or (word.source == "fill") != (prev.source == "fill") or (gap > limit and not _fragment_pause(words, i, current, options)):
                 flush(current)
                 current = []
             elif _ends_sentence(prev) and prev.end - current[0].start >= options.sentence_split_s:
@@ -614,6 +615,7 @@ def subtitle_records(
                 "overlap": cue.overlap,
                 "ocr": any(w.source == "ocr" for w in cue.words),
                 **({"on_screen": True} if any(w.caption for w in cue.words) else {}),
+                **({"fill": True} if any(w.source == "fill" for w in cue.words) else {}),
             }
         )
     return records

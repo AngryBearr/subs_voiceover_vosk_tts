@@ -12,6 +12,7 @@ Outputs in --out:
     asr.<model>.json              ASR segments with word timings
     voice.<diarizer>.json         gender/age per diarized speaker
     words.json                    every word with time and speaker
+    asr.fill.json, fill.json      with --fill: second recognition of stretches without words (stt.fill)
     onscreen.json                 with OCR: on-screen captions, name cards, lower thirds to show in Russian (stt.onscreen)
     subs.en.json / subs.en.srt    cues in the project subtitle schema (+ speaker, overlap)
     subs.en.speakers.srt          the same cues prefixed with speaker IDs, for review
@@ -237,6 +238,17 @@ def transcribe(args: argparse.Namespace) -> Path:
             ocr_job.wait()  # never leave the scan running after a failure elsewhere
 
 
+def _runs(words: list[Any], gap_s: float = 0.05) -> list[dict[str, Any]]:
+    """Consecutive words (no gap between them) as lines, for a report."""
+    lines: list[dict[str, Any]] = []
+    for w in sorted(words, key=lambda x: x.start):
+        if lines and w.start - lines[-1]["end"] <= gap_s and w.source == lines[-1]["source"]:
+            lines[-1]["end"], lines[-1]["text"] = w.end, lines[-1]["text"] + " " + w.text
+        else:
+            lines.append({"start": w.start, "end": w.end, "text": w.text, "source": w.source})
+    return lines
+
+
 def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Path, duration: float, audio: str,
                       chunks: str, stages: set[str], all_forced: bool, ocr_job: BackgroundStage | None,
                       wall0: float, ocr_inline: Callable[[], dict[str, Any]] | None = None) -> Path:
@@ -395,6 +407,29 @@ def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Pa
         log.info("On-screen items: %d -> %s", len(screen_items), out / "onscreen.json")
     elif (out / "onscreen.json").exists():
         (out / "onscreen.json").unlink()  # left over from a run with OCR
+    fill_stats: dict[str, Any] = {}
+    if args.subtitles and args.fill_subtitles:  # lines the captioner wrote where the recognition heard nothing
+        from stt import fill
+
+        sub_words, sub_stats = fill.from_subtitles(Path(args.subtitles), words, start_s=args.start or 0.0, end_s=duration,
+                                                edges=args.fill_edges)
+        words = sorted(words + sub_words, key=lambda w: w.start)
+        fill_stats["subtitles"] = sub_stats
+        save_json(out / "fill.subtitles.json", {"stats": sub_stats, "lines": _runs(sub_words)})
+        log.info("[fill] subtitles: %s", sub_stats)
+    if args.fill != "none":  # shouts the main recognition missed: words for stretches with speech but no words
+        from stt import fill
+        from stt.audio import read_wav
+
+        fill_words, whisper_stats = fill.run(out, read_wav(out / "audio.wav"), words, model=args.fill, device=args.device,
+                                             logs=logs, force=all_forced or "fill" in stages or asr_forced,
+                                             min_s=args.fill_min_s, min_score=args.fill_min_score, runner=run_stage)
+        words = sorted(words + fill_words, key=lambda w: w.start)
+        fill_stats.update(whisper_stats)
+        log.info("[fill] %s", whisper_stats)
+    else:
+        for name in ("asr.fill.json", "fill.json", "fill.chunks.json"):
+            (out / name).unlink(missing_ok=True)  # left over from a run with --fill
     words = assign_speakers(words, diarization, options)
     own_labels = [w.speaker for w in words]
     word_hints: Any = None  # existing subtitles (--subtitles): who speaks, pinned to the words
@@ -496,6 +531,8 @@ def _transcribe_steps(args: argparse.Namespace, media: Path, out: Path, logs: Pa
         "fuse_s": fuse_s,
         "align_s": asr_data.get("align_s"),
         "ocr_s": ocr_s,
+        "fill_s": fill_stats.get("fill_s"),
+        "fill": {k: fill_stats.get(k) for k in ("stretches", "stretch_s", "words", "subtitles")} if fill_stats else None,
         "voice_s": voice_data.get("run_s"),
         "ocr_hidden_s": round(ocr_job.hidden_s, 1) if ocr_job is not None else 0.0,  # OCR time behind other steps
         "ocr_parallel": ocr_job is not None,  # False: after the alignment (gpu.parallel, or no OCR)
@@ -570,6 +607,15 @@ def main(argv: list[str] | None = None) -> None:
                         help="Scan on-screen text beside the GPU models: auto = only if the card has room for it "
                              "(else one at a time), on = always, off = never")
     parser.add_argument("--ocr-fps", type=float, default=2.0, help="Frames per second scanned for on-screen text")
+    parser.add_argument("--fill", default="none",
+                        help="Second recognition pass on stretches with speech but no words (stt.fill): ASR model or none")
+    parser.add_argument("--fill-min-s", type=float, default=1.0, help="Shortest stretch for --fill, seconds")
+    parser.add_argument("--fill-min-score", type=float, default=0.7, help="Lowest mean word probability --fill keeps")
+    parser.add_argument("--fill-subtitles", action="store_true",
+                        help="With --subtitles: insert the subtitle lines the recognition heard nothing of (stt.fill)")
+    parser.add_argument("--fill-edges", action="store_true",
+                        help="With --fill-subtitles: complete partly recognised subtitle lines with their missing "
+                             "first/last words")
     parser.add_argument("--max-gap", type=float, default=0.8, help="Pause (s) after a sentence that starts a new cue")
     parser.add_argument("--max-gap-mid", type=float, default=1.0, help="Pause (s) inside a sentence that starts a new cue")
     parser.add_argument("--fragment-words", type=int, default=2,
@@ -581,7 +627,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--force",
         nargs="*",
-        choices=["all", "audio", "diarize", "asr", "fuse", "align", "ocr", "voice"],
+        choices=["all", "audio", "diarize", "asr", "fuse", "align", "ocr", "voice", "fill"],
         help="Recompute these cached stages (bare --force: all)",
     )
     args = parser.parse_args(argv)

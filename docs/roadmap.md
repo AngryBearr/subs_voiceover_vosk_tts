@@ -5,6 +5,94 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Plan of 10.11.2026: a voice where people shout (the user's request)
+
+The user (10.11): where people on screen shout (challenges, arguments) the dub is often silent; a neutral voice is
+fine, but something must be said so the viewer gets the context. Measured first (`output/exp_fill/silence_table.py`,
+`gap_causes.py`, `gap_models.py` on the finished S48E01-E07 of 9.11, S51E01 of 29.10 and S01E01-E05 of 7-9.11), the
+unvoiced speech of an episode falls into four causes:
+
+| cause | S48E01 (late, 87 min) | S48E02-E07 | S01E01-E05 (early, 44 min) |
+|---|---|---|---|
+| lines captioned on screen, shown as text only (`on_screen.voice: text`) | 361 s, 212 lines; the longest silent stretches of the episode (36, 15, 14 s) are all captions | 123-227 s per episode | 5-14 s (the old show rarely captions) |
+| interjections the dub left out ("Yeah!", "Go, go!", `dub.interjections: dense`) | 25 s, 30 lines | 7-26 s | 4-13 s |
+| stretches with speech by the VAD and no recognised word at all | 153 s in 46 stretches (20 s in 3 over 5 s) | 81-144 s | 102-132 s in 23-31 stretches, 23-61 s in 2-7 stretches over 5 s: the challenge climaxes (S01E01 24:27-24:44, 28:34-29:01: both models hear one "go!" and "Here we go.") |
+| crowd noise the captioners also wrote as `[cheering]`, `[indistinct chatter]` | 50 tag-only cues | 43-50 | no reference |
+
+So in the late seasons the silence is mostly the caption rule of 5.11 (the show captions exactly the loud scenes),
+in the early seasons it is the recognition. SDH reference cues with no recognised word within 0.25 s are only 2.1% of
+the S48 cues (10.8% of the shout-like ones: `[cheering]` tags or "!"), i.e. the recognition itself loses little that a
+captioner wrote down; the earlier measurement of 3.11 (`docs/experiments.md`, `output/exp_shout/asr/`) found Whisper
+on such a stretch alone recovers half of the lines it missed in the long chunk.
+
+Done 10.11 (branch `feat/neutral-voice-for-shouted-speech`), checked by unit tests and on CPU only (the GPU was
+busy with season 49):
+
+1. **Captioned lines stay as text** (the user's decision 11.11: whether a man or a woman says a captioned line is
+   rarely clear, the original voice with the Russian text over it is better than a guessed voice), so the biggest
+   cause of silence in the late seasons stays by choice. The `neutral` mode of `on_screen.voice` was improved for
+   whoever switches it on: an ASR line mostly under a caption (the 84 lines of S48E01 that `text` mode silences) is
+   compared with the caption's text (`onscreen.ru.json`): a copy of a caption that has its own line is left out, a
+   caption with no line of its own is said in the caption's words at the ASR line's time (`caption_text`), other
+   speech next to a caption stays as heard (`docs/stt_local.md`, On-screen text). S48E01 dub script in that mode:
+   1126 lines (56.5 min) -> 1344 (62.6 min); with `text` kept: S51E01 1301 -> 1347, S01E01 554 -> 566 (interjections).
+2. **Interjections** in a rapid exchange are voiced like any line (`dub.interjections` `dense` -> `overlap`); the ones
+   on top of another speaker go to the shout layer: `stt.crowd` generalised (`crowd.enabled` true, `solo` true, one
+   voice: the engine's generic voice of the gender, taken from `dub.report.json` or `--generic-voices`, so the ESpeech
+   track uses its TeraTTS fallback voice), mixed 3 dB under the voice-over without ducking the original; lone
+   backchannels ("Да.", "Ага.") stay out. Checked on CPU with Vosk on S01E01's 14 left-out lines.
+3. **Second recognition pass** `stt.fill` (`fill` in the config, on by default): Silero VAD speech minus the final
+   words -> stretches of 1 s or more, Whisper large-v3 on each stretch alone, guards against invented text (word
+   probability under 0.4, stock phrases such as "Thank you", an echo of the neighbouring known speech), the words join
+   the stream before speaker assignment as `source: "fill"`, their cues carry `fill: true` and are voiced by the
+   neutral voice (`fill.voice`). Not yet run on an episode.
+
+Measured 11.11 on the GPU (`output/exp_fill/eval_fill.py`, `docs/experiments.md`): the fill pass listens to 85-153
+stretches per episode (4-7 min), nearly all music and crowd noise; Whisper answers "Thank you." / "Thanks for watching!"
+on 46-60 of them and unsure cries ("Woo!", "No!", "Go!") on 18-67. With the guards and `min_score` 0.7 what stays is
+2 / 1 / 1 / 6 lines on S48E01 / E02 / E03 / S51E01 (invented 0 / 1 / 0 / 0; 67-100% of their words in the SDH text:
+"Here we go! Let's do it!", "Come on, paddle!", "Let's go! Let's go!", "Almost guys! Come on guys!") and 8 / 3 / 2
+lines on S01E01 / E02 / E03 ("Should we take a break? No! Keep paddling!", "Off the ground. Off the ground."). At 0.4
+there were 11-25 lines per episode, 7-16 of them invented. So the pass is cheap (10-16 s of GPU per episode) and nearly
+clean, but small: the SDH lines the main recognition misses mostly sit under other recognised speech, where a second
+listening cannot help. Kept on by default at 0.7.
+
+The user then pointed at S01E01 1:30-3:00 and 4:40-5:40 (the boat and the raft): people talk on screen, the dub is
+empty. Found there: 157-163 s is shouting of several people over music that no model hears even on the clip alone
+(the words Whisper did get, "Here we go", are smeared over 157-169 s), and 326-337 s is 11 s where only the fill pass
+hears something. But the episode's subtitles (tvsubtitles, in sync, shift 1.26 s) carry exactly these lines, and the
+pipeline took only the speaker names from them, dropping every line the audio did not confirm. So the fill takes the
+subtitles first (`fill.subtitles`, `stt.fill.from_subtitles`, `docs/stt_local.md`): unconfirmed lines whose time is free
+of words, as written, the labelled ones by their person. S01E01: 94 lines (342 words; "Listen up!", "Put them on!",
+"We got a great view of Snake Island! Get to work. We got oars. We got buckets."), S01E02-E05 36-100 lines each,
+S48E01 145 lines (667 words), S48E02/E03 7 and 3: far more than Whisper's second pass, and the captioner's text.
+Listening pieces of 11.11 for the user: S01E01 1:00-6:00 and 23:30-30:30, S48E01 8:30-12:30 with the three engines,
+captions as text (the user's choice), interjections voiced, the shout layer, the subtitle fill and the Whisper fill on:
+`STT_listen_2026-11-11_shouts/` (the subtitle fill added 18 / 46 / 9 lines to the three pieces: the boat piece now says
+"Слушайте!", "Надевайте! Вперёд! За дело!" at 2:39-2:45 and the raft lines at 5:18-5:36; Whisper's pass then found
+nothing more there). The user listened (11.11): the subtitle lines are fine. Asked next: also take from the subtitles
+the words a partly recognised line lacks (the start eaten by the host's shout). Done the same day (`fill.edges`,
+`docs/stt_local.md`): the matched runs of a pinned line are kept, the unmatched start/end/middle words go into the
+free time next to the matched word; 34-63 runs (48-85 words) per episode, 98% of them in the SDH text when the
+source is an independent file (`docs/experiments.md`). The three pieces were rebuilt with it (the earlier ones in
+`old_12-57_without_edges/`); the branch `feat/neutral-voice-for-shouted-speech` stays uncommitted until the user
+has listened.
+
+**Other recognisers (11.11, the user's question; research report `reports/Дообученный Whisper и лучшие распознаватели
+речи.md`, measurements in `docs/experiments.md`).** No fine-tuned Whisper beats large-v3 on our shouts (CrisperWhisper
+2.0: 30% of the unheard lines vs 50%); WhisperX is alive (3.8.6, May 2026) but would add nothing we lack; the Qwen
+forced aligner is no better than our CTC on shout timing. Of 16 cloud recognisers on the 581 unheard clips, only
+Microsoft MAI-Transcribe-2 (58%, $0.10 per audio hour) clearly beats our Whisper (50%), and ElevenLabs Scribe v2 (51%)
+matches it while inventing almost nothing on noise; the oracle "best of all models" reaches 80%, so the gain is in
+combining. Next step, if the user wants it: an OpenRouter speech-to-text backend in `stt.asr` (MAI-Transcribe-2 and
+Scribe v2 with word timestamps from `verbose_json`) used (a) as the recogniser of the fill pass instead of Whisper
+(4-7 min of audio per episode: about one cent; no word probabilities, so the guards become stock phrases, event tags
+and echo only) and (b) as a third source of the LLM fusion for the whole episode (about 8 cents per episode), both
+measured on S51E01-E05 against the SDH text before any default changes. The idea of
+separating the loudest voice from the crowd before recognition is last in line: the vocal stem made Whisper worse on
+exactly these clips (3.11: recovered 46% vs 50%, three times more invented phrases), and the two-voice separators
+measured 30.10 gave nothing for the speakers; it would be tried on the 581 clips of `output/exp_shout/asr/` first.
+
 ## Proposal of 10.11.2026: who speaks in any show (voice identities first, names second)
 
 Done on 10.11.2026 (branch `docs/universal-speaker-identification`): steps 1-3 of the plan below (identities in the voice

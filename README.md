@@ -199,7 +199,7 @@ cover `stt.run` only, not the classic pipeline.
 | `main` (default) | best quality: season voices, existing subtitles, three voice-overs, stress and speech checks |
 | `upload` | `main` plus video compression to about 2 GB per episode |
 | `fast` | Whisper only, Vosk only, no stress or speech checks, no season voices, no online subtitle search |
-| `previous` | no season voices, no subtitles, the old sound level |
+| `previous` | no season voices, no subtitles, the old sound level, captions as the hero's voice, no fill pass, no shout layer |
 
 Use `--preset upload` on the command line, or the radio "Набор настроек" on the tab "Обработка".
 
@@ -215,9 +215,14 @@ work folder, and episodes of one folder share a season glossary and a voice bank
    The video is also scanned twice per second for burned-in captions and name cards (OCR); a
    caption is used instead of the speech recognition's text, and the Russian translation of captions,
    name cards and place titles is shown right over the English text (a subtitle track, on by default; it can be
-   turned off in the player). By default captioned lines are not voiced (the original
-   sound stays; setting `on_screen.voice`: `text` | `neutral` | `hero`), because who says them is often unclear. Who speaks is worked
-   out here (section 8), and existing subtitles are looked up first (section 9).
+   turned off in the player). By default captioned lines are not voiced (the original sound stays under the
+   Russian text), because who says them, a man or a woman, is often unclear (setting `on_screen.voice`: `text` |
+   `neutral` - the track's neutral voice | `hero`). Where the recognition heard nothing but the audio has speech (shouts at challenges under
+   music and crowd noise), the lines of existing subtitles in sync are taken as the captioner wrote them (a line heard
+   only in part gets its missing first or last words from the subtitle too), and Whisper
+   listens to the stretches still empty once more, one by one (`fill`); what comes from either is voiced by the neutral
+   voice (a subtitle line with a speaker label by that person, completed words by the voice of their phrase). Who speaks is worked out here (section 8), and existing
+   subtitles are looked up first (section 9).
 2. **glossary**. A language model builds a list of names, places and terms of the season with
    their Russian spelling. Once per season it also gets the cast (people, nicknames, relations)
    from the season's Wikipedia article or the web.
@@ -227,7 +232,10 @@ work folder, and episodes of one folder share a season glossary and a voice bank
 4. **translate**. English to Russian, line by line, each line fitted to the time the speaker
    took. Lines that are too long are shortened; lines with a wrong first-person gender are fixed.
 5. **dub**. The dubbing script: which lines are voiced and with which voice. Short interjections
-   ("Yeah", "Wow") over someone else's speech stay in the original audio.
+   ("Yeah", "Wow") over someone else's speech do not fit the single Russian track: they are said
+   on a quieter layer of their own by the track's neutral voice (`crowd`), and interjections in a
+   rapid exchange are voiced like any line (`dub.interjections`). Lines captioned on screen (challenges,
+   whispers) and the lines the second recognition pass found (`fill`) are voiced by the neutral voice.
 6. **stress**. Russian stress marks. RUAccent places them; a rule removes marks from short words
    like "на" and "не" (except real cases such as "не было"); words RUAccent left bare get the
    dictionary stress; names and disputed words are re-checked by language models (three of
@@ -459,7 +467,7 @@ Folders (`paths` in the config; personal ones in `stt_config.local.json`):
   by default (default: each episode's work folder).
 
 Inside an episode folder: `subs.en.json`, `subs.ru.json` (and `.srt` copies), `dub.ru.<engine>.json`,
-`stress.json`, `speakers.json`, `glossary.json`, `ocr.json`, `words.json`, `subs.source.json`,
+`stress.json`, `speakers.json`, `glossary.json`, `ocr.json`, `words.json`, `fill.json`, `subs.source.json`,
 `subtitle_hints.json`, `season_voices.json`, `voiceover.<engine>/` (`export/track.wav`,
 `report.md`, `speech_check.md`), `review.json`, `review.srt`, `logs/`.
 
@@ -497,8 +505,9 @@ changed lines are synthesised), checks and mix. A stress typed as `+` before the
 ## 17. Configuration
 
 - `stt_config.json` - the shared settings: mode, models, diarizer, `season_voices`,
-  `subtitles`, language models (`llm`), `voice_bank`, `cast`, `translate`, `dub`,
-  `voiceover`, `mix`, `crowd` (an experimental layer of crowd shouts, off), `presets`, `paths`.
+  `subtitles`, language models (`llm`), `voice_bank`, `cast`, `translate`, `dub`, `fill` (the second
+  recognition pass on stretches the first heard nothing in), `voiceover`, `mix`, `crowd` (the layer that
+  says the shouts the dub left out), `presets`, `paths`.
 - `stt_config.local.json` - your differences, not in git, laid on top.
 - `voiceover_config.json` - details of voice synthesis and timeline fitting (`voiceover.config`
   points to it).

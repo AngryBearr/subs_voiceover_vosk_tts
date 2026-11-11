@@ -40,7 +40,7 @@ MIN_SOFT_LABEL_USES = 3  # a mixed or lower case name is a label only when the f
 HOST_LABELS = {"PROBST", "JEFF PROBST", "JEFF", "JONATHAN LAPAGLIA", "LAPAGLIA", "HOST JEFF"}
 HOST = "_HOST"
 
-_LABEL = re.compile(r"^\s*(?:(?:[-–—]|>>+)\s*)?([A-Za-z][A-Za-z .'’-]{1,23}):\s*(.*)$")
+_LABEL = re.compile(r"^\s*(?:(?:[-–—]|>>+)\s*)?([A-Za-z][A-Za-z0-9 .'’-]{1,23}):\s*(.*)$")  # "WOMAN 2:" counts
 _MAX_CAPS_LABEL = 21
 _MAX_SOFT_LABEL_WORDS = 3
 _DASH = re.compile(r"^\s*[-–—]\s*(.*)$")
@@ -74,6 +74,8 @@ class PinnedPiece:
     start: float
     end: float
     match: float
+    blocks: list[tuple[int, int, int]] = field(default_factory=list)  # matched runs: (token position, word index, size)
+    offset: float = 0.0  # the shift cue -> words that produced the match
 
 
 def tokens(text: str) -> list[str]:
@@ -279,14 +281,16 @@ def pin_piece(piece: Piece, index: WordIndex, offset: float = 0.0, margin: float
         if len(piece.tokens) > 2 or best < 0.75:
             return None
         where = a + k
-        return PinnedPiece(piece, index.index[where], index.index[where], index.starts[where], index.ends[where], round(best, 3))
+        return PinnedPiece(piece, index.index[where], index.index[where], index.starts[where], index.ends[where], round(best, 3),
+                           [(0, index.index[where], len(piece.tokens))], offset)
     share = sum(x.size for x in blocks) / len(piece.tokens)
     if share < (1.0 if len(piece.tokens) <= 2 else min_share):
         return None
     first, last = a + blocks[0].b, a + blocks[-1].b + blocks[-1].size - 1
     if last - first + 1 > 2 * len(piece.tokens) + 3:  # scattered matches: not this line
         return None
-    return PinnedPiece(piece, index.index[first], index.index[last], index.starts[first], index.ends[last], round(share, 3))
+    return PinnedPiece(piece, index.index[first], index.index[last], index.starts[first], index.ends[last], round(share, 3),
+                       [(x.a, index.index[a + x.b], x.size) for x in blocks], offset)
 
 
 def pin_pieces(pieces: Sequence[Piece], words: Sequence[Any]) -> tuple[list[PinnedPiece], float]:

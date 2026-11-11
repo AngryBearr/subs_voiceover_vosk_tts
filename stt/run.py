@@ -433,6 +433,14 @@ class Episode:
                      "--word-change-prior", str(word_speakers.get("change_prior", 0.15)),
                      "--word-window", str(word_speakers.get("window_s", 1.0)),
                      "--word-passes", str(word_speakers.get("passes", 1))]
+        fill = self.config.get("fill") or {}
+        if fill.get("enabled", True):
+            argv += ["--fill", fill.get("model", "whisper-large-v3"), "--fill-min-s", str(fill.get("min_s", 1.0)),
+                     "--fill-min-score", str(fill.get("min_score", 0.7))]
+        if fill.get("subtitles", True):
+            argv.append("--fill-subtitles")  # has an effect only with --subtitles below
+            if fill.get("edges", True):
+                argv.append("--fill-edges")
         subtitles = self.subtitle_source()
         if subtitles:
             argv += ["--subtitles", str(self.out / "subs.source.en.srt"), "--subtitle-turn-bonus",
@@ -744,8 +752,9 @@ class Episode:
         from stt import dub
 
         voices = ",".join(f"{k}={v}" for k, v in self._engine()["voices"].items())
-        argv = [str(self.out), "--voices", voices, "--interjections", self.config["dub"]["interjections"],
-                "--output", f"dub.ru.{self.engine}.json"]
+        argv = [str(self.out), "--voices", voices, "--interjections", self.config["dub"].get("interjections", "overlap"),
+                "--output", f"dub.ru.{self.engine}.json",
+                "--fill-voice", str((self.config.get("fill") or {}).get("voice", "neutral"))]
         if self.engine == "f5":
             argv += ["--speaker-voices", str(self._speaker_voices())]
         elif (host := self._host_voices()) is not None:
@@ -1106,11 +1115,14 @@ class Episode:
         if self.args.start:  # a test piece: the voice-over is on the episode timeline from 0
             argv += ["--start", str(self.args.start), "--voice-from-zero"]
         crowd = self.config.get("crowd", {})
-        if crowd.get("enabled"):  # experimental: cheers/chants by several voices, under the voice-over
+        if crowd.get("enabled"):  # shouts the dub left out, on a layer of their own under the voice-over
             from stt import crowd as crowd_layer
 
-            crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 3))])
-            argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -4.0)}"]
+            generic = ",".join(f"{k}={v}" for k, v in self._engine()["voices"].items())  # this engine's, not the last dub's
+            crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 1)),
+                              "--neutral-gender", str(self.on_screen()["neutral_gender"]), "--generic-voices", generic]
+                             + (["--solo"] if crowd.get("solo", True) else []))
+            argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -3.0)}"]
         mix.main(argv)
         started = time.monotonic()
         mix.encode_track(out_wav, self.track(self.engine))

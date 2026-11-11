@@ -13,7 +13,8 @@ video ─► audio 16 kHz ─┬─► VAD chunks ─► Whisper  (fast)
                        │               └► Cohere + Whisper → LLM fusion → CTC forced alignment (accurate)
                        └─► pyannote diarization (who speaks when) + gender/age per speaker
 video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.json
-        words + captions → speakers (sentence-level smoothing) → cues subs.en.json
+        VAD speech with no words → Whisper on each stretch alone (fill)  fill.json
+        words + captions + fill → speakers (sentence-level smoothing) → cues subs.en.json
         LLM: season glossary, speaker names, gender check             glossary.json, speakers.json
         LLM: EN → RU per cue time window, shortening, gender fix      subs.ru.json
         dubbing script: voiced lines, a voice per line                dub.ru.<engine>.json
@@ -193,7 +194,7 @@ if the worker fails).
 | `main` (default) | best quality: season voices, existing subtitles, three voice-overs, stress and speech checks |
 | `upload` | `main` plus `mix.video.compress` to about 2 GB per episode |
 | `fast` | `mode: fast` (Whisper only), Vosk only, no stress or speech checks, no season voices, no online subtitle search |
-| `previous` | no season voices, no subtitles, the old sound level (`rest_duck_db` 3, `voice_gain_db` 0, no loudness target) |
+| `previous` | no season voices, no subtitles, the old sound level (`rest_duck_db` 3, `voice_gain_db` 0, no loudness target), captions voiced as the hero's, interjections `dense`, no fill pass, no shout layer |
 
 ## What runs where
 
@@ -316,12 +317,24 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   `--on-screen-voice text|neutral|hero`). A manual speaker/gender fix in `corrections.json` wins and the
   line is voiced. With `on_screen.track` off, `text` falls back to `neutral` (logged warning), so the
   captioned lines are not lost. S51E01: 138 captions, 29 of them under other speech (mostly whispers
-  under a confessional) only ever shown as text.
+  under a confessional) only ever shown as text. The show captions exactly the loud scenes (challenges, shouting
+  under music), so with `text` the dub is silent there for minutes (S48E01: 212 captioned lines, 361 s; the longest
+  silent stretches of the episode, 36 s, 15 s, 14 s, are all captions). The user keeps `text` anyway (11.11): whether a
+  man or a woman says a captioned line is rarely clear, so the original voice with the Russian text over it is better
+  than a guessed voice.
 - In `text` mode a line with at least 30% of its time under a caption on screen (±0.4 s) is not voiced either
   (`stt.dub.under_captions`): when the ASR and the caption disagree, the ASR line is usually the caption's own
   speech misheard (S48E01 1:21: "I don't like being in the snow bathroom" under "I really needed this so badly").
   A long line that only touches a caption (a confessional over a whispered exchange) stays voiced. S48E01: 75 such
-  lines silenced, 64 touching a caption kept.
+  lines silenced, 64 touching a caption kept. In `neutral` mode (since 10.11) such a line is compared with its caption
+  (`onscreen.ru.json`): when the caption has a line of its own, the ASR copy is left out if the texts look alike
+  (character similarity 0.65+) or it is a fragment of two words or less, and kept when it is other speech next to the
+  caption ("I'm half Guyanese." under "You're Guyanese?"); when the caption has no line of its own (it was a quieter
+  voice under the ASR's sentence), the ASR line says the caption's Russian text at the time the ASR heard it
+  (`caption_text` in the record, the neutral voice; once per caption), unless the ASR line has over twice the
+  caption's words (then the caption really was a quiet voice under other speech, which stays as heard). S48E01: of the
+  84 lines `text` mode silenced, 31 say their caption's text, 10 copies or fragments and 10 second lines under the same
+  caption are left out, the rest are voiced as heard; the dub grows from 1126 lines (56.5 min) to 1344 (62.6 min).
 - `onscreen.json` (written by the transcribe stage): captions, name cards (+ descriptor) and lower
   thirds with their screen box; `python -m stt.onscreen translate <folder>` (run in the translate
   stage) writes `onscreen.ru.json` with the cast's Russian names and the glossary, cached per text and
@@ -757,6 +770,63 @@ Fixes go into `corrections.json` in the episode folder, keyed by line number:
 it (for `--engine teratts` too); `speakers.override.json` works the same way for the speakers
 stage.
 
+## Shouts the recognition missed (the fill pass, on by default since 10.11.2026)
+
+**From the subtitles first** (11.11, `fill.subtitles`, `stt.transcribe --fill-subtitles`, `stt.fill.from_subtitles`):
+when the episode has existing subtitles in sync (`--subtitles`, section "Existing subtitles"), a line the audio did not
+confirm (`stt.subtitles.pin_pieces`) whose time holds no recognised word is inserted as the captioner wrote it, its
+words spread over the line's time shifted by the local offset the pinning found; the file must pin at least half of
+its lines, else nothing is taken. A line with a speaker label keeps that person (`source: "subtitle"`; the hints then
+pin it like any named line), an unlabelled one is a `fill` line (the neutral voice). Credits ("Captioning sponsored
+by CBS"), cries alone ("Aah!", "Whoo!"), lines over 12 s and lines over recognised words are left out. S01E01
+(tvsubtitles file, shift 1.26 s, 79% of 983 lines pinned): 94 lines, 342 words, among them the boat at 2:38-2:43
+("Listen up!", "Put them on!") and the raft at 5:24-5:37 ("We got a great view of Snake Island! Get to work. We got
+oars. We got buckets.", "Hey, who knows, we could make a mud house with it."), where both models hear nothing; S01E02-E05
+36-100 lines each; S48E01 (embedded SDH) 145 lines, 667 words ("You okay? You wanted Survivor, this is it, right here.
+Get through that mud."), S48E02/E03 7 and 3. `fill.subtitles.json` lists them. Whisper then listens only to what is
+still free.
+
+**The edges the recognition dropped** (11.11, the user's request; `fill.edges`, on by default; `stt.transcribe
+--fill-edges`): a line the words confirm only in part (the host shouts the first words, the recognition starts
+mid-sentence) gets its missing words from the subtitle. `stt.subtitles.pin_piece` now keeps the matched runs
+(`PinnedPiece.blocks`, `offset`); for every pinned line, and for an unconfirmed line that still matches a third of
+its tokens with a run of 3 or more (`EDGE_MIN_SHARE`, `EDGE_MIN_RUN`), the unmatched words at the start, at the end or
+between two matched words are placed in the free time next to the matched word: at most 1 s outside the shifted
+cue (`EDGE_TOL_S`), 0.15 s of room per word needed (`EDGE_MIN_WORD_S`), words of at most 0.5 s, never over a
+recognised word (a word the recognition heard differently between two matched ones is a disagreement, not a gap:
+"edge substituted"). Cries, single letters ("three s.") and runs over 8 words stay out. The words join the
+stream with `source: "edge"`, so they fall into the cue of the phrase they complete and get its speaker and voice
+(unlike `fill` lines, which form cues of their own). Measured 11.11 (`output/exp_fill/eval_edges.py`,
+`docs/experiments.md`): 34-63 runs, 48-85 words per episode (S01E01 "You are witnessing 16 Americans begin" before
+the recognised "an adventure that will...", S48E01 "Kamilla's through.", "You got to"); with an independent
+plain file as the source and the embedded SDH as the reference, 98% of the added words are in the SDH text.
+`fill.subtitles.json` lists them with the lines (`edges`, `edge_words`, `edge_candidates` in the stats).
+
+At challenges the main recognition often hears nothing of the shouts under music and crowd noise, while the voice
+activity detector does hear speech there: on S01E01 the challenge climaxes (24:27-24:44, 28:34-29:01) gave both
+models one word, on S48E01-E07 46 stretches of 2 s or more per episode (153 s) had no word at all. `stt.fill`
+(`"fill": {"enabled": true, "model": "whisper-large-v3", "min_s": 1.0, "min_score": 0.7, "voice": "neutral"}`;
+`stt.transcribe --fill MODEL --fill-min-s --fill-min-score`, `--force fill`) takes the Silero VAD speech regions
+minus the final words (captions included, each widened by 0.3 s), keeps the pieces of `min_s` or more, widens
+them by 0.25 s and lets Whisper listen to each piece alone (`stt.worker asr` on `fill.chunks.json`; the 3.11
+measurement, `docs/experiments.md`: half of the lines the long chunk missed come back this way). Guards against
+what the model invents on noise: a segment is dropped when its mean word probability is under `min_score`, when
+its text is a stock phrase ("Thank you.", "Thanks for watching!", "We'll be right back.", "Subtitles by ..."), is
+laughter or cries alone ("Ha ha ha", "Oh! Oh!": what a captioner writes as `[laughing]`), has no letters or a
+letter repeated four times ("AAAAAA"), lies outside its stretch, or repeats (half of its words in a row) the known
+speech within 3 s of the stretch (the model re-reads the edge of a sentence it was given). Repeated words are cut to
+four (`collapse_repeats`). Measured 11.11 (`docs/experiments.md`): most of the stretches are music and crowd noise,
+on which Whisper writes "Thank you." or unsure cries ("Woo!", "Aah!"), so the threshold is high (0.7): what stays is
+a few real lines per episode ("Here we go! Let's do it!", "Come on, paddle!", "Should we take a break? No! Keep
+paddling!") and almost nothing invented. The accepted words join the stream
+with `source: "fill"` before the speakers are assigned (so the diarizer's turn and the word-level pass can still
+give them a person); they form cues of their own (`fill: true` in `subs.en.json` / `subs.ru.json`), which the dub
+voices by the track's neutral voice (`fill.voice` `neutral`; `speaker` for the person's own voice).
+`fill.json` lists the accepted lines and the rejected ones with the reason. On an existing folder:
+`subs_env/bin/python -m stt.fill <episode folder> --model whisper-large-v3` (prints the lines, touches no
+other file); `output/exp_fill/eval_fill.py <folder> <sdh.srt>` scores them against SDH subtitles (supported words,
+invented lines, unheard SDH cues now covered).
+
 ## Simultaneous speech
 
 1. ASR yields one stream of words: the dominant voice is transcribed, quieter voices under it
@@ -769,7 +839,9 @@ stage.
    get one (majority) speaker and other speaker changes are moved to sentence boundaries (cues
    ending mid-sentence 31% → 12%).
 3. `stt.dub` drops interjections/backchannels ("Yeah", "Wow", "Go, go!") that sit on another
-   speaker or inside a rapid exchange (S10E01: 36 of 1180): they stay audible in the original.
+   speaker (`"dub": {"interjections": "overlap"}`, default since 10.11; `dense` also drops them inside a rapid
+   exchange, as before: S10E01 36 of 1180, S51E01 50): they stay audible in the original, and the shout layer
+   (item 6) says them on a layer of its own.
 4. The voice-over timeline solver never lets two Russian lines collide: it shifts lines within
    −360/+500 ms, speeds them up to a comfort limit and asks for shorter text only when needed.
 5. The original track stays under the voice. By default (`"mix": {"duck": "voices"}`) Hybrid
@@ -803,10 +875,13 @@ stage.
    `subs_env/bin/python -m stt.video_compress <video.ru.mkv> --target-gb 2` writes `<stem>.small.mkv` next to it (all
    audio and subtitle streams kept, AAC copied, others to stereo AAC 160k; the input is never changed);
    `--sample-minute 10 --sample-seconds 60` writes a `.sample.mkv` piece to judge the quality.
-6. Experimental crowd layer (`"crowd": {"enabled": true}`, `stt.crowd`): skipped interjections of
-   two or more speakers within 2 s, or chants ("Go, go, go!"), are said by three TTS voices at
-   once with 70 ms offsets, 4 dB under the voice-over, and added to the mix without ducking the
-   original. One person's "Oh my God!" stays in the original only.
+6. The shout layer (`"crowd": {"enabled": true, "solo": true, "voices": 1, "gain_db": -3.0}`, on by default
+   since 10.11; `stt.crowd`): the interjections `stt.dub` left out come back on a layer of their own, added to the
+   mix after the ducking (3 dB under the voice-over, the original is not lowered for them): skipped interjections
+   within 2 s form a group whose longest Russian line is said by the engine's generic voice of the group's gender
+   (the neutral voice when nobody's gender is known; in the ESpeech track its TeraTTS fallback voice). `"solo":
+   false` is the old experimental crowd layer: only crowds (two or more speakers, or a chant such as "Go, go,
+   go!"), `"voices": 3` says them by three voices at once with 70 ms offsets.
 
 `dub.ru.<engine>.json` carries a `voice` per line (by speaker gender); the voice-over uses it.
 
@@ -932,6 +1007,9 @@ episode: equal speaker purity, pyannote 2.5x faster. Full tables: `docs/stt_benc
 - `ocr.json` — captions, name cards and all text events with times and boxes.
 - `subs.source.en.srt`, `subs.source.json`, `subtitle_hints.json` — existing subtitles used for speakers (see above).
 - `words.json`, `diarization.*.json`, `asr.*.json`, `voice.*.json`, `timings.json`, `logs/`.
+- `fill.subtitles.json`, `fill.chunks.json`, `asr.fill.json`, `fill.json` — the lines taken from the subtitles and the
+  second recognition pass on stretches without words (above);
+  `crowd.<engine>.wav/.json` — the shout layer of the mix (`stt.crowd`).
 - With the season voices stage: `season_voices.json`, `*.before_voices.json` (the first pass), and `<season>.season_voices.npz` beside the voice bank.
 
 Manual fixes: `speakers.override.json` (`{"S04": {"gender": "female", "label_ru": "Анна"}}`),
