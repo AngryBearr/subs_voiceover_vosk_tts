@@ -247,3 +247,93 @@ Gender: 15877 clean rows; classifier-only grouped development split 1277 rows / 
 The controlled gender comparison improves balanced accuracy, but per-person accuracy regresses 97.99% -> 97.54%; confidence precision also decreases slightly while coverage grows. These are development results, not an untouched final test.
 
 Shout/angry performance: **not measured**, no genuinely audited labeled set remains. No claim that shouting is fixed. No production model/configuration pointers changed; candidates and regressions are retained for review. S21E01 `Young at Heart` remains reserved and undubbed; it is absent from current/all extant known training manifests. Missing historic `data_p1` and gender row/backbone hashes are still historical limitations, not reconstructed history. Commands, exact hashes, split row IDs, metrics/denominators and GPU traces: `output/speaker_audit_20261103/retraining/`.
+
+## Cheaper stress jury (13.11.2026)
+
+Question: can the paid stress jury (sol via the ChatGPT subscription + Claude Sonnet 5.5 via OrcaRouter + Gemini 4
+Argon via OpenRouter, about $0.05 per episode) move to subscription models without losing quality? (The jury votes on
+Russian word stress; translation and its proofread already run on sol through the subscription and cost $0.)
+
+Set: 925 past vote items from 47 episodes with `stress-v5` (all 625 items where the jury split, 150 unanimous
+corrections, 150 unanimous "RUAccent is right"); harness `output/exp_jury/` (`jury_eval.py`, `compare.py`). Reference
+for split items: 150 of them stressed blind by Claude Opus 5.5 and checked against dictionary norms; 24 where both
+readings are acceptable left out, 126 scored.
+
+| model / line-up | unanimous keep | unanimous change | split items (gold) |
+|---|---|---|---|
+| current jury sol+sonnet+argon | 150/150 | 150/150 | 108/126 |
+| sol alone | — | — | 94/126 |
+| sonnet alone | — | — | 25/126 |
+| argon alone (OpenRouter) | 150/150 | 150/150 | 113/126 |
+| argon via OpenCode Go | 149/150 | 149/150 | 111/126 |
+| gpt-6-astra (ChatGPT subscription) | 146/150 | 149/150 | 106/126 |
+| gemini-4-hydrogen (OpenRouter) | 149/150 | 145/150 | 111/126 |
+| claude-haiku-5.5 via OpenCode Go | 125/150 | 127/150 | 71/126 (11 no answer) |
+| Go argon + astra, both must agree | 149/150 | 148/150 | 112/126 |
+
+Findings: when the jury splits, Sonnet is nearly always the odd one out and wrong; sol sides with it often enough to pass
+wrong stresses (примени́т, Капи́тана Америки, Ма́геллана). Gemini Argon alone beats the trio. The same Argon through
+the OpenCode Go plan answers the same (differences of 2-3 items are run-to-run noise). Hydrogen is no cheaper in
+practice: it reasons at length, 925 items cost about $1.3, roughly ten times Argon. Haiku is too weak. Qwen 3.8 Max
+(9 min for 5 items) and GLM 5.3 (hung) were too slow through Go, Kimi K3 gave no usable answers.
+
+Second round (same set, models the user suggested; partial = stopped when the Go 5-hour limit was hit):
+
+| model | unanimous keep / change | split items (gold) |
+|---|---|---|
+| muse-spark-1.3-contributor via Go | 143/150, 140/150 | 102/126 |
+| step-5-preview via Go | 134/150, 136/150 | 74/126 |
+| minimax-m3 via Go | 130/150, 102/150 | 60/126 (15 no answer) |
+| mistral-large-4 (OpenRouter) | 133/150, 101/150 | 64/126 |
+| mimo-v2.6-pro (OpenRouter) | 100/150, 99/150 | 71/126 (43 no answer) |
+| deepseek-v4.1-flash via Go, partial | — | 58/66 (Argon on the same items 58/66) |
+| deepseek-v4.1-flash (OpenRouter), partial | — | 48/63 (Argon 54/63) |
+
+None beats Argon; DeepSeek V4.1 Flash through Go tied with it on the part it finished but is slow (timeouts on
+40-item batches). Reasoning models write 200-500 tokens per item here (Argon about 20), so on OpenRouter they are not
+cheaper than Argon; the second round cost about $4.5. Argon in real jury runs: median 3.8k tokens in / 1.7k out per
+episode, about $0.025 at OpenRouter prices, about $0.33 per 13-episode season.
+
+The tests (about eight models x 925 items) used up the OpenCode Go 5-hour limit ("usage limit reached (5-hour,
+resets in 4h 23m)"), for all Go models at once. The client used to treat that answer as transient: three retries, then
+the stress check split the batch in halves down to single items, hundreds of refused calls per batch. Now
+`utils/opencode_clean.OpenCodeError.quota` marks it, `voiceover.llm.LLMQuotaError` is not retried and the client makes
+no more calls that run; the stress vote and proofread give no answers for that model (a routed model hands over to its
+next transport at once). Chosen jury (user's config, 13.11): `opencode:opencode-go/gemini-4-argon` +
+`opencode:openai/gpt-6-astra`, a change needs both. Known gap: while Go is out of its limit the vote has one voter of two
+and corrects nothing (S48E01 check: 0 corrections), so such an episode keeps RUAccent's stresses.
+
+Side finding: OpenCode 2.2 reports healthy before it has read the clean config, so about half of the server starts
+failed the "foreign active agent" check (a subscription step then fell back to a paid router). `utils/opencode_clean.py`
+now re-verifies for up to 10 s.
+
+## Stresses placed directly instead of checked (13.11.2026)
+
+Question (user): instead of RUAccent + screener + jury, can one model place every stress of the line at once, with
+the context? Also silero-stress alone and RUAccent's larger homograph model. Harness `output/exp_jury/place_eval.py`
+/ `place_score.py`: the 426 sentences of the jury set with a trusted label (126 split items with the blind gold, 150
+unanimous keep, 150 unanimous change; of the "change" ones 84 differ from RUAccent only in the "+" before ё). The
+sentence goes without marks; the target word is scored, and the other words of two or more syllables are compared
+with RUAccent run the same way. LLMs through the ChatGPT subscription.
+
+| method | split (gold) | keep | change | other words changed vs RUAccent |
+|---|---|---|---|---|
+| pipeline now: RUAccent + jury (old trio) | 108/126 | 150 | 150 | — |
+| jury of Go Argon + astra (from the jury test) | 112/126 | 149 | 148 | — |
+| RUAccent in the pipeline, no jury | 65/126 | 150 | 84 | — |
+| gpt-6-astra places all stresses | 99/126 | 148 | 146 | 2.9% (mostly fixes) |
+| gpt-6.1-sol places all stresses | 97/126 | 148 | 145 | 3.4% (mostly fixes) |
+| gpt-6.1-terra places all stresses | 88/126 | 138 | 146 | 4.5% |
+| gpt-6-luna places all stresses | 9/126 | 40 | 59 | text broken in 155 of 426, "+" put before words |
+| silero-stress alone | 94/126 | 82 | 134 | 3.1% |
+| RUAccent alone, `big_poetry` homograph model | 67/126 | 120 | 106 | 0.9% |
+| RUAccent alone, `turbo3.1` (ours) | 54/126 | 126 | 97 | — |
+
+Findings: a strong model placing everything at once is good on ordinary words (its changes to them are mostly real
+fixes: С+офи, +Алекс, понял+а, пор+а, вещ+ей, по-м+оему, двою́родные; a few harmful: нен+авидят, фл+агов, Ш+ахин),
+but on the hard words it is 10-13 of 126 behind the jury, about 1-2 more wrong stresses per episode (an episode has
+~13 such split items). Luna cannot do it. RUAccent alone run on single sentences is worse than in the pipeline (посл+е,
+п+отом), where per-cue processing and the rules help; `big_poetry` fixes 13 more homographs than `turbo3.1` there but
+breaks 6 others and is ~5x slower. RUAccent 1.5.8.3 and silero-stress 1.5 are the latest releases. The pipeline's
+own proofread (sol reads every line) already covers the ordinary-word errors. Not tested: Argon placing everything
+(OpenCode Go was out of its limit).
