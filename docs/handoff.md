@@ -27,10 +27,10 @@ f5|vosk|teratts`; browser UI: `subs_env/bin/python -m ui.dub_app`.
   (DiariZen, uses `models/diarizen/repo`); `stt_qwen_env` (optional comparisons) was deleted on
   29.10 (`bash scripts/setup_envs.sh qwen` makes it again). Everything: `bash scripts/install.sh`.
 - Config: `stt_config.json` (shared, in git) with `stt_config.local.json` on top (personal, not in
-  git: LLM through the opencode ChatGPT subscription with `router: ["orcarouter", "openrouter"]`
+  git: LLM through the opencode ChatGPT subscription with `router: ["openrouter"]`
   as fallback, `paths.finished`). `voiceover_config.json`: voice-over details (export level
   `loudness_db: -20`).
-- Keys in `.env` (OpenRouter, OrcaRouter, DeepSeek, HF): never print them.
+- Keys in `.env` (OpenRouter, DeepSeek, HF): never print them.
 - Videos: `/media/angrybear/large_storage/Survivor/Season 29 - San Juan Del Sur 1080p/`,
   `/media/angrybear/large_storage/Survivor (2000) RePack/Season 1..41/` (S20 = Heroes vs.
   Villains, no embedded subtitles), `/media/angrybear/large_storage/Survivor/Australia S10 1080p/`.
@@ -96,10 +96,10 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
 - **29.10**: cleanup (`docs/experiments.md`), `voiceover.cache_clean`, the season stress file,
   two lanes (`--engine f5,teratts,vosk`; the UI does it), `host_voice` `eng_m3+eng_m4` (picked by
   the user). The user's LLM rule (`stt_config.local.json`): a step with one model, sol or luna,
-  goes through OpenCode; other models through OrcaRouter; OpenRouter only where OrcaRouter fails or
-  lacks the model (gemini-4-argon, web search for the cast). OpenCode Go voters were tried and
-  rejected by the user. Stress voters: sol + claude-sonnet-5.5 (OrcaRouter) + gemini-4-argon
-  (OpenRouter); the shared default stays OpenRouter.
+  goes through OpenCode; other models through OpenRouter, which is also the only paid fallback
+  (OpenCode Go ids are mapped to OpenRouter ids; web search for the cast is OpenRouter's). Stress
+  voters: OpenCode Go gemini-4-argon + astra (no paid fallback on purpose); the shared default
+  stays OpenRouter.
 - **S51** (`output/stt`, videos in the user's `Season_51` folder: read only): E01 (86 min, the
   new season's first episode: cast from the web, glossary, voice bank and clips from scratch) in
   one detached run of `stt.run ... --engine f5,teratts,vosk`, 1 h 31 min, no failure, nothing done
@@ -157,7 +157,7 @@ of the same batches afterwards picks up whatever failed (S20: one OCR crash) and
   F5 cache: any re-run of an episode's voice-over stage then re-synthesises all its lines.
 - A newer `<season>.references/references.json` makes every earlier F5 episode re-dub (new clips
   should be used); it is no longer rewritten when unchanged.
-- The opencode ChatGPT token expires: runs fall back to OrcaRouter, then OpenRouter, silently;
+- The opencode ChatGPT token expires: runs fall back to OpenRouter, silently;
   the user re-logs with `opencode auth login`.
 - Reference subtitles of S20 run 0.5-3 s early, stepping at ad breaks: compare texts, not times.
 - Old repacks can have damaged video packets (S20E06): OCR now skips them.

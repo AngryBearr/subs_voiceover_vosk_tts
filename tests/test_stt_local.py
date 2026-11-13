@@ -310,11 +310,11 @@ class RunTest(unittest.TestCase):
             self.assertIn("openrouter:openai/gpt-6-luna:online,openrouter:anthropic/claude-haiku-5.5:online", calls[0])
             ep.cast.unlink()
             ep.config = {**ep.config, "llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"],
-                                              "router": ["orcarouter", "openrouter"], "stages": {"cast": [
+                                              "router": ["openrouter"], "stages": {"cast": [
                                                   "openai/gpt-6.1-sol", "openai/gpt-6-luna:online"]}}}
             with mock.patch("stt.cast.main", side_effect=fake_main):
                 self.assertTrue(ep._find_cast())
-            self.assertIn("opencode+orcarouter+openrouter:openai/gpt-6.1-sol,openrouter:openai/gpt-6-luna:online",
+            self.assertIn("opencode+openrouter:openai/gpt-6.1-sol,openrouter:openai/gpt-6-luna:online",
                           calls[1])  # the subscription reads Wikipedia; web search only by OpenRouter
             ep.cast.unlink()
             with mock.patch("stt.cast.main", side_effect=RuntimeError("no web")):
@@ -376,15 +376,15 @@ class RunTest(unittest.TestCase):
         legacy = Episode(Path("ep.mkv"), Path("out"), args, {"llm_model": "x/y"})
         self.assertEqual(legacy.llm("glossary"), "openrouter:x/y")
         routed = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
-            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": "orcarouter",
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": "openrouter",
             "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "openrouter:google/g"]}}})
-        self.assertEqual(routed.llm("translate"), "opencode+orcarouter:openai/gpt-6-luna")
-        self.assertEqual(routed.llm("stress"), ["opencode+orcarouter:openai/gpt-6.1-sol",
-                                                "orcarouter:anthropic/claude-sonnet-5.5", "openrouter:google/g"])
+        self.assertEqual(routed.llm("translate"), "opencode+openrouter:openai/gpt-6-luna")
+        self.assertEqual(routed.llm("stress"), ["opencode+openrouter:openai/gpt-6.1-sol",
+                                                "openrouter:anthropic/claude-sonnet-5.5", "openrouter:google/g"])
         chain = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
-            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"]}})
-        self.assertEqual(chain.llm("fuse"), "opencode+orcarouter+openrouter:openai/gpt-6-luna")
-        self.assertEqual(chain.llm("stress"), "opencode+orcarouter+openrouter:openai/gpt-6-luna")
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": ["openrouter"]}})
+        self.assertEqual(chain.llm("fuse"), "opencode+openrouter:openai/gpt-6-luna")
+        self.assertEqual(chain.llm("stress"), "opencode+openrouter:openai/gpt-6-luna")
         no_fallback = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
             "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "fallback": False}})
         self.assertEqual(no_fallback.llm("fuse"), "opencode:openai/gpt-6-luna")
@@ -411,13 +411,13 @@ class RunTest(unittest.TestCase):
                 mock.patch.object(stt.llm.OpenRouterClient, "_post", post), \
                 mock.patch.object(stt.llm, "load_api_key", return_value="k"), \
                 mock.patch.object(stt.llm.time, "sleep"):
-            client = stt.llm.OpenRouterClient("opencode+orcarouter:openai/gpt-6.1-sol")
+            client = stt.llm.OpenRouterClient("opencode+openrouter:openai/gpt-6.1-sol")
             self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
             self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
-        self.assertEqual(posted, [("orcarouter", "openai/gpt-6.1-sol")] * 2)
-        self.assertEqual(client.transport, "orcarouter")
+        self.assertEqual(posted, [("openrouter", "openai/gpt-6.1-sol")] * 2)
+        self.assertEqual(client.transport, "openrouter")
 
-    def test_router_without_the_model_hands_over_at_once(self) -> None:
+    def test_router_without_the_model_is_not_retried(self) -> None:
         import io
         import urllib.error
         from unittest import mock
@@ -428,16 +428,71 @@ class RunTest(unittest.TestCase):
 
         def post(self: stt.llm.OpenRouterClient, body: dict, router: str = "openrouter") -> dict:
             posted.append(router)
-            if router == "orcarouter":
+            if router == "openrouter":
                 raise urllib.error.HTTPError("u", 404, "model_not_found", {}, io.BytesIO(b"no such model"))
             return {"model": "g", "choices": [{"message": {"content": '{"ok": 1}'}}], "usage": {}}
 
         with mock.patch.object(stt.llm.OpenRouterClient, "_post", post), \
                 mock.patch.object(stt.llm, "load_api_key", return_value="k"), \
                 mock.patch.object(stt.llm.time, "sleep"):
-            client = stt.llm.OpenRouterClient("orcarouter+openrouter:google/gemini-4-argon")
+            client = stt.llm.OpenRouterClient("openrouter:google/gemini-4-argon")
+            with self.assertRaises(RuntimeError):
+                client.chat_json("s", "u")
+        self.assertEqual(posted, ["openrouter"])  # no retries of the missing model
+
+    def test_opencode_go_model_goes_to_the_router_under_its_openrouter_id(self) -> None:
+        import json
+        import urllib.request
+        from unittest import mock
+
+        import stt.llm
+
+        class _UsedUp:
+            def generate(self, *args: object, **kwargs: object) -> str:
+                raise stt.llm.OpenCodeError("HTTP 502: usage limit reached", transient=False)
+
+        sent: list[dict] = []
+
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"model": "g", "choices": [{"message": {"content": "{\\"ok\\": 1}"}}], "usage": {}}'
+
+        def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+            sent.append(json.loads(request.data))
+            return _Response()
+
+        with mock.patch.object(stt.llm, "shared_server", return_value=_UsedUp()), \
+                mock.patch.object(stt.llm, "load_api_key", return_value="k"), \
+                mock.patch.object(stt.llm.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(stt.llm.time, "sleep"):
+            client = stt.llm.OpenRouterClient("opencode+openrouter:opencode-go/gemini-4-argon")
             self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
-        self.assertEqual(posted, ["orcarouter", "openrouter"])  # no retries of the missing model
+            self.assertEqual([body["model"] for body in sent], ["google/gemini-4-argon"])
+            unknown = stt.llm.OpenRouterClient("openrouter:opencode-go/nope")
+            with self.assertRaisesRegex(RuntimeError, "no OpenRouter id for opencode-go/nope"):
+                unknown.chat_json("s", "u")
+        self.assertEqual(len(sent), 1)  # the unknown model sent nothing
+
+    def test_old_orcarouter_names_are_dropped(self) -> None:
+        import argparse
+
+        args = argparse.Namespace(season_glossary=None, force=None, until="dub")
+        old = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*", "opencode-go/*"],
+            "router": ["orcarouter", "openrouter"],
+            "stages": {"stress": ["orcarouter+openrouter:anthropic/x", "orcarouter:anthropic/y",
+                                  "opencode-go/gemini-4-argon"]}}})
+        self.assertEqual(old.llm("fuse"), "opencode+openrouter:openai/gpt-6-luna")
+        self.assertEqual(old.llm("stress"), ["openrouter:anthropic/x", "openrouter:anthropic/y",
+                                             "opencode+openrouter:opencode-go/gemini-4-argon"])
+        only = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {"model": "a/b", "router": "orcarouter"}})
+        self.assertEqual(only.llm("fuse"), "openrouter:a/b")
 
     def test_opencode_model_needs_no_api_key(self) -> None:
         from unittest import mock
@@ -807,7 +862,7 @@ class WorkerRetryTest(unittest.TestCase):
 
 
 class SubscriptionCheckTest(unittest.TestCase):
-    CONFIG = {"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"],
+    CONFIG = {"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["openrouter"],
                       "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5",
                                             "openrouter:google/gemini-4-argon"], "fuse": "opencode:openai/gpt-6-luna"}}}
 

@@ -63,9 +63,10 @@ from typing import Any
 from stt import gpu_budget, progress
 from stt.gpu import VramPeak
 from stt.runner import REPO_ROOT, load_json, save_json
-from utils.llm_route import split_route, with_route
+from utils.llm_route import ROUTERS, split_route, with_route
 
 log = logging.getLogger("stt.run")
+_WARNED_ROUTES: set[str] = set()  # unsupported router names already warned about
 
 STAGES = ["transcribe", "glossary", "speakers", "translate", "dub", "stress", "voiceover", "check", "mix"]
 
@@ -255,7 +256,7 @@ class Episode:
 
         The model id gets its route (``utils.llm_route``): models matching a pattern of
         ``llm.opencode`` (e.g. "openai/*") go through the OpenCode login of a subscription, with
-        ``llm.router`` (openrouter | orcarouter, or a list tried in order) as fallback unless
+        ``llm.router`` ("openrouter", or a list tried in order) as fallback unless
         ``llm.fallback`` is false; the rest go to ``llm.router``. Ids that already carry a route
         keep it.
         """
@@ -264,13 +265,37 @@ class Episode:
         model = stages[stage] if stages.get(stage) is not None else llm["model"]
         return [self.route(m) for m in model] if isinstance(model, list) else self.route(model)
 
+    @staticmethod
+    def _known_router(name: str) -> bool:
+        """False (with one warning per name) for a router that no longer exists, e.g. an old "orcarouter"."""
+        if name in ROUTERS:
+            return True
+        if name not in _WARNED_ROUTES:
+            _WARNED_ROUTES.add(name)
+            log.warning("llm: router %r is not supported any more and is ignored (OpenRouter is used)", name)
+        return False
+
+    @classmethod
+    def _known_route(cls, name: str) -> str:
+        """The model id without route names that no longer exist (``orcarouter+openrouter:x`` -> ``openrouter:x``)."""
+        head, sep, rest = name.partition(":")
+        if not (sep and rest and re.fullmatch(r"[a-z]+(\+[a-z]+)*", head)):
+            return name
+        names = head.split("+")
+        kept = [n for n in names if n == "opencode" or cls._known_router(n)]
+        if len(kept) == len(names):
+            return name
+        return "+".join(kept) + ":" + rest if kept else rest
+
     def route(self, name: str) -> str:
         """A model id with its route (``llm``): see ``llm()``; web search (``:online``) is OpenRouter's."""
         llm = self.config.get("llm") or {}
         if name.endswith(":online"):
             return with_route(name, ["openrouter"])
+        name = self._known_route(name)
         router = llm.get("router", "openrouter")
         routers = [router] if isinstance(router, str) else list(router)
+        routers = [r for r in routers if self._known_router(r)] or ["openrouter"]
         if any(fnmatch.fnmatchcase(name, p) for p in llm.get("opencode") or []):
             return with_route(name, ["opencode", *routers] if llm.get("fallback", True) else ["opencode"])
         return with_route(name, routers)

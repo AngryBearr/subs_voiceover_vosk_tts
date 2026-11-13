@@ -224,16 +224,26 @@ offers luna or sol). Personal settings go into `stt_config.local.json` next to `
 (not in git, merged on top by `stt.run` and the UI), e.g. requests through a ChatGPT subscription:
 
 ```json
-{"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"],
-         "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5",
-                               "openrouter:google/gemini-4-argon"]}},
+{"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*", "opencode-go/*"], "router": ["openrouter"],
+         "stages": {"stress": ["opencode-go/gemini-4-argon", "opencode:openai/gpt-6-astra"]}},
  "ui": {"llm_transport_choice": true}}
 ```
 
-This is the user's own setup since 29.10: OpenAI models (sol for every single-model step) through
-the subscription, other models through OrcaRouter, OpenRouter only where OrcaRouter does not work
-or lacks the model (gemini-4-argon; web search `:online` of the cast lookup is OpenRouter's only).
-A router that answers 404 (no such model) hands over to the next one at once, without retries.
+Subscription models go through OpenCode: ChatGPT `openai/*` and OpenCode Go `opencode-go/*`
+(`opencode auth login`, provider `opencode-go`). OpenRouter is the only paid router and only a
+fallback; other models go to it directly (web search `:online` of the cast lookup is OpenRouter's
+only). A router that answers 404 (no such model) hands over to the next transport at once,
+without retries.
+
+OpenCode Go ids differ from OpenRouter ids, so `utils/llm_route.py` maps them (`OPENCODE_GO_MODELS`,
+e.g. `opencode-go/gemini-4-argon` -> `google/gemini-4-argon`): the OpenCode request keeps the Go
+id, the OpenRouter request gets the mapped one. A Go model that is not in the table has no
+OpenRouter id: that transport fails for good and nothing is sent to OpenRouter. When the Go
+5-hour usage limit is used up OpenCode answers HTTP 502 "usage limit reached"; this is a
+permanent failure of the transport, so the paid fallback takes over at once. A model with no
+paid fallback on purpose is written with an explicit `opencode:` prefix (`opencode:openai/gpt-6-astra`
+costs $10/$50 per 1M tokens on OpenRouter); a voter that does not answer is left out of the vote.
+
 The season's cast (`llm.stages.cast`, once per season): a model id ending in `:online` searches
 the web (OpenRouter only; the shared default luna, then Claude Haiku, ~$0.02); any other model
 reads the season's English Wikipedia article, which the program finds and fetches for it, so the
@@ -241,16 +251,12 @@ user's `"cast": ["openai/gpt-6.1-sol", "openrouter:openai/gpt-6-luna:online", ..
 and falls back to the web search only when Wikipedia has no article (`stt/cast.py`: S51, S29,
 S20, Australian S10 found that way).
 
-With an OpenCode Go subscription as well (`opencode auth login`, provider `opencode-go`), its
-models are named `opencode:opencode-go/<model>` (no paid fallback: the router has no such ids;
-a voter that does not answer is left out of the vote). The stress vote is then free: on S29E03's
-164 checked sentences sol + gemini-4-argon (OpenCode Go) + any third gave exactly the 27
-corrections of the paid trio (sol, claude-sonnet-5.5 by OrcaRouter, gemini-4-argon by
-OpenRouter), because sol and gemini agree on 162 of 164; gemini through OpenCode Go agreed with
-the paid trio wherever the three agreed (149 of 149). Third voters there: deepseek-v4-pro and
-grok-4.7 147/149 but over 20 min for 55 sentences (timeouts), kimi-k3.1-pro 140, glm-5.3 139,
-claude-haiku-5-5 118 in ~1 min: haiku, as it only breaks the rare sol / gemini ties. The user
-chose not to use OpenCode Go for the votes (29.10): OrcaRouter / OpenRouter, as above.
+The stress vote through OpenCode Go is free: on S29E03's 164 checked sentences sol +
+gemini-4-argon + any third gave exactly the 27 corrections of the paid trio, because sol and
+gemini agree on 162 of 164; gemini through OpenCode Go agreed with the paid trio wherever the
+three agreed (149 of 149). Third voters there: deepseek-v4-pro and grok-4.7 147/149 but over 20
+min for 55 sentences (timeouts), kimi-k3.1-pro 140, glm-5.3 139, claude-haiku-5-5 118 in ~1 min:
+haiku, as it only breaks the rare sol / gemini ties.
 
 `ui.llm_transport_choice` shows the UI switch "Подписка (opencode) / API OpenRouter".
 
@@ -258,19 +264,17 @@ Where requests go (`utils/llm_route.py`): transports in front of a model id, tri
 `stt.run` adds them from the config:
 
 - models matching a pattern of `llm.opencode` (default `["openai/*"]`) go through OpenCode
-  logged in with a ChatGPT subscription (`opencode auth login`, OpenAI), so they cost nothing
-  beyond the subscription; with `llm.fallback` (default true) the paid router takes over when
-  OpenCode fails for good or 3 times in a row (`opencode+orcarouter:openai/gpt-6.1-sol`);
-- all other models go to `llm.router`: `orcarouter` (key `ORCAROUTER_API_KEY`) or `openrouter`
-  (`OPENROUTER_API_KEY`);
-- an id that already has a route keeps it: gemini-4-argon is not on OrcaRouter, so the stress
-  voter is `openrouter:google/gemini-4-argon`.
+  (a ChatGPT subscription or OpenCode Go), so they cost nothing beyond the subscription; with
+  `llm.fallback` (default true) the paid router takes over when OpenCode fails for good or 3
+  times in a row (`opencode+openrouter:openai/gpt-6.1-sol`);
+- all other models go to `llm.router` (`openrouter`, key `OPENROUTER_API_KEY`); router names that
+  no longer exist (an old `orcarouter`) are ignored with a warning;
+- an id that already has a route keeps it (`openrouter:google/gemini-4-argon`).
 
 OpenCode runs as a private `opencode serve` (OpenCode 2.x) per process, on 127.0.0.1 with a
 random password and the clean preset `config/opencode_clean` (no tools, project config, plugins
-or MCP), through its stateless generation route. It reports no token counts, and OrcaRouter no
-cost, so `usage` shows $0 for both. OrcaRouter rejects two OpenRouter-only fields for OpenAI
-models (`usage.include`, DeepSeek's `thinking`); the clients drop them there. S29E01 with
+or MCP), through its stateless generation route. It reports no token counts or cost, so `usage`
+shows $0. S29E01 with
 gpt-6.1-sol for every step through OpenCode: all LLM steps in 15 min, fusion WER 18.03%
 (17.93% through OpenRouter), translation as through OpenRouter (2 of 918 lines over budget).
 

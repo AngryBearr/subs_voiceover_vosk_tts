@@ -8,13 +8,13 @@ from ui import dub_app
 
 def test_job_config_applies_the_form(monkeypatch) -> None:
     monkeypatch.setattr(dub_app, "base_config", lambda: {"llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"],
-                                                                 "router": "orcarouter"}, "voiceover": {}})
+                                                                 "router": "openrouter"}, "voiceover": {}})
     via_api = dub_app.job_config("Быстрый: только Whisper", "Sol: лучше перевод, дороже", True, True, True, True,
                                  transport="API OpenRouter")
     assert via_api["llm"] == {"model": "openai/gpt-6.1-sol", "opencode": [], "router": "openrouter"}
     subscription = dub_app.job_config("Быстрый: только Whisper", "openai/gpt-6.1-sol", True, True, True, True,
                                       transport="Подписка (opencode)")
-    assert subscription["llm"]["opencode"] == ["openai/*"] and subscription["llm"]["router"] == "orcarouter"
+    assert subscription["llm"]["opencode"] == ["openai/*"] and subscription["llm"]["router"] == "openrouter"
     config = dub_app.job_config("Быстрый: только Whisper", "openai/gpt-6-luna", subtitles=False, duck_voices=False,
                                 stress=False, refine=False)
     assert config["mode"] == "fast" and config["llm"]["model"] == "openai/gpt-6-luna"
@@ -105,7 +105,7 @@ def test_status_warns_when_the_subscription_login_fails(tmp_path: Path, monkeypa
     monkeypatch.setattr(dub_app, "JOB", job)
     log.write_text("2026 INFO stt.run: [ep] asr ...\n", encoding="utf-8")
     assert dub_app.SUBSCRIPTION_WARNING not in dub_app.refresh()[0]
-    log.write_text("WARNING stt.llm: LLM openai/gpt-6.1-sol via opencode failed (token expired); using orcarouter\n",
+    log.write_text("WARNING stt.llm: LLM openai/gpt-6.1-sol via opencode failed (token expired); using openrouter\n",
                    encoding="utf-8")
     assert dub_app.SUBSCRIPTION_WARNING in dub_app.refresh()[0]
 

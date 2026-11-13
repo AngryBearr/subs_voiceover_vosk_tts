@@ -55,7 +55,7 @@ Audio and video never leave the machine. Online subtitle search can be switched 
 (`--no-subtitles`, or the preset `fast`).
 
 Language models are reached through OpenRouter by default. You can instead use a ChatGPT
-subscription through the OpenCode program, or the OrcaRouter service; see
+subscription or an OpenCode Go plan through the OpenCode program (OpenRouter is then only the fallback); see
 [section 4](#4-keys-and-personal-settings) and "Language models" in `docs/stt_local.md`.
 
 ## 2. Requirements
@@ -118,7 +118,6 @@ pipeline logs a warning and uses the plain `resnet293` model, which is slightly 
 Keys go into `.env` in the repository root (it is in `.gitignore`). The names the code looks for:
 
 - `OPENROUTER_API_KEY` - language models through OpenRouter (the default route);
-- `ORCAROUTER_API_KEY` - the same through OrcaRouter, optional;
 - `DEEPSEEK_API_KEY` - used by the older subtitle-shortening scripts (`.env.example` shows the format);
 - the Hugging Face token is stored by `hf auth login`, not in `.env`.
 
@@ -128,7 +127,7 @@ language model or the folders:
 
 ```json
 {"paths": {"work": "/path/to/work", "finished": "/path/to/videos"},
- "llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"]}}
+ "llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["openrouter"]}}
 ```
 
 With `llm.opencode`, models matching the pattern go through OpenCode logged in with a ChatGPT

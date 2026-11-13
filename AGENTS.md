@@ -62,7 +62,7 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
     (настройки в `voiceover_config.json`).
 - **Правка реплик серии**: `corrections.json` в папке серии (интерфейс или `stt.subtitle_edit`
     export/import для Subtitle Edit); повторный `stt.run` озвучивает заново только изменённые реплики.
-- Ключи API (`OPENROUTER_API_KEY`, `ORCAROUTER_API_KEY`, `DEEPSEEK_API_KEY`, токен HF) лежат в `.env`;
+- Ключи API (`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, токен HF) лежат в `.env`;
     никогда не выводить их, как и токены opencode (`auth.json`).
 
 ## 4. Классический пайплайн SRT → JSON → RUNorm + RUAccent → Vosk → микс

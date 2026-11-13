@@ -2,8 +2,8 @@
 
 By default requests go to OpenRouter. Transports in front of the model id choose others
 (``utils.llm_route``): ``opencode:`` is the OpenCode login of a ChatGPT subscription (no API
-cost, no token counts), ``orcarouter:`` / ``openrouter:`` the paid routers;
-``opencode+orcarouter:openai/gpt-6.1-sol`` falls back to OrcaRouter when OpenCode fails.
+cost, no token counts), ``openrouter:`` the paid router;
+``opencode+openrouter:openai/gpt-6.1-sol`` falls back to OpenRouter when OpenCode fails.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import Any
 from stt import progress
 from stt.runner import REPO_ROOT
 from utils.atomic_io import write_text_atomic
-from utils.llm_route import ROUTERS, split_route
+from utils.llm_route import ROUTERS, router_model, split_route
 from utils.opencode_clean import OpenCodeError, flatten_messages, shared_server
 
 DEFAULT_MODEL = "openai/gpt-6-luna"
@@ -122,9 +122,10 @@ class OpenRouterClient:
         return self._api_keys[router]
 
     def _post(self, body: dict[str, Any], router: str = "openrouter") -> dict[str, Any]:
-        body = {**body, "model": self.bare_model}
-        if router != "openrouter":
-            body.pop("usage", None)  # OpenRouter's cost accounting flag; OrcaRouter rejects it for OpenAI models
+        model = router_model(self.bare_model)
+        if model is None:  # permanent: the next transport (if any) takes over, nothing is sent
+            raise RuntimeError(f"no OpenRouter id for {self.bare_model}")
+        body = {**body, "model": model}
         request = urllib.request.Request(
             ROUTERS[router].base_url + "/chat/completions",
             data=json.dumps(body).encode("utf-8"),

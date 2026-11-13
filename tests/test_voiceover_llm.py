@@ -244,20 +244,20 @@ def test_route_hands_over_to_the_paid_router(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr(opencode, "shared_server", lambda model: _Down())
     monkeypatch.setattr(vllm, "openai_transport", fake_openai)
     monkeypatch.setattr(vllm, "load_api_key", lambda name, env_file=None: "key")
-    client = LLMClient(LLMConfig(model="opencode+orcarouter:openai/gpt-6.1-sol", reasoning="high",
+    client = LLMClient(LLMConfig(model="opencode+openrouter:openai/gpt-6.1-sol", reasoning="high",
                                  cache_dir=tmp_path), sleep=lambda _: None)
     assert client.complete_json("sys", "user", prompt_version="v1", tag="t").content == {"a": 1}
-    assert routed == [("https://api.orcarouter.ai/v1", "openai/gpt-6.1-sol")]
+    assert routed == [("https://openrouter.ai/api/v1", "openai/gpt-6.1-sol")]
     assert client.stats()["calls_made"] == vllm.FAILOVER_AFTER  # two transient failures were retried first
 
 
 def test_route_prefix_parsing() -> None:
     from utils.llm_route import split_route, with_route
 
-    assert split_route("opencode+orcarouter:openai/gpt-6.1-sol") == (["opencode", "orcarouter"], "openai/gpt-6.1-sol")
+    assert split_route("opencode+openrouter:openai/gpt-6.1-sol") == (["opencode", "openrouter"], "openai/gpt-6.1-sol")
     assert split_route("meta/llama-4:free") == ([], "meta/llama-4:free")
-    assert with_route("anthropic/claude-sonnet-5.5", ["orcarouter"]) == "orcarouter:anthropic/claude-sonnet-5.5"
-    assert with_route("openrouter:google/gemini-4-argon", ["orcarouter"]) == "openrouter:google/gemini-4-argon"
+    assert with_route("anthropic/claude-sonnet-5.5", ["openrouter"]) == "openrouter:anthropic/claude-sonnet-5.5"
+    assert with_route("openrouter:google/gemini-4-argon", ["openrouter"]) == "openrouter:google/gemini-4-argon"
 
 
 def test_a_used_up_subscription_is_not_retried_nor_asked_again(tmp_path: Path) -> None:
@@ -285,3 +285,57 @@ def test_opencode_usage_limit_is_recognised() -> None:
               '"OpenCode Go usage limit reached (5-hour, resets in 4h 23m)."}')
     assert is_quota_error(detail)
     assert not is_quota_error('{"reason":"rate_limit","message":"Too many requests, retry in 2 s"}')
+
+
+def test_router_model_mapping() -> None:
+    from utils.llm_route import router_model
+
+    assert router_model("opencode-go/gemini-4-argon") == "google/gemini-4-argon"
+    assert router_model("opencode-go/glm-5.3") == "z-ai/glm-5.3"
+    assert router_model("opencode-go/unknown") is None
+    assert router_model("openai/gpt-6.1-sol") == "openai/gpt-6.1-sol"
+
+
+def test_go_model_goes_to_the_router_under_its_openrouter_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_clean as opencode
+    import voiceover.llm as vllm
+
+    class _UsedUp:
+        def generate(self, *args: Any, **kwargs: Any) -> str:
+            raise opencode.OpenCodeError("HTTP 502: usage limit reached")
+
+    sent: list[tuple[str, str]] = []
+
+    def fake_openai(config: LLMConfig, api_key: str) -> Any:
+        def call(body: dict[str, Any]) -> dict[str, Any]:
+            sent.append((config.model, body["model"]))
+            return {"model": body["model"], "choices": [{"message": {"content": '{"a": 1}'}, "finish_reason": "stop"}]}
+        return call
+
+    monkeypatch.setattr(opencode, "shared_server", lambda model: _UsedUp())
+    monkeypatch.setattr(vllm, "openai_transport", fake_openai)
+    monkeypatch.setattr(vllm, "load_api_key", lambda name, env_file=None: "key")
+    client = LLMClient(LLMConfig(model="opencode+openrouter:opencode-go/gemini-4-argon", cache_dir=tmp_path),
+                       sleep=lambda _: None)
+    assert client.complete_json("sys", "user", prompt_version="v1", tag="t").content == {"a": 1}
+    assert sent == [("google/gemini-4-argon", "google/gemini-4-argon")]
+
+
+def test_go_model_without_an_openrouter_id_fails_without_a_request(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    import voiceover.llm as vllm
+
+    sent: list[str] = []
+
+    def fake_openai(config: LLMConfig, api_key: str) -> Any:
+        def call(body: dict[str, Any]) -> dict[str, Any]:
+            sent.append(body["model"])
+            return {}
+        return call
+
+    monkeypatch.setattr(vllm, "openai_transport", fake_openai)
+    monkeypatch.setattr(vllm, "load_api_key", lambda name, env_file=None: "key")
+    call = vllm.route_transport(LLMConfig(model="openrouter:opencode-go/nope", cache_dir=tmp_path))
+    with pytest.raises(vllm.LLMError, match="no OpenRouter id for opencode-go/nope") as info:
+        call({"model": "x", "messages": []})
+    assert not isinstance(info.value, vllm.LLMTransientError) and sent == []

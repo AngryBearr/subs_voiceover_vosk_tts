@@ -26,7 +26,7 @@ SYSTEM = ("You know reality TV casts. For each item give the gender of the perso
           "a nickname or a surname, sometimes 'FIRST LAST') in that show and season: contestant, host or crew. Answer JSON "
           '{"items": [{"id": <id>, "who": "<full name if you know it>", "gender": "male|female|unknown"}]}; "unknown" when you are not sure.')
 llm = json.loads(Path("voiceover_config.json").read_text(encoding="utf-8"))["verify"]["llm"]
-client = _client(llm, "opencode+orcarouter+openrouter:openai/gpt-6.1-sol", Path(".env"))
+client = _client(llm, "opencode+openrouter:openai/gpt-6.1-sol", Path(".env"))
 out = {"_HOST": "male"}
 for start in range(0, len(people), 80):
     chunk = people[start:start + 80]

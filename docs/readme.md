@@ -56,7 +56,7 @@ The Amazing Race) в видео с русской закадровой озву�
 (`--no-subtitles` или набор `fast`).
 
 К языковым моделям по умолчанию обращаются через OpenRouter. Вместо этого можно использовать
-подписку ChatGPT через программу OpenCode или сервис OrcaRouter; см.
+подписку ChatGPT или тариф OpenCode Go через программу OpenCode (OpenRouter тогда только запасной путь); см.
 [раздел 4](#4-ключи-и-личные-настройки) и «Language models» в `docs/stt_local.md`.
 
 ## 2. Требования
@@ -120,7 +120,6 @@ subs_env/bin/python -m stt.selftest --quick  # то же без скачиван
 Ключи кладутся в `.env` в корне репозитория (он в `.gitignore`). Имена, которые ищет код:
 
 - `OPENROUTER_API_KEY` — языковые модели через OpenRouter (путь по умолчанию);
-- `ORCAROUTER_API_KEY` — то же через OrcaRouter, необязательно;
 - `DEEPSEEK_API_KEY` — нужен старым скриптам сокращения субтитров (формат показан в `.env.example`);
 - токен Hugging Face хранится после `hf auth login`, а не в `.env`.
 
@@ -130,7 +129,7 @@ subs_env/bin/python -m stt.selftest --quick  # то же без скачиван
 
 ```json
 {"paths": {"work": "/path/to/work", "finished": "/path/to/videos"},
- "llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["orcarouter", "openrouter"]}}
+ "llm": {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": ["openrouter"]}}
 ```
 
 Модели, подходящие под шаблон из `llm.opencode`, идут через OpenCode, в который вы вошли по
