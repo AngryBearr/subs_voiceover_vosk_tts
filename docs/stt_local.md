@@ -322,19 +322,41 @@ and size: `caption` (centred, bottom, sentence-like), `name_card` (+ descriptor 
   silent stretches of the episode, 36 s, 15 s, 14 s, are all captions). The user keeps `text` anyway (11.11): whether a
   man or a woman says a captioned line is rarely clear, so the original voice with the Russian text over it is better
   than a guessed voice.
-- In `text` mode a line with at least 30% of its time under a caption on screen (±0.4 s) is not voiced either
-  (`stt.dub.under_captions`): when the ASR and the caption disagree, the ASR line is usually the caption's own
-  speech misheard (S48E01 1:21: "I don't like being in the snow bathroom" under "I really needed this so badly").
-  A long line that only touches a caption (a confessional over a whispered exchange) stays voiced. S48E01: 75 such
-  lines silenced, 64 touching a caption kept. In `neutral` mode (since 10.11) such a line is compared with its caption
-  (`onscreen.ru.json`): when the caption has a line of its own, the ASR copy is left out if the texts look alike
-  (character similarity 0.65+) or it is a fragment of two words or less, and kept when it is other speech next to the
-  caption ("I'm half Guyanese." under "You're Guyanese?"); when the caption has no line of its own (it was a quieter
-  voice under the ASR's sentence), the ASR line says the caption's Russian text at the time the ASR heard it
-  (`caption_text` in the record, the neutral voice; once per caption), unless the ASR line has over twice the
-  caption's words (then the caption really was a quiet voice under other speech, which stays as heard). S48E01: of the
-  84 lines `text` mode silenced, 31 say their caption's text, 10 copies or fragments and 10 second lines under the same
-  caption are left out, the rest are voiced as heard; the dub grows from 1126 lines (56.5 min) to 1344 (62.6 min).
+- A line with at least 30% of its time under a caption on screen (±0.4 s) is compared with the caption's text
+  (`stt.dub.caption_copy`). It is the caption's own speech as the ASR heard it when every word of it is a word of
+  the caption (a fragment), when it is a near-verbatim copy (character similarity 0.8+), or, for a caption with no
+  line of its own (the merge put it aside as a quieter voice), when it looks like it (0.6+) or half like it (0.4+)
+  while said at the caption's time (sharing 20%+ of their joint span). Such a copy is not voiced in `text` mode (the
+  caption's Russian text shows that moment); in `neutral` mode it is left out when the caption has a line of its own,
+  or says the caption's Russian text at the time the ASR heard it when it has none (`caption_text` in the record, the
+  neutral voice, once per caption; unless the ASR line has over twice the caption's words). Every other line under a
+  caption is someone else talking next to it or over it — an answer ("I appreciate that." after "You struck me as a
+  Ryan."), the host, a confessional — and is voiced as heard, in its speaker's voice, in both modes.
+  Until 12.11 `text` mode silenced every line under a caption: on S48E01-E13 and S49E01-E10 that was 925 lines, and
+  579 of them are in the official subtitles (which leave the burned-in captions out), i.e. real speech of other
+  people. Now 571 of those 579 are voiced; of the 285 lines the subtitles lack (misheard copies, but also
+  backchannels the subtitles skip) 89 are still left out. The price: a misheard copy that shares almost nothing with
+  its caption cannot be told from an answer by text and is voiced (S48E01 1:21: "I don't like being in the snow
+  bathroom" under "I really needed this so badly"). In `neutral` mode the same check replaced the old one, which
+  left out 224 of those 579 lines and replaced 58 by the caption's text (now 1 and 7).
+- With the episode's official subtitles (`subs.source.en.srt`, see Subtitles) the dub tells those lines apart by them
+  instead (`stt.dub.subtitle_shares`, `--subtitle-check`, on by default): each subtitle is moved onto the recognized
+  words (the same local shifts as the speaker hints, so another cut of the episode works), numbers are spelled out on
+  both sides ("100%" = "a hundred percent"), and a line under a caption with 60%+ of its words in the subtitles around
+  it (±1.5 s) is voiced, one with under 34% is the caption's own speech unless it has 4+ words and is unlike every
+  caption it shares time with (character similarity under 0.35: broadcast captions skip background talk, so the text
+  check decides those, the user's choice of 13.11); in between the text check above decides. The
+  subtitles are used only when they have 70%+ of the other lines (S48/S49 embedded 0.94-0.99, S01 archive 0.91-0.99,
+  online 0.87-0.93; shifted by 20 s still 0.98; another episode's file 0.00); `dub.report.json` → `subtitles` says
+  whether they were used and how well they fit. On S48E01-E13 + S49E01-E10: none of the 579 lines in the subtitles is
+  left out, and 256 of the 285 lines they lack are (misheard copies like the snow bathroom, fragments, laughter heard
+  as words, but also backchannels like "Yeah." or "Thank you." that the captioner skipped). S49E01: 1361 voiced lines
+  before, about 1400 now. S29E07, run afresh (140 captions, 56 lines under them, read one by one): 24 of the 27 real
+  lines voiced (the 3 lost are one-word pieces), 1 of the 18 misheard copies or pieces voiced; the text check alone
+  voiced 16 of those 18, the rule of 5.11 none of the 27 real lines. Some older files write out the burned-in captions too (S21E01 archive 86% of them, S29 rolling
+  broadcast captions 44-79%; S01, S02, S10, S20, S48, S49 0-11%): when 30%+ of the captions are in the file, its
+  subtitles that repeat a caption (70%+ of their words, also two captions in one subtitle) are set aside
+  (`dub.report.json` → `subtitles.caption_subtitles`), so a misheard copy is not "found" in the caption's own text.
 - `onscreen.json` (written by the transcribe stage): captions, name cards (+ descriptor) and lower
   thirds with their screen box; `python -m stt.onscreen translate <folder>` (run in the translate
   stage) writes `onscreen.ru.json` with the cast's Russian names and the glossary, cached per text and

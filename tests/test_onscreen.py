@@ -58,6 +58,25 @@ def test_speech_that_is_not_the_caption_is_never_deleted() -> None:
     assert [d["voiced"] for d in decisions] == [True, False]
 
 
+def test_a_whole_other_sentence_while_the_caption_is_shown_is_not_replaced() -> None:
+    # S49E04 17:41: the answer "I know, me too." was swallowed by the caption it followed
+    words = _words("Yeah, I don't want to talk to you alone.", 10.2) + _words("I know, me too.", 12.8, step=0.2)
+    caps = [{"start": 10.0, "end": 13.5, "text": "I've been wanting to talk to you alone."}]
+    decisions: list[dict[str, Any]] = []
+    merged, _ = merge_captions(words, caps, decisions=decisions)
+    assert decisions[0]["action"] == "replaced" and "me too" not in decisions[0]["asr"]
+    assert " ".join(w.text for w in merged).endswith("I've been wanting to talk to you alone. I know, me too.")
+    assert not any(w.caption for w in merged[-4:])
+
+
+def test_a_caption_with_none_of_its_words_heard_replaces_the_sentence_said_under_it() -> None:
+    words = _words("Okay.", 1.0) + _words("Gotcha all.", 3.1) + _words("Next.", 8.0)  # no word in common
+    decisions: list[dict[str, Any]] = []
+    merged, _ = merge_captions(words, [{"start": 3.0, "end": 4.5, "text": "Got you, y'all!"}], decisions=decisions)
+    assert decisions[0]["action"] == "replaced" and decisions[0]["asr"] == "Gotcha all."
+    assert " ".join(w.text for w in merged) == "Okay. Got you, y'all! Next."
+
+
 def test_decisions_follow_the_input_order_and_cover_replaced_and_added() -> None:
     words = [Word(1.0, 1.3, "I"), Word(1.3, 1.6, "love"), Word(1.6, 1.9, "your"), Word(1.9, 2.4, "tattoo."),
              Word(5.0, 5.3, "Theirs"), Word(5.3, 5.6, "all"), Word(5.6, 5.8, "ready"), Word(5.8, 6.0, "free"),
@@ -378,6 +397,129 @@ def test_dub_main_reads_corrections_and_cli_options(tmp_path: Path) -> None:
     assert [r["source_index"] for r in out] == [2]
 
 
+
+# ---- dub: the official subtitles tell a line under a caption apart (they leave the burned-in captions out)
+
+_SENTENCES = ["We have to find the idol before the others wake up.", "I really think we should stick together now.",
+              "Nobody here trusts the yellow tribe at all.", "Tonight the vote goes to whoever is the biggest threat.",
+              "That challenge was the hardest thing I have ever done.", "A hundred percent.",
+              "I don't like being in the snow bathroom.", "Everybody wants to be the one in the middle of it."]
+
+
+def _subtitle_episode(folder: Path, shift_s: float = 0.0, srt_lines: list[str] | None = None) -> list[dict[str, Any]]:
+    """An episode folder: one line every 10 s; the caption "I really needed this so badly" over line 7, whose ASR text
+    is a misheard copy the official subtitles do not have; line 6 is in them as "100%."."""
+    records, words = [], []
+    for i, text in enumerate(_SENTENCES, start=1):
+        start = 10.0 * i
+        records.append({"index": i, "start": int(start * 1000), "end": int((start + 2.0) * 1000), "text": ["Ру."],
+                        "text_en": [text], "speaker": "S01", "gender": "female"})
+        words += [{"start": round(start + 0.25 * k, 2), "end": round(start + 0.25 * k + 0.2, 2), "text": w}
+                  for k, w in enumerate(text.split())]
+    subs = srt_lines if srt_lines is not None else ["100%." if s == "A hundred percent." else s for s in _SENTENCES]
+    stamp = lambda s: f"00:{int(s // 60):02d}:{int(s % 60):02d},{int(round(s % 1 * 1000)):03d}"  # noqa: E731
+    srt = "".join(f"{n}\n{stamp(10.0 * n + shift_s)} --> {stamp(10.0 * n + 2.0 + shift_s)}\n{line}\n\n"
+                  for n, line in enumerate(subs, start=1) if "snow" not in line)
+    (folder / "subs.source.en.srt").write_text(srt, encoding="utf-8")
+    (folder / "words.json").write_text(json.dumps(words), encoding="utf-8")
+    (folder / "subs.ru.json").write_text(json.dumps(records), encoding="utf-8")
+    (folder / "onscreen.ru.json").write_text(json.dumps([{"kind": "caption", "start": 70.0, "end": 72.0,
+                                                          "text": "I really needed this so badly",
+                                                          "text_ru": "Мне это было так нужно."}]), encoding="utf-8")
+    return records
+
+
+def test_spoken_tokens_spell_numbers_and_contractions() -> None:
+    from stt.dub import spoken_tokens
+
+    assert spoken_tokens("100%.") == ["one", "hundred", "percent"]
+    assert spoken_tokens("And we're gonna need that.") == ["and", "we're", "going", "to", "need", "that"]
+    assert spoken_tokens("1,000 bucks, 2.5 days") == ["one", "thousand", "bucks", "two", "point", "five", "days"]
+
+
+def test_subtitle_shares_find_the_lines_even_shifted_and_refuse_another_episode(tmp_path: Path) -> None:
+    from stt.dub import SUBTITLE_MIN_FIT, folder_subtitle_shares
+
+    records = _subtitle_episode(tmp_path)
+    shares, info = folder_subtitle_shares(tmp_path, records)
+    assert info["used"] and shares is not None
+    assert shares[6] >= 0.6  # "A hundred percent." = "100%."
+    assert shares[7] == 0.0  # the misheard copy is not in the subtitles
+    _subtitle_episode(tmp_path, shift_s=20.0)  # another cut: the subtitles run 20 s late
+    shares, info = folder_subtitle_shares(tmp_path, records)
+    assert info["used"] and shares is not None and shares[1] == 1.0 and shares[7] == 0.0
+    _subtitle_episode(tmp_path, srt_lines=["Completely different words in this file."] * 8)  # another episode's file
+    shares, info = folder_subtitle_shares(tmp_path, records)
+    assert shares is None and not info["used"] and info["fit"] < SUBTITLE_MIN_FIT
+    (tmp_path / "subs.source.en.srt").unlink()
+    assert folder_subtitle_shares(tmp_path, records) == (None, {"used": False, "why": "no subtitles"})
+
+
+def test_a_subtitle_that_repeats_the_caption_does_not_count_as_another_line(tmp_path: Path) -> None:
+    # S21E01: the older subtitle files also write out the burned-in captions; the misheard copy matches them
+    from stt.dub import caption_items, folder_subtitle_shares
+
+    records = _subtitle_episode(tmp_path)
+    records[6]["text_en"] = ["I really need this so bad."]
+    srt = (tmp_path / "subs.source.en.srt").read_text(encoding="utf-8")
+    srt += "9\n00:01:10,000 --> 00:01:12,000\nI really needed this so badly.\n\n"
+    (tmp_path / "subs.source.en.srt").write_text(srt, encoding="utf-8")
+    shares, info = folder_subtitle_shares(tmp_path, records)  # without the captions: the copy looks found
+    assert shares is not None and shares[7] >= 0.6
+    shares, info = folder_subtitle_shares(tmp_path, records, caption_items(tmp_path))
+    assert shares is not None and shares[7] == 0.0 and info["caption_subtitles"] == 1
+    assert shares[6] >= 0.6  # the other lines keep their subtitles
+
+
+def test_with_subtitles_a_line_they_lack_is_the_captions_and_a_line_they_have_is_voiced() -> None:
+    caps = [{"start": 1.0, "end": 3.0, "text": "I really needed this so badly", "text_ru": "Мне это было так нужно."}]
+
+    def rec(index: int, text: str, **extra: Any) -> dict[str, Any]:
+        return {"index": index, "start": 1200, "end": 2800, "text": ["Ру."], "text_en": [text], "speaker": "S02",
+                "gender": "male", **extra}
+
+    snow = rec(1, "I don't like being in the snow bathroom.")  # S48E01 1:21: shares almost nothing with the caption
+    voiced, _ = plan([snow], VOICES, caption_texts=caps)
+    assert len(voiced) == 1  # by text alone it cannot be told from an answer
+    voiced, skipped = plan([snow], VOICES, caption_texts=caps, subtitle_share={1: 0.0})
+    assert not voiced and skipped[0]["reason"] == "under an on-screen caption: shown as Russian text"
+    voiced, _ = plan([snow], VOICES, caption_texts=caps, subtitle_share={1: 0.0}, on_screen_voice="neutral")
+    assert voiced[0]["caption_text"] and voiced[0]["text"] == ["Мне это было так нужно."]
+    echo = rec(2, "I really need this so bad, yeah.")  # looks like the caption, but the subtitles have it
+    assert not plan([echo], VOICES, caption_texts=caps)[0]
+    assert plan([echo], VOICES, caption_texts=caps, subtitle_share={2: 0.8})[0][0]["text_en"] == echo["text_en"]
+    assert not plan([echo], VOICES, caption_texts=caps, subtitle_share={2: 0.5})[0]  # in between: the text decides
+    voiced, _ = plan([snow], VOICES, caption_texts=caps, subtitle_share={1: 0.0}, corrected={1})  # a person's fix wins
+    assert len(voiced) == 1
+
+
+def test_a_longer_line_the_subtitles_lack_is_voiced_when_it_is_unlike_the_caption() -> None:
+    # S29E07: broadcast captions skip background talk; a short piece or a look-alike they lack stays silent
+    caps = [{"start": 1.0, "end": 3.0, "text": "I'm taking all this.", "text_ru": "Я забираю всё это."}]
+
+    def rec(text: str) -> dict[str, Any]:
+        return {"index": 1, "start": 1200, "end": 2800, "text": ["Ру."], "text_en": [text], "speaker": "S02",
+                "gender": "female"}
+
+    asked = rec("bring that over here when you're done with it?")
+    assert plan([asked], VOICES, caption_texts=caps, subtitle_share={1: 0.0})[0]  # 9 words, unlike the caption
+    for text in ("Wes, can", "I'm taking all of it now, okay?"):  # a piece; a look-alike of the caption
+        assert not plan([rec(text)], VOICES, caption_texts=caps, subtitle_share={1: 0.0})[0]
+
+
+def test_dub_main_uses_the_official_subtitles_and_reports_them(tmp_path: Path) -> None:
+    from stt import dub
+
+    _subtitle_episode(tmp_path)
+    dub.main([str(tmp_path), "--voices", "female=f_generic,male=m_generic"])
+    report = json.loads((tmp_path / "dub.report.json").read_text(encoding="utf-8"))
+    assert report["subtitles"] == {"used": True, "fit": 0.875, "caption_subtitles": 0}  # 7 of 8: not the copy
+    assert [s["index"] for s in report["skipped"]] == [7]
+    dub.main([str(tmp_path), "--voices", "female=f_generic,male=m_generic", "--no-subtitle-check"])
+    report = json.loads((tmp_path / "dub.report.json").read_text(encoding="utf-8"))
+    assert report["subtitles"] == {"used": False, "why": "--no-subtitle-check"} and not report["skipped"]
+
+
 # ---- card blocks: the lines of one card are one item
 
 def _blocks_ocr(*events: dict[str, Any]) -> dict[str, Any]:
@@ -500,25 +642,36 @@ def test_onscreen_ru_is_written_without_the_dub_translation(tmp_path: Path) -> N
     assert "context" not in client.prompts[0] and "context_hash" not in result[0]
 
 
-def test_dub_text_mode_silences_lines_mostly_under_captions() -> None:
-    """S48E01 1:21: the ASR heard "I don't like being in the snow bathroom" while the screen says "I really needed
-    this so badly": a line mostly under a caption is not voiced; a long line that only touches one still is."""
+def test_dub_text_mode_leaves_out_only_the_captions_own_speech_under_a_caption() -> None:
+    """S49E01: the people around a quiet speaker answered out loud ("I appreciate that." after "You struck me as a
+    Ryan."), the host and confessionals went on over captions: those lines are voiced. Only the caption's own speech as
+    the ASR heard it (a fragment of its words, a near-verbatim copy) is left to the caption's Russian text."""
     from stt.dub import plan
 
     voices = {"male": 56, "female": 49, "unknown": 56}
 
-    def rec(index: int, start: float, end: float, text: str) -> dict:
+    def rec(index: int, start: float, end: float, text: str, **extra: Any) -> dict[str, Any]:
         return {"index": index, "start": start * 1000, "end": end * 1000, "text": [text], "text_en": [text],
-                "speaker": "S01", "gender": "female"}
+                "speaker": "S01", "gender": "female", **extra}
 
-    records = [rec(1, 81.8, 88.2, "Не люблю ходить в туалет на снегу."),  # caption 83.4-85.5: 0.45 of the line
-               rec(2, 100.0, 107.0, "Я пришла сюда, чтобы выиграть, и я это сделаю."),  # caption 106.5-107.5
-               rec(3, 120.0, 122.0, "Обычная реплика без подписи на экране.")]
-    captions = [(83.4, 85.5), (106.5, 107.5)]
-    voiced, skipped = plan(records, voices, captions=captions)
-    assert [r["source_index"] for r in voiced] == [2, 3]
-    assert skipped[0]["reason"] == "under an on-screen caption: shown as Russian text"
-    voiced, _ = plan(records, voices, captions=captions, on_screen_voice="neutral")  # only "text" mode silences them
-    assert len(voiced) == 3
-    voiced, _ = plan(records, voices, captions=captions, corrected={1})  # a person's fix wins
-    assert [r["source_index"] for r in voiced] == [1, 2, 3]
+    def cap(start: float, end: float, text: str) -> dict[str, Any]:
+        return {"start": start, "end": end, "text": text, "text_ru": "Перевод."}
+
+    captions = [cap(1186.45, 1187.99, "You struck me as a Ryan."), cap(3417.61, 3419.15, "You're total dad vibes."),
+                cap(3684.35, 3685.91, "I love that!"), cap(3377.77, 3378.81, "But we have to be..."),
+                cap(3378.81, 3380.91, "if we're gonna be, like, number ones for each other..."),
+                cap(100.0, 102.0, "I really needed this so badly")]
+    records = [rec(1, 1186.4, 1187.8, "You struck me as a Ryan.", on_screen=True),  # the caption's own line
+               rec(2, 1187.88, 1188.78, "I appreciate that."),  # the answer
+               rec(3, 3418.78, 3421.15, "But I don't want to be on the outs in this tribe."),  # a confessional
+               rec(4, 3683.65, 3686.81, "A massive Survivor toolkit."),  # the host over a quiet cheer
+               rec(5, 3379.12, 3379.50, "to be"),  # a fragment of the caption's speech
+               rec(6, 100.2, 101.8, "I really need this so bad."),  # the caption's speech misheard
+               rec(7, 120.0, 122.0, "A line with no caption on screen.")]
+    voiced, skipped = plan(records, voices, caption_texts=captions)
+    assert [r["source_index"] for r in voiced] == [2, 3, 4, 7]
+    assert [(s["index"], s["reason"]) for s in skipped] == [(1, "on-screen caption: shown as Russian text"),
+                                                            (5, "under an on-screen caption: shown as Russian text"),
+                                                            (6, "under an on-screen caption: shown as Russian text")]
+    voiced, _ = plan(records, voices, caption_texts=captions, corrected={5, 6})  # a person's fix wins
+    assert [r["source_index"] for r in voiced] == [2, 3, 4, 5, 6, 7]

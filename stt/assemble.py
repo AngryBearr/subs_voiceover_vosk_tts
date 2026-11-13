@@ -210,8 +210,11 @@ def merge_captions(
     the caption is the truth about its own utterance: if its words differ from the matched ASR words,
     their text is replaced by the caption's (spread over the same time span, `source="ocr"`). Speech
     that is not the caption's utterance is never touched. Otherwise its ASR version is replaced in
-    place by the caption text (`source="ocr"`): the matched words, the words between them, the rest of their ASR sentences, and ASR sentences
-    said entirely while the caption was shown. A caption the ASR missed completely goes to the
+    place by the caption text (`source="ocr"`): the matched words, the words between them and the rest of their ASR
+    sentences; when none of its words was found, the ASR sentences said entirely while the caption was shown (its
+    misheard version). A whole sentence with none of the caption's words next to the ones that have them is someone
+    else's ("I know, me too." after "I've been wanting to talk to you alone.") and stays: S48/S49 official subtitles
+    have 32 of the 46 such sentences the replacement used to swallow. A caption the ASR missed completely goes to the
     nearest ASR sentence boundary, unless that is more than `max_shift_s` away: then it is a
     quieter voice under transcribed speech and stays only in the original audio.
 
@@ -318,7 +321,8 @@ def merge_captions(
                 i for i in near if i not in others and (
                     i in territory[k]
                     or (sentence[i] in own and t0 - 1.5 <= mids[i] <= t1 + 1.5)
-                    or (words[first[sentence[i]]].start >= t0 - 0.5 and words[last[sentence[i]]].end <= cap["end"] + 0.3))
+                    or (not territory[k]  # nothing matched: the sentences said while it was shown are its copy
+                        and words[first[sentence[i]]].start >= t0 - 0.5 and words[last[sentence[i]]].end <= cap["end"] + 0.3))
             }
             if span:
                 # Replace the ASR words only when the caption really is a version of them: the caption of

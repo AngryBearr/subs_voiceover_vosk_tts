@@ -5,6 +5,52 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Fix of 12.11.2026: lines next to a burned-in caption were not voiced (the user's report)
+
+The user (12.11): where the show captions a quiet speaker, the line of another person right next to the caption was
+not voiced either, although it is not on screen. Two causes, both measured on S48E01-E13 and S49E01-E10 with the
+official subtitles as the reference (they leave the burned-in captions out, so a line they have is real speech):
+
+1. **The dub's rule of 5.11** (`text` mode left out every line with 30% of its time under a caption ±0.4 s): 925
+   lines, 579 of them in the official subtitles ("I appreciate that.", "But I don't want to be on the outs in this
+   tribe.", Probst's "A massive Survivor toolkit."). Now such a line is left out only when it is the caption's own
+   speech as the ASR heard it (`stt.dub.caption_copy`: a fragment of its words, a near-verbatim copy, or a look-alike
+   of a caption with no line of its own): 571 of the 579 are voiced, 89 copies are still left out. The same check
+   replaced the `neutral` mode's (which left out 224 of the 579 and said the caption's text instead of 58).
+2. **The caption merge** (`stt.assemble.merge_captions`) swallowed a whole other sentence said while the caption was
+   shown ("I've been wanting to talk to you alone." took "I know, me too." with it): now only when the caption found
+   none of its words in the ASR. Of the 46 sentences freed, 32 are in the official subtitles (mostly "Yeah.", also
+   "You got it, girl.", "Or we can take two people too."); 9 captions more get their own line. It reaches an episode
+   only with a new transcript (`--force transcribe`, which redoes the stages after it too); the dub fix needs only
+   `--force dub` (the voice-over cache keeps the lines already synthesized).
+
+3. **The official subtitles decide** where the episode has them (the user asked for it the same day): a line under
+   a caption that they have is voiced, a line they lack is the caption's own speech (`stt.dub.subtitle_shares`, moved
+   onto the recognized words, numbers spelled out). S48E01-E13 + S49E01-E10: 0 of the 579 real lines left out, 282 of
+   the 285 lines the subtitles lack left out (text alone: 8 and 89), so the misheard copy "I don't like being in the
+   snow bathroom" under "I really needed this so badly" is silent again. Without fitting subtitles (another episode,
+   none found) the text check decides as before. A line of 4+ words that they lack but that is unlike the caption is
+   left to the text check (broadcast captions skip background talk; the user, 13.11: "лучше так, чем терять
+   контекст"): S48/S49 256 of the 285 left out, real still 0.
+4. **Older seasons** (the user asked for an estimate): the subtitles fit them too (86-99% of the lines found), but
+   S21 (archive) and S29 (rolling broadcast captions) also write out the burned-in captions (45-86% of them); such a
+   file is recognised and its subtitles that repeat a caption, also two captions at once, are set aside. S20 and S29
+   were re-cut with today's caption merge on their saved words. Lines under captions, my reading of every
+   disagreement and a sample of the rest (texts, not listening): S01/S02/S05 (16 episodes, 88 lines; the "captions"
+   are mostly name and place graphics, the 5.11 rule silenced all of them) text 87 voiced, subtitles 84 (4 short lines
+   the subtitles lack); S20 (15 episodes, 183 lines) subtitles about 93% right against 73% for the text alone (it
+   voices ~43 whisper fragments and misheard copies); S21/S29 (11 episodes, 211 lines) about 90% against 76%, the
+   loss being ~15-20 short real lines the rolling captions skipped.
+5. **S29E07 run afresh** (13.11, `STT_listen_2026-11-12_captions`, the older episode with the most captions: 140; its
+   own embedded subtitles are rolling broadcast captions that write out the captions too, 128 set aside): of the 56
+   lines under captions (read one by one) 27 are other people, 18 misheard copies or pieces, 11 short and unclear.
+   Rule of 5.11: 0 of the 27 voiced; text alone: 27, but also 16 of the 18; subtitles: 20 and 0; subtitles with the
+   4+ words exception: 24 and 1 (the 3 lost are one-word pieces of a split sentence).
+6. **Better subtitles for S1-S39** (scouts of 13.11, `subtitles_hunt/scouts_20261113/`): no source of Paramount+ or
+   other streaming SDH for the old seasons was found; scene WEB releases exist for S17-S40 with no separate subtitle
+   files, and the streaming copies seen so far (S29 WEB-DL, AMZN S11-S33) carry the old broadcast captions, so such
+   subtitles most likely do not exist for those seasons.
+
 ## Plan of 10.11.2026: a voice where people shout (the user's request)
 
 The user (10.11): where people on screen shout (challenges, arguments) the dub is often silent; a neutral voice is

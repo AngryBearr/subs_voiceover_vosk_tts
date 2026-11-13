@@ -82,13 +82,12 @@ def test_neutral_mode_skips_a_line_mostly_under_a_voiced_captioned_line() -> Non
     assert [r["source_index"] for r in voiced] == [1, 2, 3] and not skipped
 
 
-def test_neutral_mode_voices_a_line_under_a_caption_that_has_no_line_of_its_own() -> None:
-    # the burned-in caption is a quieter voice under this speech; it was never merged in as a line
+def test_a_line_under_a_caption_known_only_by_its_times_is_voiced_in_both_modes() -> None:
+    # without the caption's text nothing shows the line is the caption's speech: it is voiced as heard
     records = [_rec(1, 1000, 3000, "We should talk about it later.")]
-    voiced, skipped = plan(records, VOICES, on_screen_voice="neutral", captions=[(1.0, 3.0)])
-    assert len(voiced) == 1 and not skipped
-    voiced, skipped = plan(records, VOICES, on_screen_voice="text", captions=[(1.0, 3.0)])  # text mode: as before
-    assert not voiced and skipped[0]["reason"] == "under an on-screen caption: shown as Russian text"
+    for mode in ("neutral", "text"):
+        voiced, skipped = plan(records, VOICES, on_screen_voice=mode, captions=[(1.0, 3.0)])
+        assert len(voiced) == 1 and not skipped
 
 
 def test_neutral_mode_keeps_a_corrected_line_under_a_caption() -> None:
@@ -196,15 +195,28 @@ def _cap(start: float, end: float, text: str, text_ru: str | None = "Перев�
 
 
 def test_neutral_mode_says_the_captions_text_for_its_misheard_copy_without_a_line_of_its_own() -> None:
-    records = [_rec(1, 1200, 2800, "I don't like being in the snow bathroom", speaker="S02")]
-    caps = [_cap(1.0, 3.0, "I really needed this so badly", "Мне это было так нужно.")]
+    # S48E01 22:41: the caption was never merged in as a line, the ASR kept its misheard version
+    records = [_rec(1, 1200, 2800, "Should we do like being an angel?", speaker="S02")]
+    caps = [_cap(1.0, 3.0, "Should we do, like, name and age and...", "Может, назовём имя, возраст и...")]
     voiced, skipped = plan(records, VOICES, on_screen_voice="neutral", caption_texts=caps,
                            speaker_voices={"S02": "/clips/s02.wav"})
     assert not skipped and len(voiced) == 1
     line = voiced[0]
-    assert line["text"] == ["Мне это было так нужно."] and line["text_en"] == ["I really needed this so badly"]
+    assert line["text"] == ["Может, назовём имя, возраст и..."]
+    assert line["text_en"] == ["Should we do, like, name and age and..."]
     assert line["caption_text"] and line["on_screen"] and line["voice"] == "m_generic"  # the neutral voice, not S02's
     assert (line["start"], line["end"]) == (1200, 2800)  # at the time the ASR heard it
+    voiced, skipped = plan(records, VOICES, caption_texts=caps)  # text mode: the caption's Russian text shows it
+    assert not voiced and skipped[0]["reason"] == "under an on-screen caption: shown as Russian text"
+
+
+def test_a_line_that_shares_almost_nothing_with_the_caption_is_voiced_as_heard() -> None:
+    # S48E01 1:21: a misheard whisper and an answer next to a caption look the same by text: both are voiced
+    records = [_rec(1, 1200, 2800, "I don't like being in the snow bathroom", speaker="S02")]
+    caps = [_cap(1.0, 3.0, "I really needed this so badly", "Мне это было так нужно.")]
+    for mode in ("neutral", "text"):
+        voiced, skipped = plan(records, VOICES, on_screen_voice=mode, caption_texts=caps)
+        assert not skipped and voiced[0]["text_en"] == ["I don't like being in the snow bathroom"]
 
 
 def test_neutral_mode_keeps_a_long_line_over_a_quiet_caption_and_one_without_a_translation() -> None:
@@ -217,12 +229,16 @@ def test_neutral_mode_keeps_a_long_line_over_a_quiet_caption_and_one_without_a_t
 
 
 def test_neutral_mode_drops_the_copy_only_when_the_captions_own_line_looks_alike() -> None:
-    caps = [_cap(1.0, 3.0, "Should we do, like, name and age and...")]
-    own = _rec(1, 1000, 3000, "Should we do, like, name and age and...", on_screen=True)
-    copy = _rec(2, 2500, 3900, "Should we do like being an angel?", speaker="S02")
+    caps = [_cap(1.0, 3.0, "I really needed this so badly")]
+    own = _rec(1, 1000, 3000, "I really needed this so badly", on_screen=True)
+    copy = _rec(2, 2500, 3900, "I really need this so bad.", speaker="S02")
     voiced, skipped = plan([own, copy], VOICES, on_screen_voice="neutral", caption_texts=caps)
     assert [r["source_index"] for r in voiced] == [1]
     assert skipped[0]["reason"] == "under an on-screen caption: the caption's own line is voiced"
+    half = _rec(2, 2500, 3900, "Should we do like being an angel?", speaker="S02")  # 0.76 alike: an own line exists
+    voiced, _ = plan([_rec(1, 1000, 3000, "Should we do, like, name and age and...", on_screen=True), half], VOICES,
+                     on_screen_voice="neutral", caption_texts=[_cap(1.0, 3.0, "Should we do, like, name and age and...")])
+    assert [r["source_index"] for r in voiced] == [1, 2]
     answer = _rec(2, 2500, 3900, "I'm half Guyanese.", speaker="S02")
     voiced, skipped = plan([_rec(1, 1000, 3000, "You're Guyanese?", on_screen=True), answer], VOICES,
                            on_screen_voice="neutral", caption_texts=[_cap(1.0, 3.0, "You're Guyanese?")])
@@ -231,7 +247,7 @@ def test_neutral_mode_drops_the_copy_only_when_the_captions_own_line_looks_alike
 
 def test_a_captions_text_is_said_once_under_it() -> None:
     caps = [_cap(1.0, 3.0, "You got this, Kev!", "Ты справишься, Кев!")]
-    records = [_rec(1, 1000, 2000, "I'm gonna get it!"), _rec(2, 2100, 2900, "Oh, you're on.", speaker="S02")]
+    records = [_rec(1, 1000, 2000, "You got it, Kevin!"), _rec(2, 2100, 2900, "got this", speaker="S02")]
     voiced, skipped = plan(records, VOICES, on_screen_voice="neutral", caption_texts=caps)
     assert [(r["source_index"], r["text_en"][0]) for r in voiced] == [(1, "You got this, Kev!")]
     assert skipped[0]["reason"] == "under an on-screen caption: the caption's text is said by the line before"
