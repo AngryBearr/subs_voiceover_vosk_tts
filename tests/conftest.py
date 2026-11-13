@@ -13,7 +13,11 @@ def _last_job_in_tmp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pyte
     """A test that starts a UI job must never write the real ``output/ui_last_job.json``."""
     from ui import dub_app
 
-    monkeypatch.setattr(dub_app, "LAST_JOB", tmp_path_factory.mktemp("ui") / "ui_last_job.json")
+    from ui import run_setup
+
+    last_job = tmp_path_factory.mktemp("ui") / "ui_last_job.json"
+    monkeypatch.setattr(dub_app, "LAST_JOB", last_job)
+    monkeypatch.setattr(run_setup, "LAST_JOB", last_job)
 
 
 @pytest.fixture(autouse=True)

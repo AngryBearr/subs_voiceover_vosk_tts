@@ -30,6 +30,7 @@ video frames (2 fps) ─► OCR: burned-in captions, name cards           ocr.js
 ```bash
 bash scripts/install.sh                         # once (and after `git pull`): everything below in one go
 bash scripts/run_ui.sh                          # the browser UI, opened in the browser
+# or, in Claude Code: /dub-run [season] — asks the launch settings with explanations, saves them, starts the run
 
 # or by hand:
 bash scripts/setup_envs.sh                      # subs_env (once)

@@ -179,6 +179,28 @@ def restore_last_job(path: Path | None = None) -> Job | None:
     return job
 
 
+def adopt_external_job(path: Path | None = None) -> bool:
+    """Pick up a running job another program started (``ui.run_setup launch`` writes ``ui_last_job.json``) when this
+    page has no running job of its own, so the page shows it and does not start a second one. One small file read."""
+    global JOB
+    path = path or LAST_JOB
+    if JOB is not None and JOB.state == "идёт" and job_alive(JOB):
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get("state") != "идёт" or not data.get("pid"):
+        return False
+    if JOB is not None and JOB.pid == data.get("pid") and JOB.started == data.get("started"):
+        return False
+    probe = Job(files=[], out_root=Path(), engines=[], config_path=Path(), log_path=Path(), pid=data["pid"],
+                boot=str(data.get("boot") or ""))
+    if not job_alive(probe):
+        return False
+    return restore_last_job(path) is not None
+
+
 def _watch(job: Job, path: Path | None = None) -> None:
     """For a job found again after a restart: wait until its process is gone, then settle the state."""
     while job_alive(job):
@@ -248,6 +270,7 @@ NO_SEASON = "Сначала выберите сезон вверху стран�
 
 def _busy() -> str | None:
     """Why nothing new can start: the last job is running (also one found again after a restart)."""
+    adopt_external_job()
     job = JOB
     if job and (job.state == "идёт" or job_alive(job)):
         minutes = max(1, round((time.time() - job.started) / 60))
@@ -537,6 +560,7 @@ def status_text(job: Job | None) -> str:
 
 def refresh() -> tuple[str, Any, str, Any, str, str, Any]:
     """Everything the timer updates: status, progress table, readable log, results, checkpoints, raw log, "Продолжить"."""
+    adopt_external_job()
     job = JOB
     headers, rows = progress_view(job)
     checkpoints = job_view.checkpoints(_episodes(job), job.engines, job.state == "идёт", job.started) if job else ""
