@@ -37,9 +37,19 @@ VARIANTS = {"off": "none", "minimal": "low", "max": "xhigh"}
 class OpenCodeError(RuntimeError):
     """OpenCode refused or failed a request."""
 
-    def __init__(self, message: str, transient: bool = False) -> None:
+    def __init__(self, message: str, transient: bool = False, quota: bool = False) -> None:
         super().__init__(message)
         self.transient = transient
+        self.quota = quota  # the subscription's usage limit is reached: retrying before its reset is pointless
+
+
+def is_quota_error(detail: str) -> bool:
+    """An OpenCode answer saying the plan's usage limit is reached (OpenCode Go: "usage limit reached (5-hour,
+    resets in 4h 23m)"); unlike a short rate limit it lasts hours."""
+    return "usage limit" in detail.lower()
+
+
+CONFIG_SETTLE_S = 10.0  # how long a healthy server may still be reading its config
 
 
 def _free_port() -> int:
@@ -221,7 +231,9 @@ class CleanOpenCodeServer:
                 data = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
-            raise OpenCodeError(f"HTTP {exc.code}: {detail}", transient=exc.code == 429 or exc.code >= 500) from exc
+            quota = is_quota_error(detail)
+            raise OpenCodeError(f"HTTP {exc.code}: {detail}", transient=not quota and (exc.code == 429 or exc.code >= 500),
+                                quota=quota) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise OpenCodeError(f"{type(exc).__name__}: {exc}", transient=True) from exc
         text = (data.get("data") or {}).get("text") if isinstance(data, dict) else None
@@ -309,12 +321,20 @@ class CleanOpenCodeServer:
             self._process = subprocess.Popen(command, cwd=str(self._neutral_dir), env=self._environment(),
                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + self.timeout
+            settle: Optional[float] = None
             while time.monotonic() < deadline:
                 if self._process.poll() is not None:
                     raise RuntimeError("opencode server exited during startup")
                 if self._healthy():
-                    self._verify_metadata()
-                    return
+                    # OpenCode 2.2 reports healthy before it has read the clean config: for a moment it lists
+                    # its default agents (Build, General, ...); verify again for a few seconds before giving up.
+                    settle = settle if settle is not None else time.monotonic() + CONFIG_SETTLE_S
+                    try:
+                        self._verify_metadata()
+                        return
+                    except RuntimeError:
+                        if time.monotonic() >= min(settle, deadline):
+                            raise
                 time.sleep(0.15)
             raise TimeoutError("opencode server startup timed out")
         except Exception:

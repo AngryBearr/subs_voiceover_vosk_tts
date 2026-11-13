@@ -350,3 +350,21 @@ def test_the_screener_corrects_vsyo_in_its_sentence(monkeypatch) -> None:
     voters = [FakeClient(votes={"вс+ё": "вс+е"}, only="Мы всё понимаем.") for _ in range(3)]
     result = _check(monkeypatch, texts, voters, FakeClient(), accents=accents)
     assert result["sentences"] == {"Мы всё понимаем.": {"всё": "вс+е"}}
+
+
+def test_a_model_out_of_its_usage_limit_gives_no_votes_without_halving(tmp_path) -> None:
+    from voiceover.llm import LLMClient, LLMConfig, LLMQuotaError
+    from voiceover.stress_check import ask
+
+    calls: list[int] = []
+
+    def limited(body: dict) -> dict:
+        calls.append(1)
+        raise LLMQuotaError("usage limit reached")
+
+    client = LLMClient(LLMConfig(cache_dir=tmp_path / "c"), limited, sleep=lambda _: None)
+    suspects = [Suspect(word="голоса", accented="голос+а", source="homograph", contexts=[f"Два голоса {i}."])
+                for i in range(6)]
+    answers = ask([(s, s.contexts[0]) for s in suspects], client, batch=3, workers=1)
+    assert answers == [None] * 6
+    assert len(calls) == 1  # the second batch is not even sent

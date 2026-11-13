@@ -66,7 +66,7 @@ from typing import Any
 
 from stt import progress
 from voiceover.engine import build_engine
-from voiceover.llm import LLMClient, LLMConfig, LLMError
+from voiceover.llm import LLMClient, LLMConfig, LLMError, LLMQuotaError
 from voiceover.text import join_lines
 
 log = logging.getLogger("voiceover.stress_check")
@@ -334,6 +334,9 @@ def _ask_batch(chunk: list[tuple[Suspect, str]], client: LLMClient, tag: str) ->
     try:
         result = client.complete_json(SYSTEM, json.dumps({"items": items}, ensure_ascii=False),
                                       prompt_version=PROMPT_VERSION, tag=tag)
+    except LLMQuotaError as error:  # the subscription's limit is reached: no halves, the other models vote
+        log.warning("stress: %s is out of its usage limit (%s): the others vote", client.config.model, str(error)[:160])
+        return [None] * len(chunk)
     except LLMError as error:  # a broken answer: ask again in halves, give up on single items
         if len(chunk) == 1:
             log.warning("stress: %s gave no usable answer for %s: %s", client.config.model, tag, str(error)[:120])
@@ -423,6 +426,10 @@ def _proofread_batch(texts: list[str], low: int, high: int, client: LLMClient) -
     payload = json.dumps({"lines": [{"id": i, "text": texts[i]} for i in range(low, high)]}, ensure_ascii=False)
     try:
         result = client.complete_json(PROOFREAD_SYSTEM, payload, prompt_version=PROOFREAD_PROMPT_VERSION, tag=tag)
+    except LLMQuotaError as error:  # the subscription's limit is reached: no halves, no proposals
+        log.warning("stress: %s is out of its usage limit, no proofreading of %s (%s)", client.config.model, tag,
+                    str(error)[:160])
+        return []
     except LLMError as error:
         if high - low == 1:
             log.warning("stress: %s gave no usable proofreading for %s: %s", client.config.model, tag, str(error)[:120])

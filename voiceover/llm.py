@@ -37,6 +37,10 @@ class LLMTransientError(LLMError):
     """Rate limit, 5xx, timeout or connection failure: worth retrying."""
 
 
+class LLMQuotaError(LLMError):
+    """The subscription's usage limit is reached: no retries, and the client makes no more calls this run."""
+
+
 class LLMBadResponse(LLMError):
     """The model answered, but not with parseable JSON."""
 
@@ -157,6 +161,8 @@ def opencode_transport(config: LLMConfig) -> Transport:
             text = shared_server(config.model).generate(flatten_messages(body["messages"]), config.model, variant,
                                                         timeout=config.timeout_sec)
         except OpenCodeError as error:
+            if error.quota:
+                raise LLMQuotaError(str(error)) from error
             raise (LLMTransientError if error.transient else LLMError)(str(error)) from error
         return {"model": "opencode:" + config.model,
                 "choices": [{"message": {"content": text}, "finish_reason": "stop"}], "usage": {}}
@@ -232,6 +238,7 @@ class LLMClient:
     tokens_in: int = 0
     tokens_out: int = 0
     models_seen: set[str] = field(default_factory=set)
+    exhausted: str | None = None  # why the model's subscription stopped answering (LLMQuotaError); no more calls
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def stats(self) -> dict[str, int]:
@@ -304,11 +311,17 @@ class LLMClient:
             transport = self.transport
         attempt = 0
         while True:
+            if self.exhausted:
+                raise LLMQuotaError(self.exhausted)
             try:
                 with self._lock:
                     self.calls_made += 1
                 response = transport(body)
                 break
+            except LLMQuotaError as error:
+                with self._lock:
+                    self.exhausted = str(error)
+                raise
             except LLMTransientError as error:
                 if attempt >= cfg.max_retries:
                     raise LLMError(f"giving up after {attempt + 1} attempts: {error}") from error

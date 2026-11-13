@@ -258,3 +258,30 @@ def test_route_prefix_parsing() -> None:
     assert split_route("meta/llama-4:free") == ([], "meta/llama-4:free")
     assert with_route("anthropic/claude-sonnet-5.5", ["orcarouter"]) == "orcarouter:anthropic/claude-sonnet-5.5"
     assert with_route("openrouter:google/gemini-4-argon", ["orcarouter"]) == "openrouter:google/gemini-4-argon"
+
+
+def test_a_used_up_subscription_is_not_retried_nor_asked_again(tmp_path: Path) -> None:
+    from voiceover.llm import LLMQuotaError
+
+    calls: list[int] = []
+    delays: list[float] = []
+
+    def limited(body: dict[str, Any]) -> dict[str, Any]:
+        calls.append(1)
+        raise LLMQuotaError("OpenCode Go usage limit reached (5-hour, resets in 4h 23m)")
+
+    client = LLMClient(LLMConfig(cache_dir=tmp_path / "c"), limited, sleep=delays.append)
+    for tag in ("a", "b"):
+        with pytest.raises(LLMQuotaError):
+            client.complete_json("s", "u" + tag, prompt_version="v1", tag=tag)
+    assert len(calls) == 1 and delays == []
+    assert client.exhausted and "usage limit" in client.exhausted
+
+
+def test_opencode_usage_limit_is_recognised() -> None:
+    from utils.opencode_clean import is_quota_error
+
+    detail = ('{"_tag":"ProviderRequestError","providerID":"opencode-go","reason":"rate_limit","message":'
+              '"OpenCode Go usage limit reached (5-hour, resets in 4h 23m)."}')
+    assert is_quota_error(detail)
+    assert not is_quota_error('{"reason":"rate_limit","message":"Too many requests, retry in 2 s"}')
