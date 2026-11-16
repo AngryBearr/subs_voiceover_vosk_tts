@@ -1548,6 +1548,22 @@ def check_subscription(config: dict[str, Any]) -> bool:
     return True
 
 
+def expand_media(patterns: list[str]) -> tuple[list[Path], list[str]]:
+    """Files named on the command line: an existing file is taken as it is (names like ``[EZTVx.to]`` hold glob
+    characters), anything else is a glob pattern. Returns the files and the arguments that matched no file."""
+    files: list[Path] = []
+    missing: list[str] = []
+    for pattern in patterns:
+        if Path(pattern).is_file():
+            files.append(Path(pattern))
+            continue
+        matches = sorted(glob.glob(pattern)) if any(c in pattern for c in "*?[") else []
+        files += [Path(m) for m in matches if Path(m).is_file()]
+        if not matches:
+            missing.append(pattern)
+    return files, missing
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="English video -> Russian voice-over, end to end")
     parser.add_argument("media", nargs="+", help="Video files or glob patterns (a whole season works)")
@@ -1584,11 +1600,7 @@ def main(argv: list[str] | None = None) -> None:
 
     config = apply_preset(load_config(Path(args.config)), args.preset)
     args.mode = args.mode or config["mode"]
-    files: list[Path] = []
-    for pattern in args.media:
-        matches = sorted(glob.glob(pattern)) if any(c in pattern for c in "*?[") else [pattern]
-        files += [Path(m) for m in matches]
-    missing = [f for f in files if not f.is_file()]
+    files, missing = expand_media(args.media)
     if missing or not files:
         raise SystemExit(f"Media not found: {missing or args.media}")
     out_root = Path(args.out_root or (config.get("paths") or {}).get("work") or "output/stt").expanduser()
