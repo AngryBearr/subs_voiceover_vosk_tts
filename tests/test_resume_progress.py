@@ -97,6 +97,14 @@ def test_corrupt_cache_entry_counts_as_missing(tmp_path: Path) -> None:
     assert read_cache_entry(meta, wav) is None
 
 
+def test_cache_entry_points_at_the_wav_beside_it(tmp_path: Path) -> None:
+    """A record written by another checkout (now deleted) still finds its take in the shared cache."""
+    meta, wav = tmp_path / "k.json", tmp_path / "k.wav"
+    sf.write(str(wav), np.zeros(2400, dtype=np.float32), 24000)
+    write_text_atomic(meta, json.dumps({"path": "/gone/checkout/output/tts_cache/x/k.wav", "tts_text": "Ого"}))
+    assert read_cache_entry(meta, wav)["path"] == str(wav)  # type: ignore[index]
+
+
 def _f5_engine(tmp_path: Path) -> tuple[F5Engine, str]:
     python = tmp_path / "python"
     python.write_text("")

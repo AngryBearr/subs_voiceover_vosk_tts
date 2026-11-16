@@ -101,7 +101,12 @@ def read_cache_entry(meta: Path, wav: Path) -> dict[str, Any] | None:
         entry = json.loads(meta.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return entry if isinstance(entry, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    # The record keeps the absolute path of the checkout that wrote it; the cache folder is shared between
+    # checkouts (and that one may be gone), so the take is always the WAV found next to the record.
+    entry["path"] = str(wav)
+    return entry
 
 
 def write_cache_entry(meta: Path, entry: dict[str, Any]) -> None:
