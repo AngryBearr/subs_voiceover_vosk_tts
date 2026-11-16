@@ -186,6 +186,7 @@ _ONSCREEN_GUARD = threading.Lock()
 _COMPRESS_JOBS: dict[Path, Future[Path | None]] = {}
 _COMPRESS_GUARD = threading.Lock()
 _COMPRESS_GATE = threading.Lock()  # one video encoding at a time, whichever episode it is for
+_MIX_GATE = threading.Lock()  # one mix at a time in the process: each holds the whole episode in RAM
 # What the combined video of an episode was last muxed from (the tracks and their times), by episode folder
 _MUXED: dict[Path, tuple[tuple[str, int], ...]] = {}
 
@@ -413,6 +414,16 @@ class Episode:
     def gpu_overlap(self, name: str, *, uses_gpu: bool = True) -> bool:
         """May the GPU job ``name`` run beside others (``gpu.parallel``: auto looks at the card, see stt.gpu_budget)?"""
         return gpu_budget.allow_overlap(name, (self.config.get("gpu") or {}).get("parallel", "auto"), uses_gpu=uses_gpu)
+
+    def episode_minutes(self) -> float | None:
+        """Length of the episode's audio (``audio.wav``) in minutes, None if there is none yet."""
+        try:
+            import soundfile as sf
+
+            return sf.info(str(self.out / "audio.wav")).duration / 60
+        except Exception as error:  # noqa: BLE001 - no audio.wav or unreadable: the length is unknown
+            log.debug("[%s] episode length unknown: %s", self.media.stem, error)
+            return None
 
     @property
     def vram_peaks(self) -> Path:
@@ -1148,7 +1159,9 @@ class Episode:
                               "--neutral-gender", str(self.on_screen()["neutral_gender"]), "--generic-voices", generic]
                              + (["--solo"] if crowd.get("solo", True) else []))
             argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -3.0)}"]
-        mix.main(argv)
+        with _MIX_GATE:  # two lanes mixing at once, or a mix beside the F5 worker without room, got the process OOM-killed
+            gpu_budget.wait_for_mix_ram(self.episode_minutes(), self.media.stem)
+            mix.main(argv)
         started = time.monotonic()
         mix.encode_track(out_wav, self.track(self.engine))
         log.info("[%s] mix (%s): AAC encode %.0f s", self.media.stem, self.engine, time.monotonic() - started)

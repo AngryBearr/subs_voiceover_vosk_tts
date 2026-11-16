@@ -83,7 +83,7 @@ def render_preview(episode_dir: Path, media: Path, engine: str, start_s: float, 
                          separator.rate, RATE)[: len(original)]
     mixed = mix(original, voice, RATE, duck_db=duck_db, voice_gain_db=voice_gain_db, voices=stem,
                 rest_duck_db=rest_duck_db)
-    mixed, measured, gain_db = finish_mix(mixed, RATE, loudness_lufs)
+    mixed, measured, gain_db = finish_mix(mixed, RATE, loudness_lufs, inplace=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out), mixed, RATE, subtype="PCM_16")
     log.info("Preview %.0f s from %.0f s -> %s (loudness %s, gain %+.1f dB)", seconds, start_s, out,

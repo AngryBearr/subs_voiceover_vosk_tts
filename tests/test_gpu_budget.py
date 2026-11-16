@@ -261,3 +261,27 @@ def test_config_and_ui_default_to_auto() -> None:
     assert settings.FALLBACKS[("gpu", "parallel")] == "auto"
     setting = next(s for s in settings.SETTINGS if s.path == ("gpu", "parallel"))
     assert set(setting.choices.values()) == {"auto", "on", "off"} and "по очереди" in setting.info
+
+
+# ---- RAM of the mix
+
+def test_mix_waits_for_ram_then_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    free = iter([3.0, 5.0, 30.0])
+    monkeypatch.setattr(gpu_budget, "available_ram_gb", lambda: next(free))
+    monkeypatch.setattr(gpu_budget.time, "sleep", lambda _: None)
+    assert gpu_budget.mix_ram_needed(131) == pytest.approx(131 * 0.12 + 3.0)
+    assert gpu_budget.wait_for_mix_ram(131, "E13") is True  # 3 and 5 GB are too little, 30 GB is enough
+
+
+def test_mix_ram_wait_gives_up_and_unknowns_do_not_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gpu_budget, "available_ram_gb", lambda: 1.0)
+    monkeypatch.setattr(gpu_budget.time, "sleep", lambda _: None)
+    assert gpu_budget.wait_for_mix_ram(60, "E01", max_wait_s=0.0) is False  # starts anyway after the wait
+    assert gpu_budget.wait_for_mix_ram(None) is True  # length unknown: nothing to compare
+    monkeypatch.setattr(gpu_budget, "available_ram_gb", lambda: None)
+    assert gpu_budget.wait_for_mix_ram(60) is True  # RAM unknown (not Linux): no wait
+
+
+def test_available_ram_reads_meminfo() -> None:
+    free = gpu_budget.available_ram_gb()
+    assert free is None or free > 0

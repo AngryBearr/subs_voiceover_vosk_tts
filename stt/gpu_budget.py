@@ -135,6 +135,61 @@ def _gb(mb: float) -> str:
     return f"{mb / 1024:.1f} GB"
 
 
+# RAM of one mix (stt.mix, in this process): the original, the voice-over, the extra layers, the result and the
+# ducking envelope at 48 kHz. Measured peak (16.11, real episodes): 17 GB for 131 min, 9 GB for 65 min, ~0.12 GB per
+# minute (part of it the memory-mapped vocal stem, which the kernel can drop); MIX_RAM_MARGIN_GB is kept for the
+# jobs that start beside it.
+MIX_RAM_GB_PER_MIN = 0.12
+MIX_RAM_MARGIN_GB = 3.0
+
+
+def available_ram_gb() -> float | None:
+    """``MemAvailable`` of ``/proc/meminfo`` in GB, or None where there is none (not Linux)."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as file:
+            for line in file:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 2**20
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+MIX_RAM_WAIT_S = 30 * 60  # the longest a mix waits for RAM; then it starts anyway (the swap may still carry it)
+MIX_RAM_POLL_S = 10.0
+
+
+def mix_ram_needed(minutes: float) -> float:
+    """GB of free RAM a mix of a ``minutes``-long episode should find before it starts."""
+    return minutes * MIX_RAM_GB_PER_MIN + MIX_RAM_MARGIN_GB
+
+
+def wait_for_mix_ram(minutes: float | None, label: str = "", *, max_wait_s: float = MIX_RAM_WAIT_S,
+                     poll_s: float = MIX_RAM_POLL_S) -> bool:
+    """Wait until the RAM a mix needs is free (other jobs of the process, e.g. the F5 voicing, finish or shrink).
+    True if it is free (or unknown: nothing to wait for), False if ``max_wait_s`` passed without it."""
+    if minutes is None:
+        return True
+    need = mix_ram_needed(minutes)
+    deadline = time.monotonic() + max_wait_s
+    logged = False
+    while True:
+        free = available_ram_gb()
+        if free is None or free >= need:
+            if logged:
+                log.info("[%s] %.1f GB of RAM free now: the mix starts", label, free or 0.0)
+            return True
+        if time.monotonic() >= deadline:
+            log.warning("[%s] the mix needs %.1f GB of RAM, %.1f GB free after %.0f min of waiting: starting anyway",
+                        label, need, free, max_wait_s / 60)
+            return False
+        if not logged:
+            log.info("[%s] the mix of %.0f min needs %.1f GB of RAM, %.1f GB free: waiting for other jobs",
+                     label, minutes, need, free)
+            logged = True
+        time.sleep(poll_s)
+
+
 def decide(name: str, mode: object = "auto", *, uses_gpu: bool = True) -> Decision:
     """May overlap ``name`` (a key of ``OVERLAPS``) start now? Static rule: the card must hold the heaviest partner,
     the job itself and ``MARGIN_MB``; and what is free at this moment must hold the job and the margin."""

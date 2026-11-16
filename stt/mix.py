@@ -37,6 +37,7 @@ SEPARATION_VERSION = 1
 SEPARATOR_ID = "torchaudio.HDEMUCS_HIGH_MUSDB_PLUS;chunk=30;overlap=1"
 _SEPARATION_LOCKS: dict[Path, threading.Lock] = {}
 _SEPARATION_GUARD = threading.Lock()
+MIX_BLOCK = 48000 * 60  # samples per block of ``mix`` / ``limit_peaks``: their temporaries stay ~minute-sized
 
 
 def _resample(audio: np.ndarray, src: int, dst: int) -> np.ndarray:
@@ -79,32 +80,50 @@ def mix(original: np.ndarray, voice: np.ndarray, sample_rate: int, *, duck_db: f
     ``duck_db``; music and effects (original - voices) only by ``rest_duck_db``.
     """
     length = max([len(original), len(voice)] + [len(e) for e, _ in extra or []])
-    original = np.pad(original, ((0, length - len(original)), (0, 0)))
-    voice = np.pad(voice, (0, length - len(voice)))
-    env = speech_envelope(voice, sample_rate)
-    duck = 1.0 - (1.0 - 10 ** (-duck_db / 20)) * env
-    if voices is not None:
-        voices = np.pad(voices[:length], ((0, length - min(length, len(voices))), (0, 0)))
-        duck_rest = 1.0 - (1.0 - 10 ** (-rest_duck_db / 20)) * env
-        out = (original - voices) * duck_rest[:, None] + voices * duck[:, None]
-    else:
-        out = original * duck[:, None]
-    out = out + (voice * 10 ** (voice_gain_db / 20))[:, None]
-    for layer, gain_db in extra or []:
-        out += (np.pad(layer, (0, length - len(layer))) * 10 ** (gain_db / 20))[:, None]
-    return out.astype(np.float32)  # peaks above 1.0 are handled by ``limit_peaks`` (never by scaling the whole track)
+    env = speech_envelope(np.pad(voice, (0, length - len(voice))) if len(voice) < length else voice, sample_rate)
+    # Block by block into one preallocated array: a whole-episode expression made ~6 full-length temporaries
+    # (a 131-min episode needed ~20 GB of RAM); the arithmetic per sample is the same, so is the result.
+    out = np.empty((length, original.shape[1]), dtype=np.float32)
+    for start in range(0, length, MIX_BLOCK):
+        end = min(length, start + MIX_BLOCK)
+        block_env = env[start:end]
+        block = _block(original, start, end)
+        duck = 1.0 - (1.0 - 10 ** (-duck_db / 20)) * block_env
+        if voices is not None:
+            block_voices = _block(voices, start, end)
+            duck_rest = 1.0 - (1.0 - 10 ** (-rest_duck_db / 20)) * block_env
+            part = (block - block_voices) * duck_rest[:, None] + block_voices * duck[:, None]
+        else:
+            part = block * duck[:, None]
+        part = part + (_block(voice, start, end) * 10 ** (voice_gain_db / 20))[:, None]
+        for layer, gain_db in extra or []:
+            part += (_block(layer, start, end) * 10 ** (gain_db / 20))[:, None]
+        out[start:end] = part  # peaks above 1.0 are handled by ``limit_peaks`` (never by scaling the whole track)
+    return out
 
 
-def limit_peaks(audio: np.ndarray, sample_rate: int, ceiling: float = 0.97, lookahead_s: float = 0.005) -> np.ndarray:
+def _block(audio: np.ndarray, start: int, end: int) -> np.ndarray:
+    """``audio[start:end]`` zero-padded to ``end - start`` samples (a track shorter than the mix ends in silence)."""
+    part = audio[start:end]
+    if len(part) == end - start:
+        return np.asarray(part)
+    pad = ((0, end - start - len(part)),) + ((0, 0),) * (audio.ndim - 1)
+    return np.pad(part, pad)
+
+
+def limit_peaks(audio: np.ndarray, sample_rate: int, ceiling: float = 0.97, lookahead_s: float = 0.005, *,
+                inplace: bool = False) -> np.ndarray:
     """Look-ahead peak limiter: samples never exceed ``ceiling``, everything else stays as it is.
 
     The gain is ``min(1, ceiling / |peak over channels|)``, lowered ``lookahead_s`` before and after each
     peak (minimum filter) and smoothed (moving average no wider than that), so it reaches the reduced
-    value before the peak arrives. Audio that never exceeds the ceiling is returned unchanged.
+    value before the peak arrives. Audio that never exceeds the ceiling is returned unchanged. ``inplace`` writes the
+    result into ``audio`` (float32) instead of a new array: a long episode has no room for a second copy.
     """
     if audio.size == 0:
         return audio
-    peak = np.abs(audio).max(axis=1) if audio.ndim == 2 else np.abs(audio)
+    peak = np.concatenate([np.abs(audio[s:s + MIX_BLOCK]).max(axis=1) if audio.ndim == 2
+                           else np.abs(audio[s:s + MIX_BLOCK]) for s in range(0, len(audio), MIX_BLOCK)])
     if float(peak.max()) <= ceiling:
         return audio
     from scipy.ndimage import minimum_filter1d, uniform_filter1d
@@ -115,7 +134,11 @@ def limit_peaks(audio: np.ndarray, sample_rate: int, ceiling: float = 0.97, look
     gain = minimum_filter1d(gain, 2 * reach + 1, mode="nearest")
     gain = uniform_filter1d(gain, reach + 1, mode="nearest")
     gain = np.minimum(gain, 1.0)
-    return (audio * (gain[:, None] if audio.ndim == 2 else gain)).astype(np.float32)
+    out = audio if inplace and audio.dtype == np.float32 and audio.flags.writeable else np.empty(audio.shape, np.float32)
+    for s in range(0, len(audio), MIX_BLOCK):  # block by block: no full-length temporaries
+        g = gain[s:s + MIX_BLOCK]
+        out[s:s + MIX_BLOCK] = audio[s:s + MIX_BLOCK] * (g[:, None] if audio.ndim == 2 else g)
+    return out
 
 
 def integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
@@ -146,17 +169,20 @@ def integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
 
 
 def finish_mix(audio: np.ndarray, sample_rate: int, loudness_lufs: float | None,
-               ceiling: float = 0.97) -> tuple[np.ndarray, float | None, float]:
+               ceiling: float = 0.97, *, inplace: bool = False) -> tuple[np.ndarray, float | None, float]:
     """The last step of a mix: a static gain to ``loudness_lufs`` (None: none), then the peak limiter.
-    Returns ``(audio, loudness before, gain applied in dB)``."""
+    Returns ``(audio, loudness before, gain applied in dB)``. ``inplace``: ``audio`` (float32) may be overwritten."""
     measured: float | None = None
     gain_db = 0.0
     if loudness_lufs is not None:
         measured = integrated_loudness(audio, sample_rate)
         if np.isfinite(measured):
             gain_db = loudness_lufs - measured
-            audio = (audio * np.float32(10 ** (gain_db / 20))).astype(np.float32)
-    return limit_peaks(audio, sample_rate, ceiling), measured, gain_db
+            if inplace and audio.dtype == np.float32 and audio.flags.writeable:
+                audio *= np.float32(10 ** (gain_db / 20))  # in place: a copy of a long episode is gigabytes
+            else:
+                audio = (audio * np.float32(10 ** (gain_db / 20))).astype(np.float32)
+    return limit_peaks(audio, sample_rate, ceiling, inplace=inplace), measured, gain_db
 
 
 def separation_path(cache_dir: Path, media: Path, start: float, duration: float | None, sample_rate: int) -> Path:
@@ -377,8 +403,9 @@ def main(argv: list[str] | None = None) -> None:
     t_separated = time.monotonic()
     out = mix(original, voice, args.sample_rate, duck_db=args.duck_db, voice_gain_db=args.voice_gain_db,
               extra=layers, voices=voices, rest_duck_db=args.rest_duck_db)
+    del original, voice, voices, layers  # the mix is all that is needed now: free the inputs (gigabytes per hour)
     t_mixed = time.monotonic()
-    out, measured, gain_db = finish_mix(out, args.sample_rate, args.loudness_lufs)
+    out, measured, gain_db = finish_mix(out, args.sample_rate, args.loudness_lufs, inplace=True)
     t_finished = time.monotonic()
     if measured is not None:
         log.info("Loudness %.1f LUFS -> gain %+.1f dB to reach %.1f LUFS (peaks limited at 0.97)", measured, gain_db,
