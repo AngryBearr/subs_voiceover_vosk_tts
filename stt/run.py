@@ -1611,6 +1611,11 @@ def main(argv: list[str] | None = None) -> None:
     engines = [e.strip() for e in (args.engine or (config.get("voiceover") or {}).get("engine", "vosk")).split(",")
                if e.strip()]
     args.planned_engines = engines  # the finished video's size budget counts these voice-over tracks
+    from stt import preflight
+
+    absent = preflight.missing_envs(REPO_ROOT, config, engines, args.until, STAGES)
+    if absent:  # stop now instead of a quietly worse result hours later
+        raise SystemExit(preflight.message(absent))
     if args.season_voices_only:
         run_season_voices(files, out_root, args, config, engines, first_pass=False)
         return

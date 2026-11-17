@@ -32,6 +32,11 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
 
 ## 3. Окружения и основные пайплайны
 
+- **Общая папка**: окружения, `models/`, `output/`, `.env`, `stt_config.local.json` и `ui.local.json` физически лежат
+    один раз в `~/subs_voiceover_shared` (или `$SUBS_SHARED`); в каждом checkout/worktree это ссылки, которые ставит
+    `bash scripts/link_shared.sh` (в T3 Code — сам при создании worktree). Ничего из этого не копировать в worktree:
+    настройка, сохранённая в копии, теряется для остальных. `stt.run` останавливается в начале, если нужного
+    настройкам окружения нет (`stt/preflight.py`).
 - **Окружения** (всё сразу: `bash scripts/install.sh`, проверка: `subs_env/bin/python -m stt.selftest`;
     по отдельности: `bash scripts/setup_envs.sh`):
     - `subs_env` — всё: распознание (`stt/`), перевод, озвучка (`voiceover/`, Vosk, TeraTTS),
