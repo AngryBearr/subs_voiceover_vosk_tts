@@ -408,3 +408,122 @@ def test_export_stitches_short_solo_pieces_when_no_stretch_is_long_enough(tmp_pa
     again = voice_bank.export_references(bank, refs, "cpu")
     assert all(r["name"] != "Amy Adams" for r in again)
     assert json.loads((refs / "missing.json").read_text("utf-8"))["Amy Adams"]["stitched_failed"] == 1
+
+
+# --- how deep the search for a clean clip goes ------------------------------------------------------------------
+
+
+class OrderSeparator:
+    """Returns the accompaniment level by call order: the i-th separated candidate gets ``levels[i]``."""
+    rate = RATE
+
+    def __init__(self, levels: list[float]) -> None:
+        self.levels, self.calls = levels, 0
+
+    def __call__(self, stereo: np.ndarray) -> tuple[np.ndarray, float]:
+        level = self.levels[self.calls]
+        self.calls += 1
+        return stereo.copy(), level
+
+
+LOUD, CLEAN = -5.0, -30.0
+
+
+def _many_stretches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, levels: list[float]) -> tuple[VoiceBank, Path, OrderSeparator]:
+    """One person with ``len(levels)`` equally good solo stretches (6 s, starting at 0, 10, 20 ... s).
+
+    All have the same score, so they are tried in time order; the i-th one separated has accompaniment ``levels[i]``.
+    """
+    import stt.separate
+
+    count = len(levels)
+    root = tmp_path / "season"
+    ep = root / "ep1"
+    ep.mkdir(parents=True)
+    sf.write(str(ep / "audio.wav"), _tone(10.0 * count + 10, 0.5, 16_000), 16_000)
+    cues: list[dict[str, Any]] = []
+    for k in range(count):  # another speaker between the stretches keeps each one separate
+        cues.append({"start": k * 10_000, "end": k * 10_000 + 6_000, "speaker": "S1", "text": ["words here"]})
+        cues.append({"start": k * 10_000 + 7_000, "end": k * 10_000 + 9_000, "speaker": "S2", "text": ["other"]})
+    (ep / "subs.en.json").write_text(json.dumps(cues), encoding="utf-8")
+    (ep / "source.json").write_text(json.dumps({"media": str(_video(tmp_path))}), encoding="utf-8")
+    bank = VoiceBank(root / "S.voices.json")
+    bank.prints.append({"episode": "ep1", "speaker": "S1", "name": "Amy Adams", "label_ru": "Amy", "gender": "female",
+                        "speech_s": 60.0, "embedding": list(_dim(0)), "samples": []})
+    separator = OrderSeparator(levels)
+    monkeypatch.setattr(voice_bank, "SegmentEmbedder", FakeEmbedder)
+    monkeypatch.setattr(stt.separate, "VocalSeparator", lambda device: separator)
+    monkeypatch.setattr(voice_bank, "load_transcriber", lambda device: FakeTranscriber())
+    monkeypatch.setattr(voice_bank, "_read_media", lambda m, s, d, r, c: _speech_with_silence(0, d, 0, 0.5))
+    return bank, root / "S.references", separator
+
+
+def _picked(index: list[dict[str, Any]]) -> tuple[float, float]:
+    assert len(index) == 1
+    return index[0]["start"], index[0]["music_db"]
+
+
+def test_default_search_keeps_a_loud_clip_when_the_clean_one_is_ninth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bank, refs, separator = _many_stretches(tmp_path, monkeypatch, [LOUD] * 8 + [CLEAN] + [CLEAN])
+    index = voice_bank.export_references(bank, refs, "cpu")
+    assert separator.calls == voice_bank.SEPARATE_TOP
+    assert _picked(index) == (0.0, LOUD)
+
+
+def test_deep_search_finds_the_clean_ninth_and_stops_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bank, refs, separator = _many_stretches(tmp_path, monkeypatch, [LOUD] * 8 + [CLEAN] + [CLEAN] * 3)
+    index = voice_bank.export_references(bank, refs, "cpu", search_top=voice_bank.REJECT_SEARCH_TOP)
+    assert separator.calls == 9
+    assert _picked(index) == (80.0, CLEAN)
+
+
+def test_deep_search_goes_past_ninth_until_the_first_clean_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bank, refs, separator = _many_stretches(tmp_path, monkeypatch, [LOUD] * 11 + [CLEAN] + [CLEAN] * 2)
+    index = voice_bank.export_references(bank, refs, "cpu", search_top=voice_bank.REJECT_SEARCH_TOP)
+    assert separator.calls == 12
+    assert _picked(index) == (110.0, CLEAN)
+
+
+def test_deep_search_gives_a_loud_clip_when_nothing_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bank, refs, separator = _many_stretches(tmp_path, monkeypatch, [LOUD] * 12)
+    index = voice_bank.export_references(bank, refs, "cpu", search_top=10)
+    assert separator.calls == 10  # the search is limited by search_top
+    assert _picked(index)[1] == LOUD
+
+
+def test_clean_clip_in_the_first_eight_means_nothing_beyond_is_separated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bank, refs, separator = _many_stretches(tmp_path, monkeypatch, [LOUD] * 4 + [CLEAN] + [LOUD] * 3 + [CLEAN] * 4)
+    index = voice_bank.export_references(bank, refs, "cpu", search_top=voice_bank.REJECT_SEARCH_TOP)
+    assert separator.calls == voice_bank.SEPARATE_TOP
+    assert _picked(index) == (40.0, CLEAN)
+
+
+def test_clean_beats_loud_inside_the_first_eight_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bank, refs, separator = _many_stretches(tmp_path, monkeypatch, [LOUD, LOUD, CLEAN] + [LOUD] * 6)
+    index = voice_bank.export_references(bank, refs, "cpu")
+    assert _picked(index) == (20.0, CLEAN)
+
+
+def test_cli_reject_with_person_searches_deeper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    monkeypatch.setattr(voice_bank.VoiceBank, "load", classmethod(lambda cls, path: VoiceBank(tmp_path / "S.voices.json")))
+    monkeypatch.setattr(voice_bank, "reject_reference", lambda out, key: calls.setdefault("reject", (out, key)))
+    monkeypatch.setattr(voice_bank, "export_references", lambda *a, **k: calls.setdefault("export", (a, k)) and [])
+    assert voice_bank.main([str(tmp_path / "S.voices.json"), "--export", str(tmp_path / "refs"), "--person", "Amy Adams",
+                            "--reject", "--device", "cpu"]) == 0
+    assert calls["reject"] == (tmp_path / "refs", "Amy Adams")
+    assert calls["export"][1]["search_top"] == voice_bank.REJECT_SEARCH_TOP
+    assert calls["export"][1]["only"] == "Amy Adams"
+
+
+@pytest.mark.parametrize("argv", [["--export", "refs", "--person", "Amy Adams"], ["--export", "refs", "--reject"],
+                                  ["--export", "refs"]])
+def test_cli_without_reject_and_person_keeps_the_default_depth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                              argv: list[str]) -> None:
+    calls: dict[str, Any] = {}
+    monkeypatch.setattr(voice_bank.VoiceBank, "load", classmethod(lambda cls, path: VoiceBank(tmp_path / "S.voices.json")))
+    monkeypatch.setattr(voice_bank, "reject_reference", lambda out, key: calls.setdefault("reject", (out, key)))
+    monkeypatch.setattr(voice_bank, "export_references", lambda *a, **k: calls.setdefault("export", (a, k)) and [])
+    assert voice_bank.main([str(tmp_path / "S.voices.json"), *argv, "--device", "cpu"]) == 0
+    assert calls["export"][1]["search_top"] == voice_bank.SEPARATE_TOP
+    assert "reject" not in calls

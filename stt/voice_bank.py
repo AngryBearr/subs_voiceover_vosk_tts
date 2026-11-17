@@ -73,6 +73,7 @@ MIN_WINDOW_SCORE = 0.45  # ... and so must each 3 s window of it (another voice 
 MAX_OTHER_VOICE_S = 0.15  # seconds of another diarized speaker allowed inside a reference stretch
 MUSIC_DB = -20.0  # accompaniment below the voice by more than this counts as clean
 SEPARATE_TOP = 8  # candidates per person that go through vocal separation
+REJECT_SEARCH_TOP = 40  # after a rejection: look this deep for a clip with quiet music (MUSIC_DB) if the top ones are loud
 MIN_SUPPORT = 2  # a rename needs the voice under the other name in at least this many other episodes
 RECHECK_SCORE = 0.85  # ... and this similarity (S29 twins Nadiya/Natalie: 0.80)
 
@@ -820,8 +821,12 @@ def stitched_best(places: list[tuple[str, Path, set[str], str, str, list[dict[st
 
 
 def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only: str | None = None,
-                      missing: bool = False, stitch: bool = True) -> list[dict[str, Any]]:
+                      missing: bool = False, stitch: bool = True,
+                      search_top: int = SEPARATE_TOP) -> list[dict[str, Any]]:
     """Cut the cleanest reference stretch of every person (or only ``only``) into ``out_dir``.
+
+    ``search_top`` above ``SEPARATE_TOP`` (``--reject``): when none of the first ``SEPARATE_TOP`` candidates has quiet
+    music, the next ones are separated too, up to ``search_top``, until one has.
 
     Returns the index (``references.json``; other people's entries are kept when ``only`` is set).
     People with a hand-made clip (``manual.json``) are skipped and their entries stay in the index.
@@ -908,9 +913,11 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
             """The best candidate that survives vocal separation, and how many fell out as noisy."""
             found: dict[str, Any] | None = None
             noisy = 0
-            for c in pool[:SEPARATE_TOP]:
+            for n, c in enumerate(pool[:max(search_top, SEPARATE_TOP)]):
                 if c["score"] < MIN_SAMPLE_SCORE:
                     break
+                if n >= SEPARATE_TOP and found is not None and found["music_db"] < MUSIC_DB:
+                    break  # a clean clip is in hand: search no deeper
                 vocals, music_db = separate(read(c))
                 mono16 = soxr.resample(vocals.mean(0), separate.rate, 16_000)
                 windows = _window_scores(embed, mono16, 16_000, prints)
@@ -1049,7 +1056,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.reject and args.person:
             reject_reference(args.export, args.person)
         export_references(bank, args.export, args.device, only=args.person, missing=args.missing,
-                          stitch=not args.no_stitch)
+                          stitch=not args.no_stitch,
+                          search_top=REJECT_SEARCH_TOP if args.reject and args.person else SEPARATE_TOP)
         return 0
     if args.recheck:
         suggestions = recheck(bank)
