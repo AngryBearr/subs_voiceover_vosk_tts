@@ -8,6 +8,7 @@
 #                                       # (engine "f5"); reuses torch of subs_env, so create subs_env first
 #   bash scripts/setup_envs.sh diarizen # optional diarizen_env: DiariZen v2 diarization ("diarizer": "diarizen-v2");
 #                                       # its own torch 2.1 and pyannote 3.1 fork; weights CC BY-NC 4.0
+#   bash scripts/setup_envs.sh xvoice   # optional xvoice_env: X-Voice makes Russian reference samples (stt.ru_samples)
 #   bash scripts/setup_envs.sh lava     # optional lava_env: LavaSR v2 widens the cloned voices of narrowband (old)
 #                                       # seasons before the mix ("mix.widen"); CPU torch; code MIT, weights Apache-2.0
 # An environment that already exists is kept and only brought up to date (run again after `git pull`).
@@ -49,6 +50,17 @@ if has lava; then
   # its own pyproject names vocos by branch; the pinned commit of requirements-lava.txt is that branch
   VIRTUAL_ENV=$PWD/lava_env uv pip install --no-deps "LavaSR @ git+https://github.com/ysharma3501/LavaSR.git@33ac040892519c1bb4aed7eb32e79af51cc29e2a"
   lava_env/bin/python -c "import LavaSR; print('LavaSR ok')"
+fi
+
+if has xvoice; then
+  # optional xvoice_env: X-Voice (cross-lingual cloning, weights CC-BY-NC) makes the Russian reference samples
+  # (stt.ru_samples); the system library espeak-ng is used by phonemizer
+  venv xvoice_env 3.11
+  VIRTUAL_ENV=$PWD/xvoice_env uv pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+  [ -d models/X-Voice ] || git clone https://github.com/sunnyxrxrx/X-Voice models/X-Voice
+  VIRTUAL_ENV=$PWD/xvoice_env uv pip install -e models/X-Voice
+  VIRTUAL_ENV=$PWD/xvoice_env uv pip install "pyarrow<20"
+  xvoice_env/bin/python -c "import x_voice, torch; print('X-Voice ok, CUDA:', torch.cuda.is_available())"
 fi
 
 if has diarizen; then

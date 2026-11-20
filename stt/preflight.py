@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 # what scripts/link_shared.sh links from the shared folder (keep in sync)
-SHARED_ITEMS = ("subs_env", "f5_env", "diarizen_env", "lava_env", "stt_qwen_env", "models", "output", ".env",
+SHARED_ITEMS = ("subs_env", "f5_env", "diarizen_env", "lava_env", "xvoice_env", "stt_qwen_env", "models", "output", ".env",
                 "stt_config.local.json", "ui.local.json")
 
 
@@ -27,6 +27,10 @@ def needed_envs(config: dict[str, Any], engines: list[str], until: str, stages: 
         need[spec.env] = f"who speaks when: «{config.get('diarizer')}» (setting diarizer)"
     if "f5" in engines and reach >= stages.index("voiceover"):
         need["f5_env"] = "ESpeech voice-over (engine f5)"
+    f5_config = ((config.get("voiceover") or {}).get("engines") or {}).get("f5") or {}
+    if ("f5" in engines and reach >= stages.index("dub") and f5_config.get("reference_language", "en") == "ru"):
+        need["xvoice_env"] = ("Russian voice samples for ESpeech "
+                              "(setting voiceover.engines.f5.reference_language)")
     widen = (config.get("mix") or {}).get("widen") or {}
     if (widen.get("enabled") and reach >= stages.index("mix")
             and any(e in engines for e in widen.get("engines", ["f5"]))):

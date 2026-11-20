@@ -15,7 +15,7 @@ set -euo pipefail
 SHARED="${SUBS_SHARED:-$HOME/subs_voiceover_shared}"
 TARGET="$(cd "${1:-.}" && pwd)"
 # keep in sync with stt.preflight.SHARED_ITEMS (tests/test_preflight.py compares them)
-ITEMS=(subs_env f5_env diarizen_env lava_env stt_qwen_env models output .env stt_config.local.json ui.local.json)
+ITEMS=(subs_env f5_env diarizen_env lava_env xvoice_env stt_qwen_env models output .env stt_config.local.json ui.local.json)
 
 if [ ! -d "$SHARED" ]; then
   echo "link_shared: shared folder $SHARED not found (set SUBS_SHARED)" >&2

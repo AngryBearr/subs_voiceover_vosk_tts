@@ -100,6 +100,7 @@ The Python environments:
 |---|---|
 | `subs_env` | almost everything: recognition, translation, Vosk and TeraTTS, speech check, mixing, the UI |
 | `f5_env` | ESpeech (F5-TTS), the voices cloned from the heroes. Needs `subs_env` first |
+| `xvoice_env` | X-Voice, makes the Russian voice samples that ESpeech clones from (CC-BY-NC weights, non-commercial only) |
 | `diarizen_env` | DiariZen v2, the default "who speaks when" model. Without it the program uses pyannote |
 | `stt_qwen_env` | optional, only for comparisons with Qwen3-ASR; the pipeline does not use it |
 

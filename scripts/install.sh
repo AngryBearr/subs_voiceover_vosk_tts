@@ -49,7 +49,7 @@ echo "uv: $(uv --version)"
 
 step "2/6 Окружения Python (первый раз 10-30 минут)"
 targets=(main)
-(( basic )) || targets+=(f5 diarizen)
+(( basic )) || targets+=(f5 diarizen xvoice)
 bash scripts/setup_envs.sh "${targets[@]}"
 
 step "3/6 Модель голосов Vosk"

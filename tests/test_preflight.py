@@ -28,6 +28,16 @@ def test_widen_needs_lava_only_with_its_engine_and_the_mix() -> None:
     assert "lava_env" not in preflight.needed_envs(off, ["f5"], "mix", STAGES)
 
 
+def test_russian_samples_need_xvoice_env_in_the_dub_stage_only() -> None:
+    ru = {**BASE, "voiceover": {"engines": {"f5": {"reference_language": "ru"}}}}
+    assert "xvoice_env" in preflight.needed_envs(ru, ["f5"], "mix", STAGES)
+    assert "xvoice_env" not in preflight.needed_envs(ru, ["f5"], "speakers", STAGES)  # --prepare
+    assert "xvoice_env" not in preflight.needed_envs(ru, ["teratts"], "mix", STAGES)
+    en = {**BASE, "voiceover": {"engines": {"f5": {"reference_language": "en"}}}}
+    assert "xvoice_env" not in preflight.needed_envs(en, ["f5"], "mix", STAGES)
+    assert "xvoice_env" not in preflight.needed_envs(BASE, ["f5"], "mix", STAGES)
+
+
 def test_prepare_does_not_need_f5_env() -> None:
     assert "f5_env" not in preflight.needed_envs(BASE, ["f5"], "speakers", STAGES)
 

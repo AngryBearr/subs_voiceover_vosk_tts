@@ -359,7 +359,8 @@ class Episode:
             "translate": (self.translate, [self.out / "subs.ru.json"]),
             "dub": (self.dub, [self.out / f"dub.ru.{self.engine}.json"],
                     [self.out / "corrections.json"]  # manual fixes; for F5 also new or replaced voice clips
-                    + ([self.references / "references.json"] if self.engine == "f5" else [])),
+                    + ([self.references / "references.json", self.references / "ru_samples.json"]
+                       if self.engine == "f5" else [])),
             "stress": (self.stress, [self.out / "stress.json"]),
             "voiceover": (self.voiceover, [self.vo_dir / "export" / "track.wav"]),
             "check": (self.check, [self.vo_dir / "speech_check.json"]),
@@ -703,6 +704,21 @@ class Episode:
         """Voice-cloning clips of the season's people (stt.voice_bank --export)."""
         return self.voice_bank.with_name(self.voice_bank.name.replace(".voices.json", ".references"))
 
+    def _reference_clip(self, ref: dict[str, Any], language: str, warned: set[str]) -> Path:
+        """A person's clip for F5: with ``reference_language: "ru"`` the Russian sample (``<stem>.ru.wav`` + ``.ru.txt``,
+        made by ``stt.ru_samples``) when both exist, else (logged once per person in ``warned``) the English clip."""
+        english = (self.references / ref["wav"]).resolve()
+        if language != "ru":
+            return english
+        russian = english.with_suffix(".ru.wav")
+        if russian.is_file() and russian.with_suffix(".txt").is_file():
+            return russian
+        if english.name not in warned:
+            warned.add(english.name)
+            log.warning("[%s] no Russian sample for %s (stt.ru_samples): the English clip is used", self.media.stem,
+                        ref.get("name") or english.stem)
+        return english
+
     def _speaker_voices(self) -> Path:
         """{speaker id: voice} of this episode's people (F5 engine): their own clip, else a season stand-in."""
         from stt.voice_bank import person_key, same_key
@@ -716,6 +732,16 @@ class Episode:
             if not (self.config.get("voice_bank") or {}).get("stitch", False):
                 export.append("--no-stitch")
             self._module("voices", "stt.voice_bank", export)
+        language = str(self.config["voiceover"].get("engines", {}).get("f5", {}).get("reference_language", "en"))
+        if language == "ru" and not (REPO_ROOT / "xvoice_env" / "bin" / "python").exists():
+            log.warning("[%s] xvoice_env is missing (bash scripts/setup_envs.sh xvoice): no Russian samples are made",
+                        self.media.stem)
+        elif language == "ru":  # makes only the missing / stale samples; a failure leaves English clips for those
+            try:
+                self._module("ru_samples", "stt.ru_samples", [str(self.references)])
+            except (Exception, SystemExit) as error:  # noqa: BLE001 - the episode goes on with the English clips
+                log.warning("[%s] Russian samples not made (%s), see logs/ru_samples.log: English clips are used "
+                            "for the missing ones", self.media.stem, error)
         index = self.references / "references.json"
         refs = load_json(index) if index.exists() else []
         cards = load_json(self.out / "speakers.json")
@@ -727,13 +753,14 @@ class Episode:
         before = json.dumps(standins, sort_keys=True)
         mapping: dict[str, str] = {}
         own = stand = generic = 0
+        warned: set[str] = set()
         for card in cards:
             key = person_key(card)
             if spoken is not None and card["id"] not in spoken:
                 continue
             ref = next((r for r in refs if key and (rk := person_key(r)) and same_key(rk, key)), None)
             if ref:
-                mapping[card["id"]] = voice_id((self.references / ref["wav"]).resolve())
+                mapping[card["id"]] = voice_id(self._reference_clip(ref, language, warned))
                 own += 1
                 continue
             gender = card.get("gender") if card.get("gender") in pool else "male"

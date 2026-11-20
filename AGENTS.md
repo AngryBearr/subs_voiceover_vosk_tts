@@ -43,6 +43,8 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
         проверка речи, Gradio, классические скрипты. Ставится из `requirements.txt` через uv с
         `overrides-onnxruntime.txt` (модуль `onnxruntime` даёт только `onnxruntime-gpu`).
     - `f5_env` — `f5-tts` для озвучки клонированными голосами (ESpeech, `voiceover/f5_worker.py`).
+    - `xvoice_env` — X-Voice, русские образцы голосов для ESpeech (`stt/ru_samples.py`,
+        `voiceover/xvoice_worker.py`); веса под CC-BY-NC, только некоммерческое использование.
     - `diarizen_env` — DiariZen v2, разделение говорящих по умолчанию (код в `models/diarizen/repo`);
         без него `stt.run` берёт pyannote.
     - `stt_qwen_env` — необязательное, только для сравнений с Qwen3-ASR; удалено 29.10

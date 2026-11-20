@@ -5,6 +5,27 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Experiment of 19.11.2026: Russian samples as the clone references (the user's idea)
+
+Clone each hero into one Russian sentence (a cloud or local cross-lingual TTS), then let ESpeech clone from that sample instead of the English clip. OpenRouter clones per request (`/api/v1/audio/speech`, `input_references`) with Seed Audio 1.0, Fish S2.1 Pro (free tier), Drama 3 and HeyGen Voice; ElevenLabs and MiniMax are there with preset voices only. Locally X-Voice (`xvoice_env`, `models/X-Voice`, CC-BY-NC weights). Numbers in `docs/experiments.md` (19.11 row): the lines from a Fish sample are as similar as now and the English leaks are gone (CER 6.3 / 2.3% -> 0.5 / 0.8% on one take).
+
+The user listened (19.11): X-Voice samples won (picked on 20 of 24 lines, Seed 14, Fish 8, the English clip 8).
+
+Built 19-20.11 (off by default until 20.11, now the default): `stt.ru_samples <refs dir> [--takes 6] [--season-dir]` makes `<stem>.ru.wav` + `.ru.txt`
+per person (the text: the Russian subtitle rows over the clip's span; X-Voice in `xvoice_env` via
+`voiceover/xvoice_worker.py`; a take must be heard right by GigaAM, best similarity to the English clip wins) and
+`ru_samples.json`; `voiceover.engines.f5.reference_language: "ru"` makes the dub use them (switching needs
+`--force dub`). The leaked-reference cut compares with the line only, so a Russian reference changes nothing there.
+A person whose clip comes from another season (S51 Jeff Probst) gets no sample and keeps the English clip.
+A/B on copies (`Survivor/STT_listen_2026-11-20_ru_refs/`: `work/` episode copies, `run.sh`, `cut.py`; key in
+`key.json`): S01E08, S20E07, S51E04 voiced twice by the same pipeline, 7-minute pieces with both voice-overs as
+tracks "Вариант 1/2". Samples made: S01 18 of 19 (no usable take for one merged cluster), S20 22 of 22, S51 21 of 22;
+~5-8 min per season. Next: the user's ear on the pieces; then the default for new seasons, the sample step in the
+season preparation. Open: the Selectel author's taste ranking (melody, loudness, tempo against the original) for
+picking takes; several samples (calm / excited).
+
+20.11: the user chose the Russian samples in all three A/B pieces (S01E08, S20E07, S51E04; they were track 1 in each, so a position effect cannot be ruled out); default "ru" since then.
+
 ## Fix of 12.11.2026: lines next to a burned-in caption were not voiced (the user's report)
 
 The user (12.11): where the show captions a quiet speaker, the line of another person right next to the caption was

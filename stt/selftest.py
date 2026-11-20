@@ -210,6 +210,8 @@ CHECKS = [
     Check("ESpeech (f5_env)", _env("f5_env", "import f5_tts; from huggingface_hub import hf_hub_download; "
                                    "hf_hub_download('ESpeech/ESpeech-TTS-1_RL-V2', 'espeech_tts_rlv2.pt'); "
                                    "print('скачано')"), required=False, full_only=True),
+    Check("X-Voice, русские образцы (xvoice_env)", _env("xvoice_env", "import x_voice, torch; print('есть')"),
+          required=False, full_only=True),
     Check("DiariZen (diarizen_env)", _env("diarizen_env", "import diarizen; from huggingface_hub import "
                                           "snapshot_download; snapshot_download('BUT-FIT/diarizen-wavlm-large-s80-md-v2'); "
                                           "print('скачано')"), required=False, full_only=True),

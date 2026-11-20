@@ -84,7 +84,7 @@ to its screening with the whole line: the models choose the spelling that fits t
 writes it into the voice-over text only.
 
 `scripts/install.sh` (Linux, NVIDIA driver with CUDA 12.8+): checks the GPU, disk and `uv`
-(offers to install it), creates subs_env, f5_env and diarizen_env (`--basic`: subs_env only;
+(offers to install it), creates subs_env, f5_env, diarizen_env and xvoice_env (`--basic`: subs_env only;
 existing environments are kept and only updated), downloads the Vosk voice model, runs `hf auth
 login` if needed (and lists the two gated models whose terms to accept), asks for the OpenRouter
 key without showing it and appends it to `.env`, runs `stt.selftest` (downloads ~30 GB of models
@@ -501,6 +501,22 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   still speaks the end of the reference before the line, GigaAM's word times show it and the
   start is cut off. S29E03 (640 lines, 15 voices): 19 min; character errors 5.1% (12 s clips)
   -> 2.5% (5-9 s) -> 1.5% (with the cut), Vosk 0.6%, TeraTTS 0.5%.
+- **Russian reference samples for ESpeech (default).** `voiceover.engines.f5.reference_language` is `"ru"` by
+  default: F5 clones each person from a Russian sample of the same person (`<Stem>.ru.wav` + `<Stem>.ru.txt` in the
+  references folder), else (with a warning per person) from the English clip. In a blind test (19.11) such samples won
+  on 20 of 24 lines against 8 for the English clip, and the user chose them in all three 7-minute A/B pieces (20.11).
+  The `dub` stage of an f5 run makes the missing ones itself (`stt.ru_samples`, log `logs/ru_samples.log`; a failure
+  there only leaves the English clips). By hand:
+  `subs_env/bin/python -m stt.ru_samples <Season>.references [--takes 6] [--only Name ...] [--force]`.
+  X-Voice (`xvoice_env`, `bash scripts/setup_envs.sh xvoice`; needs the system library `espeak-ng`) says the
+  Russian text of the clip's rows of `subs.ru.json` in the person's voice, several takes are checked (GigaAM character
+  errors, speech 3.5-11 s, similarity to the English clip) and the best is kept; `ru_samples.json` lists them.
+  A person with no usable take, no Russian rows or a clip from another season is remembered there (`failed`) and not
+  tried again until `--force` / `--only` or until their English clip changes (the entries keep the clip's id, so a
+  clip that voice_bank replaced gets a new sample). `references.json` is not touched. A new sample file re-runs the
+  `dub` stage of the f5 engine (the voice id hashes the clip), but changing the setting itself does not: use
+  `--force dub`. Set `"en"` to keep the English clips (e.g. for a season already voiced half-way). X-Voice weights
+  are CC-BY-NC: non-commercial use only.
 - **Stress (before synthesis).** RUAccent is right for dictionary words; errors come from
   homographs and words it guesses. Stress is fixed in the text: from the audio it is heard only
   partly (TeraAnaly's stress head, given the text, on 159 phrases synthesised with a deliberately
