@@ -28,6 +28,7 @@ import fnmatch
 import hashlib
 import json
 import logging
+import re
 import shutil
 import sys
 from collections import Counter, defaultdict
@@ -694,14 +695,50 @@ def _tally(states: list[str | None], words: list[Word]) -> dict[str, int]:
     return {(s[len(STATE_PREFIX):] if s.startswith(STATE_PREFIX) else f"cluster {s}"): n for s, n in count.most_common()}
 
 
+GUESTS = ("everywhere", "home")  # ``season_voices.guests``: where a person who is not core is a candidate
+_CORE_ROLE = re.compile(r"\b(contestant|host)\b", re.IGNORECASE)
+
+
+def core_people(voices: SeasonVoices) -> set[str] | None:
+    """The season's people who are candidates in every episode: the cast members whose role names a contestant or a host
+    (every cast member when no member has a role). None when the season has no cast (no rule). A person the cast does not
+    list, and a cast member with another role (a guest, a loved one), is not core; a voice identity is always kept."""
+    from stt.cast import find_member
+
+    members = [m for m in voices.cast.get("cast") or [] if m.get("name")] if voices.cast else []
+    if not members:
+        return None
+    roleless = not any(str(m.get("role") or "").strip() for m in members)
+    core: set[str] = set()
+    for person in voices.names:
+        if is_identity(person):
+            core.add(person)
+            continue
+        member = find_member(person, voices.cast)
+        if member is not None and (roleless or _CORE_ROLE.search(str(member.get("role") or ""))):
+            core.add(person)
+    return core
+
+
+def dropped_candidates(voices: SeasonVoices, evidence: set[str]) -> list[str]:
+    """The season's people who are no candidates in an episode: not core and without ``evidence`` there (a first-pass
+    card, an on-screen name card or a subtitle label of theirs)."""
+    core = core_people(voices)
+    if core is None:
+        return []
+    return [name for name in voices.names if name not in core and name not in evidence]
+
+
 def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293", dry_run: bool = False,
                   options: CueOptions | None = None, caption_bonus: float = TURN_BONUS, tribe_prior: float = 0.0,
-                  dissolve: str = "none") -> Result:
+                  dissolve: str = "none", guests: str = "everywhere") -> Result:
     """Assign the words of one episode again over the season's people and rewrite its transcript (see the module doc).
     ``caption_bonus``: the reward of a switch at a ">>" caption mark (a diarizer change gets ``TURN_BONUS``).
     ``tribe_prior``: how much less likely a person is at the camp of a tribe they were never in (``stt.tribes``; 0: off).
     ``dissolve``: unnamed clusters that are no state of their own, so their words go to the season's people: "mixed" (the
-    ones the naming calls a mix of voices), "unnamed" (all of them) or "none"."""
+    ones the naming calls a mix of voices), "unnamed" (all of them) or "none".
+    ``guests``: "home": a person who is not core (``core_people``) is a candidate only in the episodes with first-pass
+    evidence of them (a card, a name card on screen, a subtitle label); "everywhere": every person in every episode."""
     from stt.speakers import update_records
     from stt.transcribe import assemble_cues, write_transcript
 
@@ -743,6 +780,16 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
     states.update({label: vec for label, vec in clusters.items() if label not in named_clusters and label not in gone})
     fixed: dict[int, str] = {}
     hints = subtitle_hints(old)
+    dropped: list[str] = []
+    if guests == "home":
+        evidence = {p for c in old.cards if c.get("cues") and (p := card_person[c["id"]])} | set(card_words(old, voices))
+        evidence |= {who for label in (hints.persons if hints else ()) if (who := voices.by_first_name(label))}
+        dropped = dropped_candidates(voices, evidence)
+        for name in dropped:
+            states.pop(STATE_PREFIX + name, None)
+        if dropped:
+            log.info("[%s] season voices: %d people are no candidates here (no card, name card or subtitle label): %s",
+                     folder.name, len(dropped), ", ".join(dropped))
     own_lines: dict[str, list[int]] = defaultdict(list)  # a name only the subtitles give -> its words
     own_labels: dict[str, list[str]] = defaultdict(list)  # ... and the first pass's "P:<LABEL>" cards of it
     for label, idx in (hints.persons.items() if hints else ()):
@@ -804,6 +851,7 @@ def apply_episode(folder: Path, voices: SeasonVoices, *, model: str = "resnet293
         "speakers_before": len([c for c in old.cards if c.get("cues")]),
         "speakers_after": len(cards),
         "people": sum(c.get("season_voice", False) for c in cards),
+        "dropped_candidates": dropped,
         "per_person": {name: {"before": before.get(name, 0), "after": after.get(name, 0)} for name in sorted({*before, *after})},
     }
     if _same_as_current(folder, words, ids, records, cards):
@@ -881,7 +929,8 @@ def prepare_embeddings(folders: list[Path], model: str, device: str = "cuda") ->
 
 def apply_season(all_folders: list[Path], targets: list[Path], voices_path: Path | None, *, model: str = "resnet293",
                  min_words: int = MIN_WORDS, dry_run: bool = False, caption_bonus: float = TURN_BONUS,
-                 tribe_prior: float = 0.0, dissolve: str = "none", voice_source: str = "all") -> dict[str, Result]:
+                 tribe_prior: float = 0.0, dissolve: str = "none", voice_source: str = "all",
+                 guests: str = "everywhere") -> dict[str, Result]:
     """Build (or reuse) the season voices from ``all_folders`` and apply them to ``targets``. Returns a Result per folder.
     A dry run computes no word embeddings (episodes without them are left out) and writes nothing."""
     if not dry_run:
@@ -891,7 +940,7 @@ def apply_season(all_folders: list[Path], targets: list[Path], voices_path: Path
     for folder in targets:
         try:
             results[folder.name] = apply_episode(folder, voices, model=model, dry_run=dry_run, caption_bonus=caption_bonus,
-                                                 tribe_prior=tribe_prior, dissolve=dissolve)
+                                                 tribe_prior=tribe_prior, dissolve=dissolve, guests=guests)
         except Exception as error:  # noqa: BLE001 - one episode must not stop the season; the first pass stays
             log.exception("[%s] season voices failed", folder.name)
             results[folder.name] = Result("skipped", f"error: {error}")
@@ -920,6 +969,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="clean: a person's voice from the words under their name cards and named lines when enough")
     parser.add_argument("--dissolve", choices=["none", "mixed", "unnamed"], default="none",
                         help="Unnamed clusters whose words go to the season's people: the mixed ones, all, or none")
+    parser.add_argument("--guests", choices=list(GUESTS), default="everywhere",
+                        help="home: a person who is no contestant or host of the cast is a candidate only in the episodes "
+                             "with a card, name card or subtitle label of them; everywhere: in every episode")
     parser.add_argument("--tribe-prior", type=float, default=0.0,
                         help="How much less likely a person is at another tribe's camp (stt.tribes); 0: off")
     parser.add_argument("--voices", type=Path, default=None, help="Where the season voices are saved (default: <root>/<root name>.season_voices.npz)")
@@ -936,7 +988,7 @@ def main(argv: list[str] | None = None) -> None:
     for name, result in apply_season(everything, targets, path, model=args.model, min_words=args.min_words,
                                      dry_run=args.dry_run, caption_bonus=args.caption_bonus,
                                      tribe_prior=args.tribe_prior, dissolve=args.dissolve,
-                                     voice_source=args.voice_source).items():
+                                     voice_source=args.voice_source, guests=args.guests).items():
         print(summary(name, result))  # CLI output
     if args.dry_run:
         print("dry run: nothing written")

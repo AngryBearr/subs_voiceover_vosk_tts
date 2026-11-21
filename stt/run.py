@@ -1490,7 +1490,8 @@ def run_season_voices(files: list[Path], out_root: Path, args: argparse.Namespac
                                              caption_bonus=float(cfg.get("caption_bonus", season_voices.TURN_BONUS)),
                                              tribe_prior=float(cfg.get("tribe_prior", 0.0)),
                                              dissolve=str(cfg.get("dissolve", "none")),
-                                             voice_source=str(cfg.get("voice_source", "all")))
+                                             voice_source=str(cfg.get("voice_source", "all")),
+                                             guests=str(cfg.get("guests", "everywhere")))
         for media in fresh:
             episode = episodes[media]
             result = results[episode.out.name]

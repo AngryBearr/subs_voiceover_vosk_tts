@@ -674,3 +674,64 @@ def test_an_unnamed_voice_with_an_identity_is_a_season_person(tmp_path: Path) ->
         report = load_json(folder / "season_voices.json")
         assert report["per_person"]["V01"] == {"before": 28, "after": 28}
         assert report["people"] == 3
+
+
+# ---------------------------------------------------------------- guests: candidates only where they were seen
+GUEST_CAST = {"cast": [
+    {"name": "Alice Smith", "aliases": [], "gender": "female", "role": "Contestant; Tagi tribe"},
+    {"name": "Bob Jones", "aliases": [], "gender": "male", "role": "Loved-one guest in episode 13"},
+    {"name": "Jeff Probst", "aliases": [], "gender": "male", "role": "Reunion host"},
+]}
+
+
+def test_core_people_come_from_the_cast_roles(season: list[Path]) -> None:
+    voices = sv.build_voices(season, MODEL, 20)
+    assert sv.core_people(voices) is None  # no cast: no rule
+    voices.cast = GUEST_CAST
+    assert sv.core_people(voices) == {"Alice Smith"}  # a guest is not core; Bob is a loved-one guest
+    voices.cast = {"cast": [{"name": "Alice Smith"}, {"name": "Bob Jones", "role": ""}]}
+    assert sv.core_people(voices) == {"Alice Smith", "Bob Jones"}  # no roles at all: every member is core
+    voices.cast = {"cast": [{"name": "Alice Smith", "role": "Contestant"}]}
+    assert sv.core_people(voices) == {"Alice Smith"}  # Bob is not in the cast: not core
+
+
+def test_a_guest_is_a_candidate_only_where_there_is_evidence(season: list[Path]) -> None:
+    """Bob (a guest) has a card in e1-e3 here; take it away from e1 and his words there go elsewhere."""
+    voices = sv.build_voices(season, MODEL, 20, cast=GUEST_CAST)
+    assert "Bob Jones" in voices.names
+    sv.apply_episode(season[1], voices, model=MODEL, guests="home")
+    assert "Bob Jones" in spoken(season[1])  # his own card: kept
+    report = load_json(season[1] / sv.REPORT)
+    assert report["dropped_candidates"] == []
+    cards = load_json(season[0] / "speakers.json")
+    for card in cards:
+        if card["diarizer_label"] in ("Y",):
+            card["name"] = None  # e1: nobody named Bob any more
+    save_json(season[0] / "speakers.json", cards)
+    sv.apply_episode(season[0], voices, model=MODEL, guests="home")
+    assert "Bob Jones" not in spoken(season[0])
+    assert load_json(season[0] / sv.REPORT)["dropped_candidates"] == ["Bob Jones"]
+    result = sv.apply_episode(season[0], voices, model=MODEL)  # "everywhere": nobody is dropped
+    assert result.report["dropped_candidates"] == []
+
+
+def test_a_subtitle_label_keeps_a_guest_a_candidate(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    voices = sv.build_voices(season, MODEL, 20, cast=GUEST_CAST)
+    cards = load_json(season[0] / "speakers.json")
+    for card in cards:
+        if card["diarizer_label"] == "Y":
+            card["name"] = None
+    save_json(season[0] / "speakers.json", cards)
+    monkeypatch.setattr(sv, "subtitle_hints", lambda episode: WordHints(persons={"BOB": list(range(30, 42))}))
+    sv.apply_episode(season[0], voices, model=MODEL, guests="home")
+    assert load_json(season[0] / sv.REPORT)["dropped_candidates"] == []
+    assert spoken(season[0])[30:42] == ["Bob Jones"] * 12
+
+
+def test_guests_default_is_everywhere_and_reaches_the_cli(season: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(sv, "apply_season", lambda *a, **k: seen.append(k["guests"]) or {})
+    root = season[0].parent
+    sv.main([str(root)])
+    sv.main([str(root), "--guests", "home"])
+    assert seen == ["everywhere", "home"]
