@@ -31,6 +31,9 @@ def needed_envs(config: dict[str, Any], engines: list[str], until: str, stages: 
     if ("f5" in engines and reach >= stages.index("dub") and f5_config.get("reference_language", "en") == "ru"):
         need["xvoice_env"] = ("Russian voice samples for ESpeech "
                               "(setting voiceover.engines.f5.reference_language)")
+    if "f5" in engines and reach >= stages.index("dub") and (f5_config.get("own_voice") or {}).get("enabled"):
+        need.setdefault("xvoice_env", "Russian voice samples of speakers without a clip "
+                        "(setting voiceover.engines.f5.own_voice.enabled)")
     widen = (config.get("mix") or {}).get("widen") or {}
     if (widen.get("enabled") and reach >= stages.index("mix")
             and any(e in engines for e in widen.get("engines", ["f5"]))):

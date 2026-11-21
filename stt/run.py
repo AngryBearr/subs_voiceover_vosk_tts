@@ -753,6 +753,7 @@ class Episode:
         before = json.dumps(standins, sort_keys=True)
         mapping: dict[str, str] = {}
         own = stand = generic = 0
+        bare: dict[str, str] = {}  # speaker id -> gender of the people left on the generic voice
         warned: set[str] = set()
         for card in cards:
             key = person_key(card)
@@ -766,6 +767,7 @@ class Episode:
             gender = card.get("gender") if card.get("gender") in pool else "male"
             if not key or not pool.get(gender):
                 generic += 1
+                bare[card["id"]] = str(card.get("gender"))
                 continue
             known = next((k for k in standins if same_key(k, key)), None)
             if known is None:  # the pool voice of this gender that the fewest people have so far
@@ -781,11 +783,32 @@ class Episode:
         if json.dumps(standins, sort_keys=True) != before:
             self.references.mkdir(parents=True, exist_ok=True)
             write_text_atomic(standins_path, json.dumps(standins, ensure_ascii=False, indent=1) + "\n")
+        converted = self._own_voice_mapping(bare)
+        mapping.update(converted)
         path = self.out / "speaker_voices.f5.json"
         save_json(path, mapping)
-        log.info("[%s] F5 voices: %d speakers with their own clip, %d stand-ins from the pool, %d on the generic voice",
-                 self.media.stem, own, stand, generic)
+        log.info("[%s] F5 voices: %d speakers with their own clip, %d stand-ins from the pool, %d with an own-voice "
+                 "sample (X-Voice), %d on the generic voice", self.media.stem, own, stand, len(converted),
+                 generic - len(converted))
         return path
+
+    def _own_voice_mapping(self, bare: dict[str, str]) -> dict[str, str]:
+        """``{speaker id: voice id of a Russian sample}`` for the male / female speakers left on the generic voice
+        when ``voiceover.engines.f5.own_voice.enabled``: X-Voice says their Russian lines in the voice of a clean
+        prompt of their speech in this episode (``stt.own_voice``) and ESpeech clones that sample like any clip.
+        Speakers without a prompt or sample stay as they are; the reasons are logged."""
+        settings = self.config["voiceover"].get("engines", {}).get("f5", {}).get("own_voice") or {}
+        todo = [sid for sid, gender in bare.items() if gender in ("male", "female")]
+        if not settings.get("enabled") or not todo:
+            return {}
+        from stt.own_voice import build_voices
+        from voiceover.engine_f5 import voice_id
+
+        reasons: dict[str, str] = {}
+        samples = build_voices(self.out, todo, settings, reasons=reasons)
+        for sid, reason in reasons.items():
+            log.info("[%s] no own-voice sample for %s (%s): the generic voice stays", self.media.stem, sid, reason)
+        return {sid: voice_id(wav) for sid, wav in samples.items()}
 
     def _host_speakers(self) -> list[str]:
         """Speaker ids of the show's host: people of the season cast with a "host" role (else the

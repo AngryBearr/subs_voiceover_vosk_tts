@@ -92,7 +92,7 @@ The installer goes through six steps: it checks the computer, creates the Python
 downloads the Vosk voice model, logs in to Hugging Face, asks for the OpenRouter key (it is
 written to `.env` and never shown), runs the self-test (this is where the ~30 GB of models are
 downloaded) and can add a menu shortcut. Run it again after `git pull`: finished steps are
-quick. Environments can also be created one by one with `bash scripts/setup_envs.sh [main|f5|diarizen|qwen]`.
+quick. Environments can also be created one by one with `bash scripts/setup_envs.sh [main|f5|diarizen|qwen|xvoice]`.
 
 The Python environments:
 

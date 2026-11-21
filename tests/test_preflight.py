@@ -38,6 +38,17 @@ def test_russian_samples_need_xvoice_env_in_the_dub_stage_only() -> None:
     assert "xvoice_env" not in preflight.needed_envs(BASE, ["f5"], "mix", STAGES)
 
 
+def test_own_voice_needs_xvoice_env_from_the_dub_stage_with_f5_only_when_enabled() -> None:
+    on = {**BASE, "voiceover": {"engines": {"f5": {"reference_language": "en", "own_voice": {"enabled": True}}}}}
+    assert "xvoice_env" in preflight.needed_envs(on, ["f5"], "mix", STAGES)
+    assert "xvoice_env" in preflight.needed_envs(on, ["f5"], "dub", STAGES)
+    assert "xvoice_env" not in preflight.needed_envs(on, ["f5"], "speakers", STAGES)  # --prepare
+    assert "xvoice_env" not in preflight.needed_envs(on, ["teratts"], "mix", STAGES)
+    off = {**BASE, "voiceover": {"engines": {"f5": {"reference_language": "en", "own_voice": {"enabled": False}}}}}
+    assert "xvoice_env" not in preflight.needed_envs(off, ["f5"], "mix", STAGES)
+    assert "xvoice_env" not in preflight.needed_envs(BASE, ["f5"], "mix", STAGES)
+
+
 def test_prepare_does_not_need_f5_env() -> None:
     assert "f5_env" not in preflight.needed_envs(BASE, ["f5"], "speakers", STAGES)
 

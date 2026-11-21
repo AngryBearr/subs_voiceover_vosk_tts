@@ -60,6 +60,44 @@ def test_a_clip_wins_and_no_pool_means_no_stand_ins(tmp_path: Path) -> None:
     assert not (refs / "standins.json").exists() or "e2" not in (refs / "standins.json").read_text(encoding="utf-8")
 
 
+def _bare_episode(tmp_path: Path, own_voice: dict[str, Any] | None) -> Episode:
+    cards = [{"id": "S1", "name": "Amy Adams", "identity": None, "gender": "female"},
+             {"id": "S2", "name": None, "identity": None, "gender": "male"},
+             {"id": "S3", "name": None, "identity": None, "gender": "female"},
+             {"id": "S4", "name": None, "identity": None, "gender": "unknown"}]
+    episode = _episode(tmp_path, "e1", cards, None)  # no pool: everybody without a clip is generic
+    episode.config["voiceover"]["engines"]["f5"] = {"own_voice": own_voice} if own_voice is not None else {}
+    episode._engine = lambda: {"voices": {"female": "teratts:ru_f1+ru_f2", "male": "teratts:ru_m5"}}  # type: ignore[method-assign]
+    return episode
+
+
+def test_own_voice_maps_generic_speakers_to_the_voice_of_their_russian_sample(tmp_path: Path) -> None:
+    from voiceover.engine_f5 import voice_id
+
+    sample = tmp_path / "e1" / "own_voice" / "S2.ru.wav"
+    sample.parent.mkdir(parents=True)
+    sf.write(str(sample), np.zeros(24000, dtype=np.float32), 24000)
+    sample.with_suffix(".txt").write_text("Привет.\n", encoding="utf-8")
+
+    def voices_of(folder: Path, speakers: list[str], config: dict[str, Any], reasons: dict[str, str] | None = None,
+                  **_: Any) -> dict[str, Path]:
+        assert speakers == ["S1", "S2", "S3"]  # S4 has no gender: it is not offered
+        assert reasons is not None
+        reasons["S3"] = "no Russian text"
+        return {"S2": sample}
+
+    with mock.patch("stt.own_voice.build_voices", side_effect=voices_of):
+        voices = _voices(_bare_episode(tmp_path, {"enabled": True}))
+    assert voices == {"S2": voice_id(sample)}  # a plain clip voice; S1, S3 (no sample) and S4 stay generic
+
+
+def test_own_voice_off_leaves_the_mapping_as_it_was(tmp_path: Path) -> None:
+    with mock.patch("stt.own_voice.build_voices") as build:
+        assert _voices(_bare_episode(tmp_path, None)) == {}
+        assert _voices(_bare_episode(tmp_path, {"enabled": False})) == {}
+    build.assert_not_called()
+
+
 def test_vosk_stand_in_is_cloned_from_the_fallback_sentence(tmp_path: Path) -> None:
     pool = {"female": ["vosk:7"], "male": ["vosk:8"]}
     with mock.patch("voiceover.engine_f5.standin_voice", return_value="/w.wav#abc") as stand:

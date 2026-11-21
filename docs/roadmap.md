@@ -5,6 +5,37 @@ What comes after the current pipeline (`docs/stt_local.md`). Numbers are from S2
 The experiment folders named below (`output/stt_dz_*`, `output/tts_eval/*`, `models/fireredtts3`,
 ...) were deleted on 29.10.2026; what each showed is summed up in `docs/experiments.md`.
 
+## Study of 20.11.2026: lines in the generic voice (own-audio clones, phantom people, unmerged names)
+
+Asked by the user: fewer lines in a voice that is not the speaker's; idea: clone from the line's own few seconds. Facts
+(voiced seasons): the generic voice says 0.5-2.8% of the lines (S48 62, S51 262, S01 40, S20 157), most of them named
+people without a clip (Kilby 174, Fernando 77, Erik 38, Jim 28), plus the fill lines in the neutral voice (S01 452, S20 283,
+S51 111); these lines last 0.9-1.8 s (median), 3 in 4 under 3 s. Numbers in `docs/experiments.md` (20.11 rows).
+
+1. **Built (branch `feat/clone-voice-unknown-speakers`, off by default): `voiceover.engines.f5.own_voice`.** A male or
+   female speaker still on the generic voice gets a clean prompt from his own words of the episode (`stt/own_voice.py`:
+   the last word of a line stretched over laughter or music is capped by its letters, laughter tokens, overlapping /
+   filled / on-screen cues, words under another voice and spans far from the speaker's voice are dropped, two voices
+   inside one speaker are split; 1-2.4% of all lines and 6-7.5% of generic-voice lines in S01/S20 have such a stretched
+   word), X-Voice says the Russian translation of those lines in that voice (`stt.ru_samples` machinery) and ESpeech
+   clones the sample like any clip. By ear (two blind packs, 20.11): the generic voice was never picked; Seed-VC
+   timbre conversion (first build) lost with both an English and a Russian reference (accent + artifacts; the same
+   verdict as on 27-28.10, `docs/experiments.md`), X-Voice speaking the line itself misplaces stress (its phonemizer
+   ignores stress marks), the X-Voice sample -> ESpeech chain was "stable" on 11 of 12 lines. Repeating a 1.5 s clip
+   as the prompt does not help (CER up, similarity flat). A/B pieces of S51E04 / S20E07 with the rebuilt option:
+   `Survivor/STT_listen_2026-11-20_own_voice/` (4 pieces of 75 s, key.json; S20E07's "Fernando" is a phantom, see 2b, so only S51E04 shows the option on a real person). The user (21.11): S51E04 "всё отлично", the improvement is heard wherever the generic voice used to be; on by default since 21.11. What is left on the generic voice after it (voiced seasons, lines): fill lines in the neutral voice S01 452 / S20 283 / S51 111 (almost all have a named speaker with a clip; `fill.voice: neutral` by setting; the line's own voice names that speaker as the best match in 41-50% of them, shouts of 1.2-1.7 s are too short to confirm anyone over 0.5), speakers with under 1.5 s of clean speech 4-17 per season. Trial of the three steps on the work copies (21.11, pieces in `Survivor/STT_listen_2026-11-20_own_voice/{fill,min1,guest}/`, awaiting the user's ear): `fill.voice: speaker` + `own_voice` + the guest rule leave S20E07 and S01E08 with 0 lines on the generic voice and S51E04 with 1 (a speaker with exactly 1.0 s of clean speech); `own_voice.min_s` 1.0 gives one more speaker of S51E04 a voice from 1.3 s. The user (21.11) heard every piece and approved all three; after a safety check on S01, S20, S47-S51 (`docs/experiments.md`, 21.11) they are on by default: `fill.voice: speaker`, `season_voices.guests: home`, `own_voice.min_s: 1.0`.
+
+3. **Next (the user's priority): what is still left on the generic voice.** After the three steps, per season: mixed clusters (S20 34, S49 65, S50 36 lines), speakers under 1 s of clean speech (1-22 lines), fill lines whose speaker has no voice (1-21), speakers of unknown gender (S50 84: the tribe "Kalo" named as a person). Planned: (a) the Amazing Race path for Survivor — voice identities across episodes (`voice_bank.identities` / `stitch`, off for Survivor), so a small unnamed voice gathers speech from several episodes and a mixed cluster splits into its voices; measured on S51 (SDH labels) before any default; (b) a tribe name is never a speaker name ("Kalo"); (c) subtitle labels as hints where they exist. Then a re-run of S51 so the 174 "Kilby" lines get Danny Kilby's clip.
+2. **Found on the way, bigger than the cloning:** the lines on the generic voice are mostly not "a person without a
+   clip". (a) S51 "Kilby" (174 lines) is "Danny Kilby" (who has a clip; season-voice cosine 0.97) under a second name:
+   the cast file says `Kilby` with aliases `Danny Kilby`, `Danny`, the LLM named the cards "Danny Kilby", the season
+   voices made "Kilby" from the subtitle labels, and `same_person` compares first tokens ("kilby" vs "danny"); "Joe" /
+   "Dr. Joe" is a doctor the cast does not list. Fixed on the branch 20.11 evening (`group_names` / `person_of` fold the cast's spellings, schema `season-voices-v2` so a next run rebuilds a season's voices): S51 dry build 25 -> 24 people; applying it to the voiced S51 means re-running its speakers and re-voicing Kilby's 174 lines in Danny's clip voice. (b) Guests of one episode became season voices and absorb the
+   season's short cries: S20 "Fernando" (Sandra's uncle, loved-ones episode E13; 89 lines over 14 episodes, median
+   0.9 s, 51 under 1 s, "Go!" of Jeff among them; no line of S20E07 matches his voice), "Claudia" (medic, 22 stray
+   lines), "Erik Reichenbach" (archival, 31), S01 "Jim Kenniff" (visiting father, 84 stray lines), S51 "Barry" /
+   "Joe" (doctors, 29 / 15). A prompt from such a cluster is a mix of strangers; cloning cannot fix it. Done 21.11 (branch, default off): `season_voices.guests: home` — core people (cast roles contestant / host) are candidates everywhere, everyone else only in episodes with first-pass evidence of them; measured on copies of S20 / S51 / S01: the guests' stray words go to 0, all freed words to named contestants, subtitle metrics flat (`docs/experiments.md`, 21.11). A per-line "who is it" by voice measured 21.11: cries confirm nobody, labelled long lines are already right 90% — dropped as a step of its own.
+
 ## Experiment of 19.11.2026: Russian samples as the clone references (the user's idea)
 
 Clone each hero into one Russian sentence (a cloud or local cross-lingual TTS), then let ESpeech clone from that sample instead of the English clip. OpenRouter clones per request (`/api/v1/audio/speech`, `input_references`) with Seed Audio 1.0, Fish S2.1 Pro (free tier), Drama 3 and HeyGen Voice; ElevenLabs and MiniMax are there with preset voices only. Locally X-Voice (`xvoice_env`, `models/X-Voice`, CC-BY-NC weights). Numbers in `docs/experiments.md` (19.11 row): the lines from a Fish sample are as similar as now and the English leaks are gone (CER 6.3 / 2.3% -> 0.5 / 0.8% on one take).

@@ -606,6 +606,27 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   (ties: pool order) and kept in `<season>.references/standins.json`, so a person sounds the same in every episode
   of the season; a person who later gets a clip switches to it. No pool: the generic voice, as before. Clusters
   with neither name nor identity stay on the generic voice.
+  **Own voice (on by default since 21.11).** `voiceover.engines.f5.own_voice` = `{"enabled": true, "max_s": 10.0,
+  "min_s": 1.0, "takes": 6}` (`min_s` 1.0 since 21.11: a 1 s prompt still gives similarity 0.37 / 0.30 against 0.14 / 0.06
+  of the generic voice). With `enabled`, a male or female speaker who is still on the generic voice (no clip,
+  no stand-in) gets his own voice the way the people with a clip do: a short clean English prompt is cut from his
+  speech in the same episode, X-Voice (`xvoice_env`, `bash scripts/setup_envs.sh xvoice`; the weights are CC-BY-NC,
+  non-commercial use only) says the Russian text of those lines in that voice (`takes` takes, the best one by
+  recognition errors and voice similarity, as in `stt.ru_samples`), and ESpeech clones that Russian sample like any
+  reference clip. The speaker simply gets a normal clip voice in `speaker_voices.f5.json`. The text comes from
+  `subs.ru.json`, so the dub stage (which runs after the translate stage) is where this happens. The prompt must be
+  clean, so it is built from words, not cues (`stt/own_voice.py`): ASR stretches the last word of a line over laughter
+  or music, so a word longer than its letters allow (0.3 s + 0.11 s per letter) is cut short, laughter tokens,
+  overlapping, filled and on-screen cues and words under another speaker's voice are skipped; each span is embedded
+  (resnet293-ft), spans far (cosine < 0.45) from the speaker's centroid are dropped, the nearest ones make up to
+  `max_s` seconds and the vocal separator takes the music out. Two voices inside one speaker (a 2-means split of the
+  spans whose parts are less similar than 0.5, the smaller holding 25%+ of the speech) keep only the larger voice when
+  it has twice the speech of the other. Under `min_s` of clean speech, or a mixed cluster (more than half of the speech
+  far from the centroid, or two voices of similar size), means no prompt and the generic voice stays; the same when
+  there is no Russian text or no usable X-Voice take; the reasons are in the log. Files:
+  `<episode>/own_voice/<sid>.wav` (prompt) + `.json` (ranges, cosines, the `sample` block with the text, scores and the
+  prompt's hash) and `<sid>.ru.wav` + `<sid>.ru.txt` (the Russian sample); the same prompt and text reuse the sample
+  without running X-Voice again. `stt.run` stops at the start without `xvoice_env` when the option is on (preflight).
   **Stitched clips.** When no single 5-9 s solo stretch of a person passes the checks, the export tries one clip
   stitched from several shorter solo cues (at least two, 1.5 s each or longer, 0.4 s of silence between them) with
   the same checks; the index entry has `"stitched": true` and `"pieces"`. `stt.voice_bank --export ... --no-stitch`
@@ -712,7 +733,7 @@ No subtitles required and no LLM. It works with the stock model and better with 
 
 What it does, after every episode has its transcript and names (`speakers` stage):
 
-1. Per person (the speaker `name`; spellings of one name are one person, as in the voice bank) the embeddings of the
+1. Per person (the speaker `name`; spellings of one name are one person, as in the voice bank, and so are the names the season's cast file lists as one member's name and aliases: S51 "Kilby" / "Danny Kilby"; a name the cast does not know, like a show doctor "Dr. Joe", stays its own person) the embeddings of the
    words under that name are summed over the season, OCR captions left out. Words of named subtitle lines
    (`subs.source.en.srt`) count for the person too (matched to a name by first name). A person needs
    `min_words` (20) words. The result is `<season>.season_voices.npz` beside the voice bank; it is reused while the
@@ -734,8 +755,14 @@ count); a cluster the naming calls mixed ("merged contestant voices") gives no w
 named after. Options in `season_voices` (numbers in `docs/experiments.md`): `dissolve` (on, "mixed" since 7.11, approved by
 ear: 
 the unnamed clusters the naming calls mixed are no state, their words go to the season's people; "unnamed": every
-unnamed cluster; "none": off), and off by default: `voice_source` ("clean": voices from card and named-line words only), `tribe_prior` (people of other
+unnamed cluster; "none": off), and on by default since 21.11: `voice_source` ("clean": voices from card and named-line words only), `tribe_prior` (people of other
 tribes less likely at a tribe's camp, `stt.tribes`), `caption_bonus` (the switch bonus at ">>" marks, 0.15).
+`guests` ("home" by default since 21.11; "everywhere": every person of the season is a candidate in every episode, as
+before): a person who is no contestant or host in the cast, or not in the cast at all, is a candidate only in the episodes
+with a first-pass card, an on-screen name card or a subtitle label of them; the dropped names are in each episode's
+`season_voices.json` as `dropped_candidates`. Measured 21.11 on copies of S01, S20, S47-S51 (`docs/experiments.md`): the
+guests' words outside their episode (a loved one, a doctor, a celebrity, a preview of the next season) go to 0 and back
+to the contestants, subtitle metrics unchanged; seasons whose cast is only contestants and the host are not touched.
 
 Voice identities: a cluster without a name, with at least 20 s of speech and not a mix of voices, gets a season identity
 (`V01`, `V02`, ...) in the naming stage. The voice bank keeps its print (`"name": null, "identity": "V03"`,
@@ -848,7 +875,7 @@ plain file as the source and the embedded SDH as the reference, 98% of the added
 At challenges the main recognition often hears nothing of the shouts under music and crowd noise, while the voice
 activity detector does hear speech there: on S01E01 the challenge climaxes (24:27-24:44, 28:34-29:01) gave both
 models one word, on S48E01-E07 46 stretches of 2 s or more per episode (153 s) had no word at all. `stt.fill`
-(`"fill": {"enabled": true, "model": "whisper-large-v3", "min_s": 1.0, "min_score": 0.7, "voice": "neutral"}`;
+(`"fill": {"enabled": true, "model": "whisper-large-v3", "min_s": 1.0, "min_score": 0.7, "voice": "speaker"}`;
 `stt.transcribe --fill MODEL --fill-min-s --fill-min-score`, `--force fill`) takes the Silero VAD speech regions
 minus the final words (captions included, each widened by 0.3 s), keeps the pieces of `min_s` or more, widens
 them by 0.25 s and lets Whisper listen to each piece alone (`stt.worker asr` on `fill.chunks.json`; the 3.11
@@ -864,7 +891,9 @@ a few real lines per episode ("Here we go! Let's do it!", "Come on, paddle!", "S
 paddling!") and almost nothing invented. The accepted words join the stream
 with `source: "fill"` before the speakers are assigned (so the diarizer's turn and the word-level pass can still
 give them a person); they form cues of their own (`fill: true` in `subs.en.json` / `subs.ru.json`), which the dub
-voices by the track's neutral voice (`fill.voice` `neutral`; `speaker` for the person's own voice).
+voices in the speaker's own voice (`fill.voice` `speaker`, the default since 21.11; `neutral`: the track's neutral
+voice, which is the male generic voice, as before). Measured 21.11 on S01, S20, S47-S51: the line's own voice points
+clearly at someone else on 0-1 fill lines per season, confirms the speaker on 3-24, and is too short to say on the rest.
 `fill.json` lists the accepted lines and the rejected ones with the reason. On an existing folder:
 `subs_env/bin/python -m stt.fill <episode folder> --model whisper-large-v3` (prints the lines, touches no
 other file); `output/exp_fill/eval_fill.py <folder> <sdh.srt>` scores them against SDH subtitles (supported words,
@@ -910,7 +939,7 @@ invented lines, unheard SDH cues now covered).
    (`bash scripts/setup_envs.sh lava`; without it the track is mixed as before, with a warning). Blind listening: every
    one of 12 S01 picks was a widened version; S48 (9.7-11.6 kHz references) is left alone. Off: `"widen": {"enabled": false}`.
    **Smaller video.** `"mix": {"video": {"compress": true, "target_gb": 2.0, "codec": "hevc_nvenc",
-   "original_audio_kbps": 160}}` (off by default) re-encodes the picture with the same resolution and the source
+   "original_audio_kbps": 160}}` (on by default since 21.11) re-encodes the picture with the same resolution and the source
    timestamps (PyAV; NVENC on the graphics card, libx265/libx264 if it fails to open) to the bitrate that makes the
    finished file `target_gb` (1 GB = 10^9 bytes, all voice-over tracks at 192 kbps counted); the original audio becomes
    stereo AAC. The video is made once per episode (`video.<codec>.<kbps>k.mkv` in the work folder) and shared by the

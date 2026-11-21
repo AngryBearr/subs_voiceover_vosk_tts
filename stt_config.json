@@ -65,7 +65,7 @@
   "dub": {
     "interjections": "overlap"
   },
-  "fill": {"enabled": true, "model": "whisper-large-v3", "min_s": 1.0, "min_score": 0.7, "subtitles": true, "edges": true, "voice": "neutral"},
+  "fill": {"enabled": true, "model": "whisper-large-v3", "min_s": 1.0, "min_score": 0.7, "subtitles": true, "edges": true, "voice": "speaker"},
   "voiceover": {
     "config": "voiceover_config.json",
     "engine": "f5,teratts,vosk",
@@ -75,7 +75,8 @@
       "vosk": {"voices": {"female": 49, "male": 56}},
       "teratts": {"voices": {"female": "ru_f1+ru_f2", "male": "ru_m5"}, "device": "cuda", "target_syl_per_sec": 5.0,
                   "sample_rate": 44100},
-      "f5": {"voices": {"female": "auto", "male": "auto"}, "fallback": "teratts", "reference_language": "ru", "nfe": 32, "target_syl_per_sec": 5.0,
+      "f5": {"voices": {"female": "auto", "male": "auto"}, "fallback": "teratts", "reference_language": "ru",
+        "own_voice": {"enabled": true, "max_s": 10.0, "min_s": 1.0, "takes": 6}, "nfe": 32, "target_syl_per_sec": 5.0,
              "sample_rate": 24000}
     },
     "policy": {"base_syl_per_sec": 5.0, "target_lag_ms": 250, "weight_early": 5.0},
