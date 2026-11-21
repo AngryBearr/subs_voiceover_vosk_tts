@@ -99,6 +99,19 @@ def test_group_names_merges_spellings_of_one_person() -> None:
     assert keys["Jon Misch"] == keys["John Misch"] == "John Misch"  # the spelling with more words
 
 
+def test_cast_aliases_fold_a_surname_into_the_person_but_not_a_doctor_into_a_contestant() -> None:
+    # S51: the cast lists Kilby with the aliases Danny Kilby and Danny; the LLM named the cards "Danny Kilby", the
+    # subtitles say "KILBY". same_person compares first tokens, so only the cast can tell they are one man.
+    cast = {"cast": [{"name": "Kilby", "aliases": ["Danny Kilby", "Danny"]}, {"name": "Joe Hunter", "aliases": ["Joe"]}]}
+    keys = sv.group_names({"Danny Kilby": 300, "Kilby": 40, "Dr. Joe": 50, "Joe Hunter": 20}, cast)
+    assert keys["Kilby"] == keys["Danny Kilby"] == "Danny Kilby"
+    assert keys["Dr. Joe"] != keys["Joe Hunter"]  # S50: the show doctor and the contestant Joe are two people
+    voices = sv.SeasonVoices(["Danny Kilby", "Joe Hunter"], np.zeros((2, 2)), [300, 20], MODEL, cast=cast)
+    assert voices.person_of("Kilby") == "Danny Kilby" and voices.person_of("Danny") == "Danny Kilby"
+    assert voices.person_of("Dr. Joe") is None
+    assert sv.SeasonVoices(["Danny Kilby"], np.zeros((1, 2)), [300], MODEL).person_of("Kilby") is None  # no cast: as before
+
+
 def test_build_sums_the_season_and_applies_min_words(tmp_path: Path, season: list[Path]) -> None:
     # D: 12 words in e2 and 12 in e3 (24 >= 20); E: 12 words only
     e4 = make_episode(tmp_path / "work", "e4", [("D1", "D", 12), ("T", "C", 12)], {"D1": "Dan Dunn", "T": "Eve Eng"}, seed=4)

@@ -46,7 +46,7 @@ from stt.voice_bank import is_identity
 
 log = logging.getLogger("stt.season_voices")
 
-SCHEMA = "season-voices-v1"
+SCHEMA = "season-voices-v2"  # bumped 20.11: cast aliases fold names (S51 Kilby)
 STATE_PREFIX = "V:"  # state / ``diarizer_label`` of a person: "V:<name>"
 BEFORE = ".before_voices"  # words.before_voices.json, speakers.before_voices.json, subs.en.before_voices.json
 REPORT = "season_voices.json"
@@ -61,21 +61,37 @@ def clean_name(name: str) -> str:
     return " ".join(name.split())
 
 
-def group_names(counts: dict[str, int]) -> dict[str, str]:
+def cast_spellings(name: str, cast: dict[str, Any] | None) -> list[str]:
+    """Every spelling the cast gives the one member ``name`` refers to (its name and aliases: "Kilby", "Danny Kilby",
+    "Danny"); empty without a cast or a clear member."""
+    from stt.cast import find_member
+
+    member = find_member(name, cast) if cast else None
+    return [str(member["name"]), *(str(a) for a in member.get("aliases") or [])] if member else []
+
+
+def group_names(counts: dict[str, int], cast: dict[str, Any] | None = None) -> dict[str, str]:
     """Raw speaker name (or identity) -> person key. Spellings of one name (``voice_bank.same_person``: "Jon"/"John Misch", "Jeff"/"Jeff
-    Probst") are one person, keyed by the spelling with most words (the longer one on a tie)."""
+    Probst") are one person, keyed by the spelling with most words (the longer one on a tie); so are names the cast
+    lists as one member's name and aliases ("Danny Kilby" / "Kilby", S51)."""
     from stt.voice_bank import same_person
 
     keys: list[str] = []
     out: dict[str, str] = {}
+    member_key: dict[str, str] = {}  # cast member -> the key of the first (largest) name that resolved to it
     for name in sorted(counts, key=lambda n: (-counts[n], -len(n), n)):
         if is_identity(name):  # a voice identity is its own person
             out[name] = name
             continue
+        spellings = cast_spellings(name, cast)
         key = next((k for k in keys if k == name or same_person(name, k)), None)
+        if key is None and spellings:
+            key = member_key.get(spellings[0])
         if key is None:
             keys.append(name)
             key = name
+        if spellings:
+            member_key.setdefault(spellings[0], key)
         out[name] = key
     return out
 
@@ -110,7 +126,14 @@ class SeasonVoices:
         if is_identity(name):
             return None
         order = sorted(range(len(self.names)), key=lambda j: -(self.counts[j] if self.counts else 0))  # no counts while building
-        return next((self.names[j] for j in order if same_person(name, self.names[j])), None)
+        found = next((self.names[j] for j in order if same_person(name, self.names[j])), None)
+        if found is None:  # the cast's other spellings of the same member: "Kilby" -> "Danny Kilby"
+            for spelling in cast_spellings(name, self.cast):
+                found = next((self.names[j] for j in order if not is_identity(self.names[j])
+                              and (self.names[j] == spelling or same_person(spelling, self.names[j]))), None)
+                if found is not None:
+                    break
+        return found
 
     def by_first_name(self, label: str) -> str | None:
         """The one person whose first name is ``label``'s (case-insensitive); None when none or several."""
@@ -432,7 +455,7 @@ def build_voices(folders: list[Path], model: str = "resnet293", min_words: int =
     for episode in episodes:
         for name, n in Counter(n for n, w in zip(episode.word_keys(), episode.words) if n and w.source != "ocr").items():
             totals[name] += n
-    key_of = group_names(dict(totals))
+    key_of = group_names(dict(totals), cast)
     keys = SeasonVoices(sorted(set(key_of.values())), np.zeros((0, 0)), [], model, aliases=dict(aliases or {}),
                        cast=cast or {})
     sums: dict[str, np.ndarray] = {}
