@@ -60,6 +60,7 @@ import gradio as gr  # type: ignore
 from stt import progress as stt_progress
 from stt.refine_speakers import HUB_WEIGHTS, model_available
 from stt.run import SUBSCRIPTION_DOWN, apply_preset, finished_folder
+from utils.llm_route import PAID_MARK, STOP_MARK, stop_message_in, stop_message_ru
 from ui import folder_pick, job_view, season_settings, seasons, settings, voice_preview, voices, who
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -417,11 +418,32 @@ def resume_job() -> str:
         if missing:
             return f"Не найдены видео: {', '.join(missing)}. Подключите диск и повторите."
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        job = Job(files=list(old.files), out_root=old.out_root, engines=list(old.engines), config_path=old.config_path,
+        config_path, note = back_to_subscription(old.config_path, stamp)
+        job = Job(files=list(old.files), out_root=old.out_root, engines=list(old.engines), config_path=config_path,
                   log_path=old.log_path.with_name(f"job_{stamp}.log"), extra=list(old.extra), title=old.title)
         _launch(job)
         return (started_text(old.title, "тот же запуск: те же серии, движки и настройки; готовые этапы пропускаются, "
-                                        "озвученные реплики и ответы языковой модели берутся из сохранённого"))
+                                        "озвученные реплики и ответы языковой модели берутся из сохранённого") + note)
+
+
+def back_to_subscription(config_path: Path, stamp: str) -> tuple[Path, str]:
+    """The settings file for resuming a job. Paying through OpenRouter is allowed for one launch only: a job launched
+    with "API OpenRouter" continues through the subscription (a copy of its settings with the subscription's routing
+    from the global settings) when the global settings have one. Returns the file and a note for the user."""
+    try:
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return config_path, ""
+    llm = saved.get("llm") if isinstance(saved, dict) else None
+    base_llm = base_config().get("llm") or {}
+    if not isinstance(llm, dict) or llm.get("opencode") or not base_llm.get("opencode"):
+        return config_path, ""
+    llm.update(opencode=base_llm["opencode"], router=base_llm.get("router", "openrouter"),
+               fallback=base_llm.get("fallback", False))
+    resumed = config_path.with_name(f"config_{stamp}.json")
+    resumed.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+    return resumed, (" Оплата через OpenRouter была разрешена только прошлому запуску: продолжение идёт через "
+                     "подписку. Платный запуск нужно выбрать заново.")
 
 
 def progress_view(job: Job | None) -> tuple[list[str], list[list[str]]]:
@@ -473,16 +495,39 @@ def log_tail(job: Job | None, lines: int = 40) -> str:
     return "\n".join((keep or text)[-lines:])
 
 
-SUBSCRIPTION_WARNING = ("⚠️ Вход в подписку ChatGPT (opencode) не работает: шаги с языковой моделью идут через "
-                        "платный роутер. Войдите заново командой `opencode auth login`.")
+SUBSCRIPTION_WARNING = ("⚠️ Вход в подписку ChatGPT (opencode) не работает: в этом запуске платить было разрешено, "
+                        "поэтому шаги с языковой моделью шли через платный роутер. Войдите заново командой "
+                        "`opencode auth login`.")
+
+
+def current_run_log(job: Job) -> str:
+    """The end of the job's log from its last start (a resumed job appends to the same file)."""
+    if not job.log_path.exists():
+        return ""
+    text = job.log_path.read_text(encoding="utf-8", errors="replace")[-500_000:]
+    return text[max(text.rfind("\n=== "), 0):]
 
 
 def subscription_failed(job: Job) -> bool:
-    """The job's log shows the subscription login failing (at the start or mid-run)."""
-    if not job.log_path.exists():
-        return False
-    text = job.log_path.read_text(encoding="utf-8", errors="replace")[-500_000:]
-    return SUBSCRIPTION_DOWN in text or "via opencode failed" in text
+    """The job's log shows the subscription failing (at the start or mid-run) or the run stopping because of it."""
+    text = current_run_log(job)
+    return STOP_MARK in text or SUBSCRIPTION_DOWN in text or "via opencode failed" in text
+
+
+def llm_note(job: Job) -> str:
+    """What to tell about the model requests: the stop message (nothing paid, how to go on) or the old warning
+    of a run that was allowed to pay, and the line about money when something was paid."""
+    text = current_run_log(job)
+    stop = stop_message_in(text)
+    notes = []
+    if stop:
+        notes.append("⚠️ " + stop_message_ru(stop))
+    elif subscription_failed(job):
+        notes.append(SUBSCRIPTION_WARNING)
+    paid = [line for line in text.splitlines() if PAID_MARK in line]
+    if paid:
+        notes.append("💳 " + paid[-1][paid[-1].index(PAID_MARK):])
+    return "\n\n".join(notes)
 
 
 def readable_log(job: Job | None) -> str:
@@ -553,9 +598,8 @@ def status_text(job: Job | None) -> str:
         lines = job_view.interrupted_lines(episodes, job.engines, since=job.started)
         if lines:
             text += "\n\nОстановлено на этапах:\n\n" + "\n".join(f"- {line}" for line in lines)
-    if subscription_failed(job):
-        text += "\n\n" + SUBSCRIPTION_WARNING
-    return text
+    note = llm_note(job)
+    return text + ("\n\n" + note if note else "")
 
 
 def refresh() -> tuple[str, Any, str, Any, str, str, Any]:

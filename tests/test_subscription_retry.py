@@ -78,7 +78,7 @@ def test_budget_exhausted_without_fallback_fails_unpaid(env: dict[str, Any]) -> 
     client = stt.llm.OpenRouterClient("opencode:openai/gpt-6.1-sol")
     with pytest.raises(RuntimeError, match="subscription not answering"):
         client.chat_json("s", "u")
-    assert sum(env["sleeps"]) == 600.0 and env["posted"] == []
+    assert sum(env["sleeps"]) == pytest.approx(600.0, abs=0.1) and env["posted"] == []
     assert env["sleeps"][:6] == [5.0, 15.0, 30.0, 60.0, 120.0, 240.0]
 
 

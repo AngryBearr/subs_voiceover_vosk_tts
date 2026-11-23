@@ -19,6 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from utils.llm_route import (PaidDown, PaidNotAllowed, SubscriptionDown, generate_via_subscription, is_paid_dead,
+                             is_subscription_down, paid_allowed, paid_run, record_paid, require_paid, split_route)
+
 log = logging.getLogger("voiceover")
 
 Transport = Callable[[dict[str, Any]], dict[str, Any]]
@@ -132,13 +135,16 @@ def openai_transport(config: LLMConfig, api_key: str) -> Transport:
     """Build the default transport on top of the installed ``openai`` package."""
     import openai
 
+    reports_cost = config.provider == "openrouter"  # OpenRouter prices every answer when asked (usage.cost)
     client = openai.OpenAI(base_url=config.base_url, api_key=api_key, timeout=config.timeout_sec, max_retries=0)
     transient = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError, openai.InternalServerError)
 
     def call(body: dict[str, Any]) -> dict[str, Any]:
         # Provider-specific fields (DeepSeek "thinking") go through extra_body; the SDK rejects unknown keywords.
         request = dict(body)
-        extra = {key: request.pop(key) for key in ("thinking", "reasoning_effort") if key in request}
+        if reports_cost:
+            request["usage"] = {"include": True}
+        extra = {key: request.pop(key) for key in ("thinking", "reasoning_effort", "usage") if key in request}
         try:
             return client.chat.completions.create(**request, extra_body=extra or None).model_dump()  # type: ignore[no-any-return]
         except transient as error:
@@ -152,21 +158,26 @@ def openai_transport(config: LLMConfig, api_key: str) -> Transport:
 
 
 def opencode_transport(config: LLMConfig) -> Transport:
-    """Transport for the OpenCode login of a ChatGPT subscription (``config.model`` is the bare id)."""
+    """Transport for the OpenCode login of a ChatGPT subscription (``config.model`` is the bare id).
+
+    A model with a subscription fallback (``llm_route.subscription_fallback``) hands one request to the weaker
+    model when it does not answer in time; the answer then carries ``subscription_fallback``. A subscription
+    that does not answer (budget used up, usage limit) raises ``SubscriptionDown``.
+    """
     import utils.opencode_clean as opencode
     from utils.opencode_clean import OpenCodeError, flatten_messages
 
     def call(body: dict[str, Any]) -> dict[str, Any]:
         variant = None if config.reasoning == "default" else config.reasoning
         try:  # a busy subscription is retried with a growing pause before the request fails
-            text = opencode.generate_with_retry(
-                lambda: opencode.shared_server(config.model), flatten_messages(body["messages"]), config.model,
-                variant, config.timeout_sec, opencode.subscription_retry_budget())
+            text, used = generate_via_subscription(
+                opencode.shared_server, flatten_messages(body["messages"]), config.model, variant,
+                config.timeout_sec, opencode.subscription_retry_budget())
         except OpenCodeError as error:
-            if error.quota:
-                raise LLMQuotaError(str(error)) from error
+            if is_subscription_down(error):
+                raise SubscriptionDown(str(error)) from error
             raise (LLMTransientError if error.transient else LLMError)(str(error)) from error
-        return {"model": "opencode:" + config.model,
+        return {"model": "opencode:" + used, "subscription_fallback": used != config.model,
                 "choices": [{"message": {"content": text}, "finish_reason": "stop"}], "usage": {}}
 
     return call
@@ -179,11 +190,17 @@ def route_transport(config: LLMConfig, env_file: Path | None = None) -> Transpor
     fails (after the subscription's own retries) hands over to the next one for that request only; the next
     request tries the first transport again.
     """
-    from utils.llm_route import ROUTERS, router_model, split_route
+    from utils.llm_route import ROUTERS, router_model
 
     names, bare = split_route(config.model)
     if not names:
-        return openai_transport(config, load_api_key(config.api_key_env, env_file))
+        paid = openai_transport(config, load_api_key(config.api_key_env, env_file))
+
+        def plain(body: dict[str, Any]) -> dict[str, Any]:
+            require_paid(config.provider, config.model)  # a provider without a route is a paid one
+            return paid(body)
+
+        return plain
     built: dict[int, Transport] = {}
 
     def transport(index: int) -> Transport:
@@ -202,6 +219,7 @@ def route_transport(config: LLMConfig, env_file: Path | None = None) -> Transpor
         for index, name in enumerate(names):
             request = {**body, "model": bare}
             try:
+                require_paid(name, bare)  # before anything is sent
                 if name != "opencode":
                     request.pop("thinking", None)  # DeepSeek's field; not for OpenAI models on a router
                     mapped = router_model(bare)
@@ -209,8 +227,10 @@ def route_transport(config: LLMConfig, env_file: Path | None = None) -> Transpor
                         raise LLMError(f"no OpenRouter id for {bare}")
                     request["model"] = mapped
                 return transport(index)(request)
+            except PaidNotAllowed:
+                raise
             except Exception as error:  # noqa: BLE001 - any failure of a non-last transport hands over
-                if index + 1 >= len(names):
+                if index + 1 >= len(names) or (isinstance(error, SubscriptionDown) and not paid_allowed()):
                     raise
                 log.warning("llm: %s via %s failed (%s); this request goes to %s", bare, name, error, names[index + 1])
         raise LLMError("no transport")  # unreachable: names is not empty
@@ -228,8 +248,10 @@ class LLMClient:
     cache_hits: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    subscription_fallback_calls: int = 0  # requests answered by the weaker model of the subscription
     models_seen: set[str] = field(default_factory=set)
-    exhausted: str | None = None  # why the model's subscription stopped answering (LLMQuotaError); no more calls
+    exhausted: str | None = None  # why the model's subscription stopped answering (LLMQuotaError / SubscriptionDown)
+    _exhausted_by: type[Exception] = field(default=LLMQuotaError, repr=False)  # raised again by later calls
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def stats(self) -> dict[str, int]:
@@ -237,8 +259,11 @@ class LLMClient:
             return self._stats()
 
     def _stats(self) -> dict[str, int]:
-        return {"calls_made": self.calls_made, "cache_hits": self.cache_hits,
-                "tokens_in": self.tokens_in, "tokens_out": self.tokens_out}
+        stats = {"calls_made": self.calls_made, "cache_hits": self.cache_hits,
+                 "tokens_in": self.tokens_in, "tokens_out": self.tokens_out}
+        if self.subscription_fallback_calls:  # shown only when the weaker model of the subscription stood in
+            stats["subscription_fallback_calls"] = self.subscription_fallback_calls
+        return stats
 
     # ------------------------------------------------------------ public
 
@@ -278,6 +303,8 @@ class LLMClient:
         usage = _usage(response)
         with self._lock:
             self.models_seen.add(model)
+        if response.get("subscription_fallback"):  # the weaker stand-in answered: not cached as the main model's
+            return LLMResult(content, False, model, usage, request_sha, tag)
         self._write_cache(path, {
             "request_sha": request_sha, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "tag": tag, "request": {"provider": cfg.provider, "model": cfg.model, "prompt_version": prompt_version,
@@ -303,28 +330,53 @@ class LLMClient:
         attempt = 0
         while True:
             if self.exhausted:
-                raise LLMQuotaError(self.exhausted)
+                raise self._exhausted_by(self.exhausted)
             try:
                 with self._lock:
                     self.calls_made += 1
                 response = transport(body)
                 break
-            except LLMQuotaError as error:
+            except (LLMQuotaError, SubscriptionDown, PaidDown) as error:
                 with self._lock:
-                    self.exhausted = str(error)
+                    self.exhausted, self._exhausted_by = str(error), type(error)
                 raise
             except LLMTransientError as error:
                 if attempt >= cfg.max_retries:
+                    if self._paid_last():  # a run that may pay: the paid transport still fails after its retries
+                        raise self._paid_down(f"giving up after {attempt + 1} attempts: {error}") from error
                     raise LLMError(f"giving up after {attempt + 1} attempts: {error}") from error
                 delay = BACKOFF_SEC[min(attempt, len(BACKOFF_SEC) - 1)]
                 log.warning("llm: transient failure (%s), retry in %.0f s", error, delay)
                 self.sleep(delay)
                 attempt += 1
+            except LLMError as error:
+                if self._paid_last() and is_paid_dead(str(error)):  # refused key, no credits: nothing more to try
+                    raise self._paid_down(str(error)) from error
+                raise
         usage = _usage(response)
         with self._lock:
             self.tokens_in += usage.get("prompt_tokens", 0)
             self.tokens_out += usage.get("completion_tokens", 0)
+            self.subscription_fallback_calls += 1 if response.get("subscription_fallback") else 0
+        answered = str(response.get("model") or cfg.model)
+        if not answered.startswith("opencode:"):  # a paid answer: its price goes to the run's cost log
+            names = split_route(cfg.model)[0]
+            record_paid(answered, next((n for n in names if n != "opencode"), cfg.provider),
+                        float((response.get("usage") or {}).get("cost") or 0.0))
         return response
+
+    def _paid_last(self) -> bool:
+        """The last transport of this client's route is a paid one and the run may pay (``STT_LLM_PAID=allow``)."""
+        names = split_route(self.config.model)[0]
+        return paid_run() and (not names or names[-1] != "opencode")
+
+    def _paid_down(self, reason: str) -> PaidDown:
+        """The stop for a paid transport that failed for good; the client makes no more calls."""
+        names = split_route(self.config.model)[0]
+        error = PaidDown(f"{self.config.model}: {reason}"[:300], subscription_tried="opencode" in names)
+        with self._lock:
+            self.exhausted, self._exhausted_by = str(error), PaidDown
+        return error
 
     @staticmethod
     def _read_cache(path: Path, request_sha: str) -> dict[str, Any] | None:

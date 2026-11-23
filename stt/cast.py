@@ -4,8 +4,9 @@ Once per season (``<out-root>/<folder>.cast.json``) a model reads the show and s
 and file names and lists the cast from one of two sources, per model of ``--model`` (tried in
 order, the next one when one fails or refuses):
 
-- a model id ending in ``:online`` searches the web itself (OpenRouter's web search; the shared
-  default: gpt-6-luna, Claude Haiku if it fails);
+- a model id ending in ``:online`` searches the web itself (OpenRouter's web search, paid; the shared
+  default lists gpt-6-luna and Claude Haiku this way as backups after gpt-6.1-sol; a run that may not pay
+  leaves them out, see ``utils.llm_route``);
 - any other model gets the English Wikipedia article of the season: it names up to three
   searches, picks the article among the hits, and lists the cast from the article's text (the
   program fetches the pages; the model never browses). Through the OpenCode login of a
@@ -49,7 +50,7 @@ from typing import Any
 
 from stt.llm import OpenRouterClient
 from stt.runner import load_json, save_json
-from utils.llm_route import split_route
+from utils.llm_route import LLMStop, PaidDown, PaidNotAllowed, SubscriptionDown, paid_allowed, split_route
 
 log = logging.getLogger("stt.cast")
 
@@ -143,10 +144,23 @@ def find_cast(models: list[str], folder_name: str, file_name: str, heard: list[s
     A model id ending in ``:online`` searches the web itself; any other reads the Wikipedia article.
     """
     errors = []
-    for model in models:
+    for n, model in enumerate(models):
         try:
             lookup = fetch_cast if split_route(model)[1].endswith(":online") else wiki_cast
             cast = lookup(OpenRouterClient(model, reasoning="low"), folder_name, file_name, heard)
+        except PaidNotAllowed:
+            raise  # the run may not pay: it stops
+        except (SubscriptionDown, PaidDown) as error:
+            # another model may still answer; a paid one is never tried when this run may not pay; the run stops only
+            # when no model of the list is left to try
+            rest = models[n + 1:]
+            if not any(paid_allowed() or split_route(m)[0][:1] == ["opencode"] for m in rest):
+                raise
+            errors.append(f"{model}: {type(error).__name__}")
+            log.warning("cast: %s did not answer (%s), trying the next model", model, type(error).__name__)
+            continue
+        except LLMStop:
+            raise
         except Exception as error:  # noqa: BLE001 - the next model may answer
             errors.append(f"{model}: {error}"[:300])
             log.warning("cast: %s failed: %s", model, error)

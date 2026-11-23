@@ -108,8 +108,9 @@ deleted once encoded to AAC unless `"keep_wav": true`.
 Before the episodes `stt.run` asks the OpenCode subscription (`llm.opencode` models): the
 login is probed up to 3 times (10 and 20 s apart: OpenCode sometimes answers "model not found" for a
 moment while it refreshes its model list). If it still fails (expired login, or the model was renamed
-by an OpenCode update: the message names it and lists the provider's available models), the run stops;
-only with `"fallback": true` it is logged as a warning and the LLM steps go through the paid router.
+by an OpenCode update: the message names it and lists the provider's available models), the run stops
+(exit code 75, see "Paying for LLM requests" below); only when the run may pay (`"fallback": true`, or no
+`llm.opencode`) it is logged as a warning and the LLM steps go through the paid router.
 A stage that runs out of GPU memory (another program on the card) is started
 again after a minute, up to twice; ASR with half the batch size.
 
@@ -272,16 +273,74 @@ Where requests go (`utils/llm_route.py`): transports in front of a model id, tri
   `ModelNotFoundError`; a usage-limit error is not retried. `llm.fallback` (default **false**: no silent paid
   route) lets the paid router take over for one request only when the subscription still fails after that
   (`opencode+openrouter:openai/gpt-6.1-sol`); the next request tries the subscription first again. With
-  fallback off the stage fails with "subscription not answering, nothing was paid, run again later", and the
-  answers already obtained stay in `.partial/llm`;
+  fallback off the run stops (below) and the answers already obtained stay in `.partial/llm`;
 - all other models go to `llm.router` (`openrouter`, key `OPENROUTER_API_KEY`); router names that
   no longer exist (an old `orcarouter`) are ignored with a warning;
 - an id that already has a route keeps it (`openrouter:google/gemini-4-argon`).
 
+Paying for LLM requests (the rule): requests go to the subscription. The paid router is used **only** after
+the pipeline stops, says that OpenCode did not work and that nothing was paid, and you explicitly allow a paid run
+(one run, never saved). Before it stops, a weaker model of the same subscription may stand in for one request (free).
+
+- `llm.subscription_fallback` (default `{"openai/gpt-6.1-sol": "openai/gpt-6-luna"}`) and
+  `llm.subscription_fallback_after_s` (default 120): the main model gets `min(after_s, subscription_retry_s)` of
+  waiting; if it still does not answer (or its usage limit is reached) THIS request goes to the fallback model through the
+  subscription with the rest of the budget, with the warning "<Sol> is not answering, this request went to <Luna>
+  (subscription, free)" in the log. The next request starts with the main model again; the count is
+  `subscription_fallback_calls` (`stt.llm` usage; the voice-over's `llm_stats`). Without an entry the main model gets
+  the whole budget. A cached answer is stored under the main model's key, whichever model gave it (the answer's
+  `model` says which).
+- `stt.run` decides per run whether paying is allowed: yes when `llm.opencode` is empty (UI "API OpenRouter" /
+  `ui.run_setup launch --transport openrouter`, or no subscription) or `llm.fallback` is true; otherwise no. It exports
+  `STT_LLM_PAID=deny|allow` (unset: allow, so standalone tools behave as before), `STT_LLM_SUBSCRIPTION_RETRY_S`,
+  `STT_LLM_SUBSCRIPTION_FALLBACK` and `STT_LLM_SUBSCRIPTION_FALLBACK_AFTER_S` to itself and every stage process.
+- When paying is denied: models that would go to a paid transport and stand later in a stage's list (the cast
+  `openrouter:...:online` backups) are dropped with a warning; a stage whose only or first model is paid stops the run
+  before the episodes and names the stages. Both LLM clients (`stt/llm.py`, `voiceover/llm.py`) raise `PaidNotAllowed`
+  before anything is sent to a paid transport.
+- The stop: `utils.llm_route.LLMStop` (`SubscriptionDown`, `PaidNotAllowed`) is never swallowed (translation proofreading,
+  cast lookup, on-screen text, fusion, the stress jury). In the jury a voter that fails is left out of the vote with a
+  visible warning; the run stops when no voter, the screener or the proofreader answers. Stage processes
+  (`voiceover.pipeline`, `voiceover.stress_check`) exit with code 75 after logging the message; `stt.run` turns exit
+  code 75 into the same stop. `stt.run` logs the message once as the last line and exits 75: OpenCode (the subscription)
+  is not answering / the limit is used up, the run stopped, nothing was paid, finished stages and answers are kept
+  and reused, run again later (free); only if you allow paying, launch this one run through OpenRouter. The UI shows the
+  Russian half of the message in the status instead of the old warning.
+- A run that may pay (`llm.fallback` true or "API OpenRouter") stops with `PaidDown` when the paid transport fails for good
+  too (HTTP 401/402/403, "insufficient credits", key limit, or still failing after its retries); the message says the
+  subscription and OpenRouter did not answer, what was paid so far, and does not suggest paying. In the stress jury a voter
+  whose subscription (and paid fallback) fails is left out (bilingual warning, `voters_left_out` in `stress.json`); the
+  run stops only when no voter, the screener or the proofreader answers.
+- The retry budget counts the pauses plus the measured time of failed requests (a request in flight is never cut);
+  the stand-in model gets what the main one left. A server that cannot start / log in is retried inside the budget; an
+  answer without text is retried twice and then fails that request only. `.env` never overrides `STT_LLM_*` in stage
+  processes. The start probe first checks the model is offered (a renamed model stops at once, with the list), then asks
+  once with the whole budget and the stand-in; if only the stand-in answers, the run starts with a warning.
+- Cost of every paid answer: both clients append a JSON line (time, stage, model, transport, cost_usd) to the file in
+  `STT_LLM_COST_LOG`; `stt.run` sets it to `<out-root>/.llm_cost/<YYYYmmdd-HHMMSS>.jsonl` (one file per run, shared
+  by its stage processes). The run ends with one line: `LLM: nothing paid in this run` or
+  `LLM paid in this run: $X.XX (N requests: stage/model xN $X.XX, ...)` (also on a stop; the UI shows it).
+
 OpenCode runs as a private `opencode serve` (OpenCode 2.x) per process, on 127.0.0.1 with a
 random password and the clean preset `config/opencode_clean` (no tools, project config, plugins
 or MCP), through its stateless generation route. It reports no token counts or cost, so `usage`
-shows $0. S29E01 with
+shows $0.
+
+Which OpenCode runs: the pipeline does not follow the user's interactive `opencode` (it updates itself and a new
+version may change the API or the model list). The binary is taken in this order: env `STT_OPENCODE_BIN`, the pinned
+copy `<shared>/tools/opencode/current/opencode`, `opencode` on PATH, `~/.opencode/bin/opencode`; the path and version
+are logged once per process, and the private server starts with `OPENCODE_DISABLE_AUTOUPDATE=1`. Without a pinned
+copy the log, `stt.selftest` and `utils.opencode_pin --status` warn. Pin or upgrade the copy with
+`subs_env/bin/python -m utils.opencode_pin [--from PATH] [--models m1,m2] [--dry-run]`: it copies the binary to
+`tools/opencode/<version>/`, starts a private server from the copy, sends one tiny request per model (default
+`openai/gpt-6.1-sol`, `openai/gpt-6-luna`) and moves `current` only if all were answered; on failure the old `current`
+stays and the reason is printed.
+
+Warm-up: a freshly started OpenCode 2.x lists its models at once but answers the first requests for up to ~13 s with
+HTTP 404 `ModelNotFoundError` or 502 "authentication" (no status endpoint shows the moment it is ready). So the
+shared server sends a tiny "Reply with OK" generation for a provider (every 2 s, up to 60 s) before handing out the
+server, once per server and provider (typically 3-4 s, logged as "OpenCode warming up ... ready after N s"). If it
+never answers, the server is handed out anyway and the request retries above apply. S29E01 with
 gpt-6.1-sol for every step through OpenCode: all LLM steps in 15 min, fusion WER 18.03%
 (17.93% through OpenRouter), translation as through OpenRouter (2 of 918 lines over budget).
 
@@ -710,10 +769,11 @@ brings back the automatic clip it replaced (or leaves the person to the next `--
 
 ### Cast of the season from the web
 
-Once per season (before the first glossary) a cheap LLM with web search,
-`openrouter:openai/gpt-6-luna:online` (`llm.stages.cast`; if it fails, refuses or finds fewer
-than 3 people, the next model of the list: `anthropic/claude-haiku-5.5:online`, same price,
-S29 and S10 as complete), reads the show and season off the folder and file names and writes `<season dir>/<folder>.cast.json`: every person who speaks, with
+Once per season (before the first glossary) an LLM (`llm.stages.cast`, tried in order: if one fails,
+refuses or finds fewer than 3 people, the next model of the list) reads the season's Wikipedia
+article, or with a `:online` model searches the web (paid OpenRouter web search; the shared default
+lists `openrouter:openai/gpt-6-luna:online` and `anthropic/claude-haiku-5.5:online` as backups after
+`openai/gpt-6.1-sol`, and a run that may not pay leaves them out). It reads the show and season off the folder and file names and writes `<season dir>/<folder>.cast.json`: every person who speaks, with
 spellings, nicknames, gender, role and relations (twins, couples, parent and child). The
 glossary uses its spellings, the speaker naming gets it as evidence, and after naming
 `stt.cast.check_speakers` turns other spellings of a cast name into the cast's ("John Misch" ->

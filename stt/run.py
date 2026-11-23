@@ -63,7 +63,9 @@ from typing import Any
 from stt import gpu_budget, progress
 from stt.gpu import VramPeak
 from stt.runner import REPO_ROOT, load_json, save_json
-from utils.llm_route import ROUTERS, split_route, with_route
+from utils.llm_route import (COST_LOG_ENV, FALLBACK_AFTER_ENV, FALLBACK_AFTER_S, FALLBACK_ENV, LLM_STOP_EXIT, PAID_ENV,
+                             PAID_MARK, ROUTERS, LLMStop, PaidNotAllowed, SubscriptionDown, paid_line, split_route,
+                             stop_message_in, with_route)
 
 log = logging.getLogger("stt.run")
 _WARNED_ROUTES: set[str] = set()  # unsupported router names already warned about
@@ -192,11 +194,18 @@ _MUXED: dict[Path, tuple[tuple[str, int], ...]] = {}
 
 
 def wait_onscreen() -> None:
-    """Wait for every on-screen translation started in the background (their errors are logged, never raised)."""
+    """Wait for every on-screen translation started in the background (their errors are logged, never raised;
+    an ``LLMStop`` is raised after all of them ended: the run stops)."""
     with _ONSCREEN_GUARD:
         jobs = list(_ONSCREEN_JOBS.values())
-    for job in jobs:
-        job.result()
+    errors: list[BaseException] = []
+    for job in jobs:  # every job is joined before anything is raised
+        try:
+            job.result()
+        except BaseException as error:  # noqa: BLE001 - collected, the first stop (else the first error) is raised
+            errors.append(error)
+    if errors:
+        raise next((e for e in errors if isinstance(e, LLMStop)), errors[0])
 
 
 class Episode:
@@ -291,13 +300,18 @@ class Episode:
 
     def route(self, name: str) -> str:
         """A model id with its route (``llm``): see ``llm()``; web search (``:online``) is OpenRouter's."""
-        llm = self.config.get("llm") or {}
+        return self.route_in(self.config, name)
+
+    @classmethod
+    def route_in(cls, config: dict[str, Any], name: str) -> str:
+        """``route`` for a config (also used before any episode exists, by the startup check of paid steps)."""
+        llm = config.get("llm") or {}
         if name.endswith(":online"):
             return with_route(name, ["openrouter"])
-        name = self._known_route(name)
+        name = cls._known_route(name)
         router = llm.get("router", "openrouter")
         routers = [router] if isinstance(router, str) else list(router)
-        routers = [r for r in routers if self._known_router(r)] or ["openrouter"]
+        routers = [r for r in routers if cls._known_router(r)] or ["openrouter"]
         if any(fnmatch.fnmatchcase(name, p) for p in llm.get("opencode") or []):
             return with_route(name, ["opencode", *routers] if llm.get("fallback", False) else ["opencode"])
         return with_route(name, routers)
@@ -569,6 +583,8 @@ class Episode:
             models = [models] if isinstance(models, str) else models
             try:
                 cast.main([str(self.out), "--cast", str(self.cast), "--model", ",".join(self.route(m) for m in models)])
+            except LLMStop:
+                raise  # the subscription does not answer (or paying is not allowed): the run stops
             except Exception as error:  # noqa: BLE001 - names still come from the transcript and the voices
                 log.warning("[%s] cast lookup failed: %s", self.media.stem, error)
         return self.cast.exists()
@@ -636,6 +652,8 @@ class Episode:
         def work() -> None:
             try:
                 job.set_result(self._translate_onscreen())
+            except LLMStop as error:  # not swallowed: ``translate_onscreen`` raises it in the lane's thread
+                job.set_exception(error)
             except BaseException as error:  # noqa: BLE001 - a failed translation only costs the track
                 log.warning("[%s] on-screen text not translated (%s): no Russian on-screen track", self.media.stem,
                             error)
@@ -667,6 +685,8 @@ class Episode:
         try:
             onscreen.main(["translate", str(self.out), "--glossary", str(self.out / "glossary.txt"),
                            "--model", self.llm("translate")])
+        except LLMStop:
+            raise  # the subscription does not answer (or paying is not allowed): the run stops
         except Exception as error:  # noqa: BLE001 - the video is still made, without the on-screen track
             log.warning("[%s] on-screen text not translated (%s): no Russian on-screen track", self.media.stem, error)
             return None
@@ -860,6 +880,7 @@ class Episode:
         from stt.worker import gpu_out_of_memory
 
         env = {**os.environ, **dotenv(), "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+        env.update({k: v for k, v in os.environ.items() if k.startswith("STT_LLM_")})  # the run's, never ``.env``'s
         tracker = progress.current()
         if tracker is not None:  # the module's progress ticks go to this stage's progress file
             env.update(tracker.environ())
@@ -876,6 +897,8 @@ class Episode:
             if code == 0:
                 return
             log_text = log_path.read_text(encoding="utf-8", errors="replace")
+            if code == LLM_STOP_EXIT:  # the stage stopped on purpose: no LLM answer without paying (see utils.llm_route)
+                raise SubscriptionDown(f"stage {name} stopped (exit {code}), see {log_path}", stop_message_in(log_text))
             if attempt == oom_retries or not gpu_out_of_memory(log_text):
                 break
             log.warning("[%s] %s ran out of GPU memory; retry %d/%d in %.0f s", self.media.stem, name, attempt + 1,
@@ -1431,9 +1454,12 @@ def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, confi
             if helper:
                 release_all()  # a lane that returned early (or never started) must not leave the lookahead waiting
                 helper.join()
-    wait_onscreen()  # a run that ends at the translation still gets onscreen.ru.json
-    if errors:
-        raise errors[0]
+    try:
+        wait_onscreen()  # a run that ends at the translation still gets onscreen.ru.json
+    except LLMStop as error:
+        errors.append(error)
+    if errors:  # the reason the run stops (no money, no subscription) is reported before any other error
+        raise next((e for e in errors if isinstance(e, LLMStop)), errors[0])
 
 
 VIDEO_SUFFIXES = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts"}
@@ -1580,35 +1606,99 @@ def subscription_models(config: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(models))
 
 
-PROBE_TRIES = 3
-PROBE_PAUSE_S = 10.0  # between probes of the subscription (10 s, then 20 s)
+def paying_allowed(config: dict[str, Any]) -> bool:
+    """May this run pay for LLM requests? Yes when no model goes through the subscription (``llm.opencode`` empty: the
+    run was set up for OpenRouter, or there is no subscription) or when ``llm.fallback`` allows the paid fallback."""
+    llm = config.get("llm") or {}
+    return not llm.get("opencode") or bool(llm.get("fallback", False))
+
+
+def export_llm_env(config: dict[str, Any]) -> None:
+    """Settings of the LLM clients for this process and the stage processes it starts (environment variables):
+    the subscription's retry budget, its per-request fallback model and whether paying is allowed."""
+    from stt.llm import SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S
+
+    llm = config.get("llm") or {}
+    os.environ[SUBSCRIPTION_RETRY_ENV] = str(llm.get("subscription_retry_s", SUBSCRIPTION_RETRY_S))
+    os.environ[FALLBACK_ENV] = json.dumps(llm.get("subscription_fallback") or {})
+    os.environ[FALLBACK_AFTER_ENV] = str(llm.get("subscription_fallback_after_s", FALLBACK_AFTER_S))
+    os.environ[PAID_ENV] = "allow" if paying_allowed(config) else "deny"
+
+
+def llm_steps(config: dict[str, Any]) -> dict[str, list[str]]:
+    """The LLM steps of this run: name -> model ids with their routes (a list is a chain of models; ``model`` is the
+    default of the steps without their own). Steps that will not run are left out."""
+    llm = config.get("llm") or {}
+    voiceover, stages = config.get("voiceover") or {}, llm.get("stages") or {}
+    off = set()
+    if not voiceover.get("stress_check", True):
+        off |= {"stress", "stress_screen", "stress_proofread"}
+    if not voiceover.get("stress_proofread", False):
+        off.add("stress_proofread")
+    if not (config.get("cast") or {}).get("enabled", True):
+        off.add("cast")
+    if not (config.get("translate") or {}).get("proofread", True):
+        off.add("translate_proofread")
+    steps = {"model": llm.get("model", config.get("llm_model", "openai/gpt-6-luna")), **stages}
+    steps = {k: v for k, v in steps.items() if k not in off and v}
+    return {k: [Episode.route_in(config, m) for m in (v if isinstance(v, list) else [v])] for k, v in steps.items()}
+
+
+def check_paid_steps(config: dict[str, Any]) -> None:
+    """When this run may not pay: drop paid models that come after a subscription one in a step's list (with a
+    warning) and stop (``PaidNotAllowed``) when a step's only or first model is paid, naming the steps."""
+    if paying_allowed(config):
+        return
+    blocked: list[str] = []
+    stages = (config.get("llm") or {}).get("stages") or {}
+    for step, models in llm_steps(config).items():
+        paid = [split_route(m)[0][:1] != ["opencode"] for m in models]
+        if paid[0]:
+            blocked.append(f"{step}: {models[0]}")
+        elif any(paid):
+            kept = [m for m, is_paid in zip(models, paid) if not is_paid]
+            log.warning("llm: %s is paid and this run may not pay: left out of step %r / платная модель убрана из "
+                        "шага %r в этом запуске", ", ".join(m for m, is_paid in zip(models, paid) if is_paid), step,
+                        step)
+            if isinstance(stages.get(step), list):
+                stages[step] = [m for m in stages[step] if Episode.route_in(config, m) in kept]
+    if blocked:
+        raise PaidNotAllowed("these steps use a paid model: " + "; ".join(blocked)
+                             + " (pick a subscription model for them in the settings, or allow paying for this run)")
 
 
 def check_subscription(config: dict[str, Any]) -> bool:
     """Ask the subscription before the episodes; False (with a warning) when it does not answer.
 
-    The probe is repeated ``PROBE_TRIES`` times: OpenCode sometimes answers "model not found" for a moment.
-    A model missing from the OpenCode list (renamed by an update) is named with the available ones.
-    With ``llm.fallback`` false (the default) the run stops here instead of failing at its first LLM step.
+    Per model: first the model must be offered by the login (a renamed model stops the run at once, naming the
+    available ones), then one tiny request goes the way real requests do: the whole retry budget and the stand-in
+    model of the subscription (``llm.subscription_fallback``). If only the stand-in answers the run starts with a
+    warning. If nothing answers the run stops (``SubscriptionDown``) when it may not pay; otherwise the steps go
+    through the paid router and cost money.
     """
-    from stt.llm import SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S, subscription_error
+    from stt.llm import subscription_offered, subscription_probe
+    from utils.llm_route import subscription_fallback
 
     llm = config.get("llm") or {}
-    os.environ[SUBSCRIPTION_RETRY_ENV] = str(llm.get("subscription_retry_s", SUBSCRIPTION_RETRY_S))
+    export_llm_env(config)
     for model in subscription_models(config):
-        error: str | None = None
-        for attempt in range(PROBE_TRIES):
-            error = subscription_error(model)
-            if error is None:
-                break
-            if attempt + 1 < PROBE_TRIES:
-                log.warning("subscription probe for %s failed (%s); trying again", model, error)
-                time.sleep(PROBE_PAUSE_S * (attempt + 1))
+        error = subscription_offered(model)
+        stood_in = False
+        if error is not None:  # the login works but its model list lacks the model (renamed by an OpenCode update?)
+            error = (f"the model {model} is not in OpenCode's model list (renamed? pick another one in the settings) "
+                     f"/ модели {model} нет в списке OpenCode (переименована? выберите другую в настройках): {error}")
+            if not llm.get("fallback", False):
+                raise SubscriptionDown(error)
+        else:
+            error, stood_in = subscription_probe(model)
         if error is None:
+            if stood_in:
+                log.warning("%s is not answering, the run starts; requests go to %s when %s does not answer / "
+                            "%s не отвечает, запуск начинается; запросы пойдут в %s, когда %s не отвечает", model,
+                            subscription_fallback(model), model, model, subscription_fallback(model), model)
             continue
         if not llm.get("fallback", False):
-            raise SystemExit(f"{SUBSCRIPTION_DOWN}: {error}. Nothing was paid; fix it and run again. / "
-                             f"Подписка не отвечает, ничего не оплачено; исправьте и запустите снова.")
+            raise SubscriptionDown(f"{SUBSCRIPTION_DOWN}: {error}")
         router = llm.get("router", "openrouter")
         log.warning("%s: %s. LLM steps with %s go through %s instead and cost money.", SUBSCRIPTION_DOWN, error,
                     model, " / ".join([router] if isinstance(router, str) else router))
@@ -1672,9 +1762,33 @@ def main(argv: list[str] | None = None) -> None:
     if missing or not files:
         raise SystemExit(f"Media not found: {missing or args.media}")
     out_root = Path(args.out_root or (config.get("paths") or {}).get("work") or "output/stt").expanduser()
+    cost_log = out_root / ".llm_cost" / (time.strftime("%Y%m%d-%H%M%S") + ".jsonl")
+    os.environ[COST_LOG_ENV] = str(cost_log)  # one line per paid LLM answer of this run (also from stage processes)
+    export_llm_env(config)  # also when the subscription probe is skipped: the stage processes inherit it
+    try:
+        run_all(args, config, files, out_root)
+    except LLMStop as error:  # no LLM answer without paying: say what happened, once, as the last thing
+        log_paid(cost_log)
+        log.error("%s", error.message)
+        raise SystemExit(LLM_STOP_EXIT) from None
+    except BaseException:
+        log_paid(cost_log)
+        raise
+    log_paid(cost_log)
+
+
+def log_paid(cost_log: Path) -> None:
+    """The one line about money at the end of a run (warning when something was paid)."""
+    line = paid_line(cost_log)
+    (log.warning if PAID_MARK in line else log.info)("%s", line)
+
+
+def run_all(args: argparse.Namespace, config: dict[str, Any], files: list[Path], out_root: Path) -> None:
+    """The run after the arguments are read: voice model, LLM checks, environments, season voices, the lanes."""
     if args.download_voice_model and (args.season_voices_only or season_voices_enabled(config, args)):
         fetch_voice_model(config)
     if not args.season_voices_only:
+        check_paid_steps(config)
         check_subscription(config)
     engines = [e.strip() for e in (args.engine or (config.get("voiceover") or {}).get("engine", "vosk")).split(",")
                if e.strip()]

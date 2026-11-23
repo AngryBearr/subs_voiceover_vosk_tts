@@ -4,7 +4,10 @@ By default requests go to OpenRouter. Transports in front of the model id choose
 (``utils.llm_route``): ``opencode:`` is the OpenCode login of a ChatGPT subscription (no API
 cost, no token counts), ``openrouter:`` the paid router;
 ``opencode+openrouter:openai/gpt-6.1-sol`` falls back to OpenRouter for a request when OpenCode fails.
-The subscription itself is retried with a growing pause for ``SUBSCRIPTION_RETRY_S`` before that.
+The subscription itself is retried with a growing pause for ``SUBSCRIPTION_RETRY_S`` before that; a weaker model
+of the same subscription may answer one request meanwhile (``llm.subscription_fallback``, free).
+Without a paid transport in the route (or when the run may not pay) a subscription that does not answer raises
+``SubscriptionDown`` and the run stops; ``PaidNotAllowed`` is raised before a paid request is sent.
 """
 
 from __future__ import annotations
@@ -25,7 +28,9 @@ from typing import Any
 from stt import progress
 from stt.runner import REPO_ROOT
 from utils.atomic_io import write_text_atomic
-from utils.llm_route import ROUTERS, router_model, split_route
+from utils.llm_route import (ROUTERS, PaidDown, PaidNotAllowed, SubscriptionDown, generate_via_subscription,
+                             is_paid_dead, is_subscription_down, paid_allowed, paid_run, record_paid, require_paid,
+                             router_model, split_route)
 from utils.opencode_clean import (SUBSCRIPTION_BACKOFF_S, SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S,  # noqa: F401
                                   ModelNotOffered, OpenCodeError, flatten_messages, generate_with_retry,
                                   shared_server, subscription_retry_budget)
@@ -58,6 +63,7 @@ class Usage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost: float = 0.0
+    subscription_fallback_calls: int = 0  # requests answered by the weaker model of the subscription
     models: set[str] = field(default_factory=set)
 
     def add(self, response: dict[str, Any]) -> None:
@@ -70,6 +76,7 @@ class Usage:
         self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
         self.completion_tokens += int(usage.get("completion_tokens") or 0)
         self.cost += float(usage.get("cost") or 0.0)
+        self.subscription_fallback_calls += 1 if response.get("subscription_fallback") else 0
         if response.get("model"):
             self.models.add(response["model"])
 
@@ -79,6 +86,7 @@ class Usage:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "cost_usd": round(self.cost, 6),
+            "subscription_fallback_calls": self.subscription_fallback_calls,
             "models": sorted(self.models),
         }
 
@@ -149,11 +157,12 @@ class OpenRouterClient:
         """The OpenCode answer in the OpenRouter response shape (no usage: the subscription pays).
 
         A transient failure (rate limit, 5xx, the model list refreshing) is retried here with a growing pause
-        until ``subscription_retry_s`` of waiting is used up; a quota error is not retried.
+        until ``subscription_retry_s`` of waiting is used up; a quota error is not retried. A model with a
+        subscription fallback hands this one request to the weaker model when it does not answer in time.
         """
-        text = generate_with_retry(lambda: shared_server(self.bare_model), flatten_messages(messages),
-                                   self.bare_model, self.reasoning, self.timeout_s, self.subscription_retry_s)
-        return {"model": "opencode:" + self.bare_model,
+        text, used = generate_via_subscription(shared_server, flatten_messages(messages), self.bare_model,
+                                               self.reasoning, self.timeout_s, self.subscription_retry_s)
+        return {"model": "opencode:" + used, "subscription_fallback": used != self.bare_model,
                 "choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
 
     def chat_json(
@@ -202,17 +211,25 @@ class OpenRouterClient:
 
     def _ask(self, system: str, user: str, temperature: float, max_tokens: int, retries: int) -> Any:
         for index, transport in enumerate(self.transports):
+            require_paid(transport, self.bare_model)  # before anything is sent
             try:
                 answer = self._chat_once(transport, system, user, temperature, max_tokens, retries)
+            except PaidNotAllowed:
+                raise
             except RuntimeError as exc:
-                if index + 1 >= len(self.transports):
-                    if transport == "opencode":
+                later = self.transports[index + 1:]
+                if isinstance(exc, SubscriptionDown) and later and not paid_allowed():
+                    later = []  # the run may not pay: the subscription's failure stops it
+                if not later:
+                    if isinstance(exc, PaidDown):
+                        exc.subscription_tried = "opencode" in self.transports[:index]
+                    if isinstance(exc, SubscriptionDown):
                         log.error("The subscription is not answering, nothing was paid for %s; run again later. / "
                                   "Подписка не отвечает, за %s ничего не оплачено; запустите позже. (%s)",
                                   self.bare_model, self.bare_model, exc)
                     raise
                 log.warning("LLM %s via %s failed (%s); this request goes to %s", self.bare_model, transport, exc,
-                            self.transports[index + 1])
+                            later[0])
                 continue
             self._answered_by = transport
             return answer
@@ -235,10 +252,14 @@ class OpenRouterClient:
         elif self.reasoning:
             body["reasoning"] = {"effort": self.reasoning}
         last_error: Exception | None = None
+        transient_paid = False  # the last failure of a paid transport was a network / 5xx / rate-limit one
         for attempt in range(retries + 1):
+            transient_paid = False
             try:
                 response = self._generate(messages) if transport == "opencode" else self._post(body, transport)
                 self.usage.add(response)
+                if transport != "opencode":
+                    record_paid(self.bare_model, transport, float((response.get("usage") or {}).get("cost") or 0.0))
                 choice = response["choices"][0]
                 content = choice["message"].get("content") or ""
                 try:
@@ -257,25 +278,52 @@ class OpenRouterClient:
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
                 last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
+                transient_paid = exc.code == 429 or exc.code >= 500
                 if exc.code in (400, 401, 402, 403, 404):  # 404: this router lacks the model
                     break
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, KeyError, IndexError) as exc:
+            except (urllib.error.URLError, TimeoutError) as exc:
+                last_error, transient_paid = exc, True
+            except (json.JSONDecodeError, ValueError, KeyError, IndexError) as exc:
                 last_error = exc
             log.warning("LLM call failed (attempt %d/%d): %s", attempt + 1, retries + 1, last_error)
             time.sleep(2.0 * (attempt + 1))
-        raise RuntimeError(f"LLM request to {self.bare_model} via {transport} failed: {last_error}")
+        message = f"LLM request to {self.bare_model} via {transport} failed: {last_error}"
+        if is_subscription_down(last_error):  # the subscription does not work now (budget used up, limit, login)
+            raise SubscriptionDown(message)
+        if transport != "opencode" and paid_run() and (transient_paid or is_paid_dead(str(last_error))):
+            raise PaidDown(message)  # a run that may pay: the paid transport failed for good too
+        raise RuntimeError(message)
 
 
-def subscription_error(model: str, timeout_s: float = 90.0, retry_s: float = 0.0) -> str | None:
-    """None when the OpenCode login of the subscription answers for ``model``, else the reason.
+def subscription_offered(model: str) -> str | None:
+    """None when the OpenCode login lists ``model``, else the reason with the models it does offer.
 
-    One tiny request; an expired login ("authentication token is expired") would otherwise only
-    show up as LLM steps falling back to a paid router in the middle of a run.
+    The check of a run's start: a model missing from the list (renamed by an update) will not appear by waiting.
+    Any other failure here (the server is still starting) is left to the probe's retries.
+    """
+    try:
+        shared_server(split_route(model)[1])
+    except ModelNotOffered as exc:
+        return str(exc)[:2000]  # keep the list of available models
+    except Exception:  # noqa: BLE001 - the probe retries a server that is not ready
+        return None
+    return None
+
+
+def subscription_probe(model: str, timeout_s: float = 90.0, retry_s: float | None = None) -> tuple[str | None, bool]:
+    """(reason it does not answer or None, True when only the stand-in model of the subscription answered).
+
+    One tiny request through the same path as the real ones: the whole retry budget and the per-request stand-in
+    (``llm.subscription_fallback``). An expired login would otherwise only show up in the middle of a run.
     """
     client = OpenRouterClient("opencode:" + split_route(model)[1], timeout_s=timeout_s, subscription_retry_s=retry_s)
     try:
         client.chat_json("Answer in JSON.", 'Return {"ok": true}', max_tokens=50, retries=1)
     except Exception as exc:  # any failure means the subscription route is not usable now
-        return str(exc)[:2000 if isinstance(exc, ModelNotOffered) else 300]  # keep the list of available models
-    return None
+        return str(exc)[:300], False
+    return None, client.usage.subscription_fallback_calls > 0
 
+
+def subscription_error(model: str, timeout_s: float = 90.0, retry_s: float | None = None) -> str | None:
+    """None when the OpenCode login of the subscription answers for ``model``, else the reason."""
+    return subscription_probe(model, timeout_s, retry_s)[0]

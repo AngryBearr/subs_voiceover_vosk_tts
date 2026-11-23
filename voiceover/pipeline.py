@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from utils.llm_route import exiting_on_stop
 from utils.srt_to_json import parse_srt_file
 from voiceover.calibrate import (CALIBRATION_VERSION, Calibration, calibrate, derive_timeline_policy,
                                  engine_identity, load_shared_calibration, probe_texts, shared_calibration_path,
@@ -286,7 +287,7 @@ def _llm_identity(client: LLMClient) -> dict[str, Any]:
 
 
 def _stats_delta(client: LLMClient, before: dict[str, int]) -> dict[str, int]:
-    return {key: value - before[key] for key, value in client.stats().items()}
+    return {key: value - before.get(key, 0) for key, value in client.stats().items()}
 
 
 def stage_annotate(units_artifact: dict[str, Any], durations: dict[str, Any], schedule_artifact: dict[str, Any],
@@ -839,6 +840,7 @@ def run(source: Path, out: Path, config: dict[str, Any], *, until: str = "report
                         resolution, export_summary, overrides)
 
 
+@exiting_on_stop
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Voiceover v3: measure, fit oracle, schedule, shorten text, report")
     sub = parser.add_subparsers(dest="command", required=True)

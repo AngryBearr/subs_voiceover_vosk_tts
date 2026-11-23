@@ -134,6 +134,16 @@ here and say how to follow it (Step 7).
    the UI tab «Обработка» shows its progress with «Остановить» / «▶ Продолжить». If `detached` is `setsid`, warn
    that it may stop if the agent session restarts.
 
+### If the run stops because the LLM does not answer
+
+A run that ends with the message «LLM STOPPED / LLM ОСТАНОВЛЕН» (exit code 75; in the log, in `status`'s
+`log_tail`, in the UI status) means: the OpenCode subscription did not answer or its limit is used up (or a step
+wanted a paid model and this run may not pay), nothing was paid, finished stages and the answers already received are
+kept. Tell the user in plain words what happened and that continuing later is free (the same `launch`). Relaunch with
+`--transport openrouter` (paid, for that one launch only, never saved) **only after the user's explicit yes**, naming
+the price from the guide; never decide it yourself. After any run, if the log has «LLM paid in this run», tell the
+user the amount.
+
 ## Step 7. Following the run
 
 When the user asks how it goes, run `status <TARGET>` and answer in one line per episode (stage, done or not) plus

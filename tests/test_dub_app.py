@@ -110,6 +110,27 @@ def test_status_warns_when_the_subscription_login_fails(tmp_path: Path, monkeypa
     assert dub_app.SUBSCRIPTION_WARNING in dub_app.refresh()[0]
 
 
+def test_status_shows_the_stop_message_and_the_paid_line(tmp_path: Path, monkeypatch) -> None:
+    from ui import job_view
+    from utils import llm_route
+
+    log = tmp_path / "job.log"
+    job = dub_app.Job(files=[], out_root=tmp_path, engines=["f5"], config_path=tmp_path / "c.json", log_path=log)
+    monkeypatch.setattr(dub_app, "JOB", job)
+    message = llm_route.stop_message(llm_route.SubscriptionDown(dub_app.SUBSCRIPTION_DOWN + ": expired"), 0.0)
+    log.write_text("=== 10:00:00 f5: old run\n2026-11-23 10:00:01,000 INFO stt.run: [ep] asr ...\n"
+                   f"2026-11-23 10:00:02,000 ERROR stt.run: {message}\n", encoding="utf-8")
+    status = dub_app.refresh()[0]
+    assert "Ничего не оплачено" in status and "API OpenRouter" in status and dub_app.SUBSCRIPTION_WARNING not in status
+    assert job_view.readable_log(log.read_text(encoding="utf-8"))[-1].startswith("10:00 ❌ Ошибка: подписка (opencode)")
+    log.write_text(log.read_text(encoding="utf-8") + "=== 11:00:00 f5: resumed\n"
+                   "2026-11-23 11:00:01,000 WARNING stt.run: LLM paid in this run: $1.50 (3 requests: translate/x x3 $1.50)\n",
+                   encoding="utf-8")
+    status = dub_app.refresh()[0]
+    assert "Ничего не оплачено" not in status and "💳 LLM paid in this run: $1.50" in status  # the old stop is not shown
+    assert "оплачено: $1.50 (3 запросов)" in job_view.readable_log(log.read_text(encoding="utf-8"))[-1]
+
+
 def test_settings_keep_only_changes_and_other_personal_keys(tmp_path: Path) -> None:
     from ui import settings
 
@@ -153,3 +174,23 @@ def test_settings_reject_bad_values() -> None:
         assert exc.problems == ["«Насколько приглушать, дБ»: введите число"]
     else:
         raise AssertionError("an empty number was saved")
+
+
+def test_a_paid_launch_resumes_through_the_subscription(tmp_path: Path, monkeypatch) -> None:
+    """Paying through OpenRouter is allowed for one launch only: "Продолжить" goes back to the subscription."""
+    monkeypatch.setattr(dub_app, "base_config", lambda: {"llm": {"opencode": ["openai/*"], "router": "openrouter",
+                                                                 "fallback": False}})
+    paid = tmp_path / "config_1.json"
+    paid.write_text(json.dumps({"llm": {"model": "openai/gpt-6.1-sol", "opencode": [], "router": "openrouter"},
+                                "mode": "x"}), encoding="utf-8")
+    path, note = dub_app.back_to_subscription(paid, "2")
+    assert path == tmp_path / "config_2.json" and "подписку" in note
+    resumed = json.loads(path.read_text(encoding="utf-8"))
+    assert resumed["llm"] == {"model": "openai/gpt-6.1-sol", "opencode": ["openai/*"], "router": "openrouter",
+                              "fallback": False}
+    assert resumed["mode"] == "x"
+    assert json.loads(paid.read_text(encoding="utf-8"))["llm"]["opencode"] == []  # the old launch's file is kept
+
+    free = tmp_path / "config_3.json"
+    free.write_text(json.dumps({"llm": {"opencode": ["openai/*"]}}), encoding="utf-8")
+    assert dub_app.back_to_subscription(free, "4") == (free, "")

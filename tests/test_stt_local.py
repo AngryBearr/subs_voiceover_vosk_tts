@@ -880,37 +880,44 @@ class SubscriptionCheckTest(unittest.TestCase):
         from stt import run
 
         paid = {"llm": {**self.CONFIG["llm"], "fallback": True}}
-        with mock.patch("stt.llm.subscription_error", return_value=None):
+        offered = mock.patch("stt.llm.subscription_offered", return_value=None)
+        with offered, mock.patch("stt.llm.subscription_probe", return_value=(None, False)):
             self.assertTrue(run.check_subscription(self.CONFIG))
-        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), \
-                mock.patch.object(run.time, "sleep"), self.assertLogs("stt.run", "WARNING") as logs:
+        down = mock.patch("stt.llm.subscription_probe", return_value=("token is expired", False))
+        with offered, down, self.assertLogs("stt.run", "WARNING") as logs:
             self.assertFalse(run.check_subscription(paid))
         self.assertIn("opencode auth login", logs.output[-1])
         strict = {"llm": {**self.CONFIG["llm"], "fallback": False}}
-        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), \
-                mock.patch.object(run.time, "sleep"), self.assertRaises(SystemExit):
+        with offered, down, self.assertRaises(run.SubscriptionDown):
             run.check_subscription(strict)
-        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), \
-                mock.patch.object(run.time, "sleep"), self.assertRaises(SystemExit):
+        with offered, down, self.assertRaises(run.SubscriptionDown):
             run.check_subscription(self.CONFIG)  # default: no paid route
 
-    def test_probe_is_retried_and_a_renamed_model_is_named(self) -> None:
+    def test_probe_goes_the_way_of_real_requests_and_a_stand_in_is_a_warning(self) -> None:
         from unittest import mock
 
         from stt import run
 
-        answers = iter(["HTTP 404: ModelNotFoundError", None, None])
-        with mock.patch("stt.llm.subscription_error", side_effect=lambda model: next(answers)) as probe, \
-                mock.patch.object(run.time, "sleep") as sleep:
+        offered = mock.patch("stt.llm.subscription_offered", return_value=None)
+        with offered, mock.patch("stt.llm.subscription_probe", return_value=(None, True)) as probe, \
+                mock.patch.object(run, "subscription_models", return_value=["openai/gpt-6.1-sol"]), \
+                mock.patch.dict("os.environ", {}), self.assertLogs("stt.run", "WARNING") as logs:
             self.assertTrue(run.check_subscription(self.CONFIG))
-        self.assertEqual(probe.call_count, 3)  # two probes for the first model, one for the second
-        sleep.assert_called_once_with(run.PROBE_PAUSE_S)
+        self.assertEqual(probe.call_count, 1)  # one probe with the whole budget, not three quick tries
+        self.assertIn("the run starts", logs.output[-1])
+        self.assertFalse(hasattr(run, "PROBE_TRIES"))
+
+    def test_a_model_the_login_does_not_offer_stops_at_once_with_the_list(self) -> None:
+        from unittest import mock
+
+        from stt import run
+
         missing = ("OpenCode does not offer openai/gpt-6.1-sol [] with this login; "
                    "available: openai/gpt-6-sol, openai/gpt-6-luna")
-        with mock.patch("stt.llm.subscription_error", return_value=missing) as probe, \
-                mock.patch.object(run.time, "sleep"), self.assertRaises(SystemExit) as stop:
+        with mock.patch("stt.llm.subscription_offered", return_value=missing), \
+                mock.patch("stt.llm.subscription_probe") as probe, self.assertRaises(run.SubscriptionDown) as stop:
             run.check_subscription(self.CONFIG)
-        self.assertEqual(probe.call_count, run.PROBE_TRIES)
+        probe.assert_not_called()
         self.assertIn("openai/gpt-6.1-sol", str(stop.exception))
         self.assertIn("openai/gpt-6-sol", str(stop.exception))
 

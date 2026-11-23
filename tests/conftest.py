@@ -46,3 +46,14 @@ def _sixteen_gb_card(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(gpu_budget, "query_vram", lambda: (16384.0, 15000.0))
     yield
     gpu_budget.reset_cache()
+
+
+@pytest.fixture(autouse=True)
+def _llm_env_restored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``stt.run`` exports the LLM settings (paid or not, cost log, fallback model) into the process environment:
+    a test must neither start with nor leave behind such settings."""
+    from utils import llm_route
+
+    for name in (llm_route.PAID_ENV, llm_route.COST_LOG_ENV, llm_route.FALLBACK_ENV, llm_route.FALLBACK_AFTER_ENV):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)

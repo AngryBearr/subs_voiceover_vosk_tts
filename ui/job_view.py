@@ -207,9 +207,16 @@ STAGE_LINE = re.compile(r"^\[(?P<stem>.+?)\] (?P<stage>\w+)(?: \((?P<engine>\w+)
 PROGRESS_REST = re.compile(r"^: (\d+)/(\d+) (\w+)$")
 FINISHED_REST = re.compile(r"^: finished in (\d+) s$")
 RUN_HEADER = re.compile(r"^=== (\d\d:\d\d):\d\d (\S+?): ")
-KNOWN = (("The ChatGPT subscription login of OpenCode does not work",
+KNOWN = (("LLM STOPPED", "подписка (opencode) не отвечает или лимит исчерпан, запуск остановлен, ничего не оплачено; "
+                          "законченное сохранено; позже можно запустить снова бесплатно"),
+         ("may not pay", "этому запуску платить нельзя: шаг хотел платную модель"),
+         ("is paid and this run may not pay", "платная модель убрана из шага: в этом запуске платить нельзя"),
+         ("(subscription, free)", "основная модель подписки не отвечает: этот запрос обработала запасная модель той же "
+                                  "подписки (бесплатно)"),
+         ("The ChatGPT subscription login of OpenCode does not work",
           "вход в подписку ChatGPT (opencode) не работает: запросы идут через платный роутер"),
          ("via opencode failed", "запрос через подписку (opencode) не удался"))
+PAID_LINE = re.compile(r"LLM paid in this run: \$([\d.]+) \((\d+) requests")
 
 
 def _cut(text: str, limit: int = 160) -> str:
@@ -251,6 +258,8 @@ def readable_log(text: str, limit: int = 60) -> list[str]:
         stage = STAGE_LINE.match(message)
         if stage and stage.group("stage") in STAGE_RU:
             events.append(_stage_event(clock, stage))
+        elif (paid := PAID_LINE.search(message)):
+            events.append(f"{clock} 💳 За этот запуск оплачено: ${paid.group(1)} ({paid.group(2)} запросов)")
         elif level in ("WARNING", "ERROR", "CRITICAL"):
             events.append(f"{clock} {_plain(level, message)}")
     return [e for e in events if e][-limit:]

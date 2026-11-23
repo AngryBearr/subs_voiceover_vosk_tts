@@ -66,6 +66,7 @@ from typing import Any
 
 from stt import progress
 from voiceover.engine import build_engine
+from utils.llm_route import PaidDown, PaidNotAllowed, SubscriptionDown, exiting_on_stop
 from voiceover.llm import LLMClient, LLMConfig, LLMError, LLMQuotaError
 from voiceover.text import join_lines
 
@@ -337,6 +338,12 @@ def _ask_batch(chunk: list[tuple[Suspect, str]], client: LLMClient, tag: str) ->
     except LLMQuotaError as error:  # the subscription's limit is reached: no halves, the other models vote
         log.warning("stress: %s is out of its usage limit (%s): the others vote", client.config.model, str(error)[:160])
         return [None] * len(chunk)
+    except PaidNotAllowed:
+        raise  # the run may not pay: it stops
+    except (SubscriptionDown, PaidDown) as error:  # left out; ``check`` stops if nobody answers
+        log.warning("stress: %s is not answering (%s): left out of the vote / не отвечает, не участвует в голосовании",
+                    client.config.model, str(error)[:160])
+        return [None] * len(chunk)
     except LLMError as error:  # a broken answer: ask again in halves, give up on single items
         if len(chunk) == 1:
             log.warning("stress: %s gave no usable answer for %s: %s", client.config.model, tag, str(error)[:120])
@@ -430,6 +437,12 @@ def _proofread_batch(texts: list[str], low: int, high: int, client: LLMClient) -
         log.warning("stress: %s is out of its usage limit, no proofreading of %s (%s)", client.config.model, tag,
                     str(error)[:160])
         return []
+    except PaidNotAllowed:
+        raise  # the run may not pay: it stops
+    except (SubscriptionDown, PaidDown) as error:  # ``check`` stops the run: the proofreader is a single model
+        log.warning("stress: %s is not answering, no proofreading of %s (%s)", client.config.model, tag,
+                    str(error)[:160])
+        return []
     except LLMError as error:
         if high - low == 1:
             log.warning("stress: %s gave no usable proofreading for %s: %s", client.config.model, tag, str(error)[:120])
@@ -518,6 +531,18 @@ def _client(llm_config: dict[str, Any], model: str, env_file: Path | None, **ext
                      env_file=env_file)
 
 
+def _require_answered(clients: list[LLMClient], role: str, models: list[str]) -> None:
+    """Stop the run (``SubscriptionDown``) when every client of a role is out of its subscription."""
+    down = [(m, str(getattr(c, "exhausted", None) or "")) for c, m in zip(clients, models)]
+    for model, reason in down:
+        if reason:
+            log.warning("stress: %s (%s) is out of its subscription and gave no votes: %s / %s (%s) не отвечает "
+                        "(подписка недоступна) и не голосует", model, role, reason[:200], model, role)
+    if down and all(reason for _, reason in down):
+        kind = PaidDown if any(getattr(c, "_exhausted_by", None) is PaidDown for c in clients) else SubscriptionDown
+        raise kind(f"stress {role}: {down[0][0]}: {down[0][1][:200]}")
+
+
 def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config: dict[str, Any],
           models: list[str], env_file: Path | None = None, screen: dict[str, Any] | None = None,
           names: dict[str, str] | None = None, second: bool = True,
@@ -586,6 +611,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
                 unique.setdefault((proposal.line, proposal.word.lower()), proposal)
         proposals = list(unique.values())
         report = {"proposals": sum(len(run) for run in runs), "passes": len(runs)}
+        _require_answered([proofreader_client], "proofreader", [proofreader])
         stats[f"proofread:{proofreader}"] = proofreader_client.stats()
         by_word = {x.word: x for x in suspects}
         seen = {(x.word, c) for x, c in pairs}
@@ -620,6 +646,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
     if screen:  # the cheap model proposes, the strong ones vote only on its proposals
         screened[:len(base_pairs)] = screen_future.result()  # type: ignore[union-attr]
         screen_pool.shutdown()  # type: ignore[union-attr]
+        _require_answered([screener], "screener", [str(screen["model"])])  # type: ignore[list-item]
         stats[f"screen:{screen['model']}"] = screener.stats()  # type: ignore[union-attr]
         todo = [n for n, (s, context) in enumerate(pairs)  # names, disputed and proofread sentences: always
                 if s.source == "name" or context in s.disputed or (s.word, context) in proposed or (s.word, context) in siblings
@@ -629,6 +656,8 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         todo = list(range(len(pairs)))
     with ThreadPoolExecutor(len(clients)) as pool:
         partial = list(pool.map(lambda client: ask([pairs[n] for n in todo], client), clients))
+    _require_answered(clients, "voter", models)  # a voter that fails is left out; none left: the run stops
+    left_out = {m: str(c.exhausted)[:200] for c, m in zip(clients, models) if getattr(c, "exhausted", None)}
     answers: list[list[str | None]] = [[None] * len(pairs) for _ in clients]
     for a, part in zip(answers, partial):
         for n, value in zip(todo, part):
@@ -706,6 +735,7 @@ def check(lines: list[dict[str, Any]], engine_config: dict[str, Any], llm_config
         **({"proofread": proof_info} if proof_info else {}),
         "verdicts": list(verdicts.values()),
         "llm": {**stats, **{model: client.stats() for model, client in zip(models, clients)}},
+        **({"voters_left_out": left_out} if left_out else {}),  # their subscription did not answer: no votes
     }
 
 
@@ -738,6 +768,7 @@ def apply_sentence_fixes(text: str, fixes: dict[str, dict[str, str]], key: str) 
                      if m.group(0).lower().replace("+", "") in words else m.group(0), text)
 
 
+@exiting_on_stop
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Re-check RUAccent stress of guessed words and homographs (LLMs)")
     parser.add_argument("source", type=Path, help="JSON list of Russian lines (text: str | list[str])")

@@ -14,6 +14,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from stt.llm import OpenRouterClient
+from utils.llm_route import LLMStop
 from stt.textfix import collapse_repeats
 from stt.types import Segment
 from stt.vad import Chunk
@@ -115,6 +116,8 @@ def fuse(
         )
         try:
             answer = client.chat_json(SYSTEM_PROMPT, prompt)
+        except LLMStop:
+            raise  # the subscription does not answer (or paying is not allowed): the run stops
         except RuntimeError as error:  # a refusal (S01E05: "content_filter" on every route) or a dead transport
             log.warning("fusion: chunks %d-%d keep the first recognition (%s)", ids[0], ids[-1], error)
             failed.append(start)

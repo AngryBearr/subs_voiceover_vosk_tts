@@ -36,6 +36,7 @@ from typing import Any
 from stt import progress
 from stt.llm import DEFAULT_MODEL, OpenRouterClient
 from stt.runner import load_json, save_json
+from utils.llm_route import LLMStop
 
 log = logging.getLogger("stt.translate")
 
@@ -364,6 +365,8 @@ def proofread_pass(
     def run(span: tuple[int, int]) -> list[dict[str, Any]]:
         try:
             return _proofread_batch(records, span[0], span[1], before_all, client, cards, glossary, context)
+        except LLMStop:
+            raise  # the subscription does not answer (or paying is not allowed): the run stops
         except Exception as error:  # noqa: BLE001 - the proofreading is a bonus: the translation stays as it is
             log.warning("Proofreading of lines %d-%d failed (%s): left as translated", span[0] + 1, span[1], error)
             return []

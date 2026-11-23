@@ -45,12 +45,14 @@
     "model": "openai/gpt-6-luna",
     "router": "openrouter",
     "fallback": false,
+    "subscription_fallback": {"openai/gpt-6.1-sol": "openai/gpt-6-luna"},
+    "subscription_fallback_after_s": 120,
     "stages": {
       "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
       "stress_screen": "openai/gpt-6-luna",
       "stress_proofread": "openai/gpt-6.1-sol",
       "translate_proofread": "openai/gpt-6.1-sol",
-      "cast": ["openrouter:openai/gpt-6-luna:online", "openrouter:anthropic/claude-haiku-5.5:online"]
+      "cast": ["openai/gpt-6.1-sol", "openrouter:openai/gpt-6-luna:online", "openrouter:anthropic/claude-haiku-5.5:online"]
     }
   },
   "voice_bank": {"enabled": true, "identities": false, "stitch": false},
