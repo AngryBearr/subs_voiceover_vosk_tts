@@ -52,3 +52,16 @@ def message(missing: list[str]) -> str:
     return ("Missing environments for this run:\n  " + "\n  ".join(missing) + "\n"
             "Fix: in this checkout run `bash scripts/link_shared.sh` (links the shared environments), or install the "
             "environment (`bash scripts/setup_envs.sh <name>`), or switch the setting off.")
+
+
+def opencode_report() -> tuple[str, bool]:
+    """``(text, pinned)``: the OpenCode binary and version the pipeline will use; a warning text when it is not pinned.
+
+    Not pinned means the pipeline follows whatever ``opencode`` is installed, which updates itself. Only warns.
+    """
+    from utils import opencode_pin
+
+    text, pinned = opencode_pin.describe()
+    if pinned:
+        return text, True
+    return f"{text}; not pinned, run `python -m utils.opencode_pin` to keep this version for the pipeline", False

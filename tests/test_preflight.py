@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from stt import preflight
 from stt.run import REPO_ROOT, STAGES
 
@@ -73,3 +75,13 @@ def test_link_script_lists_the_same_items() -> None:
     items = re.search(r"^ITEMS=\((.*)\)$", script, re.M)
     assert items is not None
     assert tuple(items.group(1).split()) == preflight.SHARED_ITEMS
+
+
+def test_opencode_report_warns_without_a_pinned_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from utils import opencode_pin
+
+    monkeypatch.setattr(opencode_pin, "describe", lambda: ("/usr/bin/opencode (v2.4.0, PATH)", False))
+    text, pinned = preflight.opencode_report()
+    assert not pinned and "python -m utils.opencode_pin" in text
+    monkeypatch.setattr(opencode_pin, "describe", lambda: ("/s/current/opencode (v2.4.0, pinned)", True))
+    assert preflight.opencode_report() == ("/s/current/opencode (v2.4.0, pinned)", True)

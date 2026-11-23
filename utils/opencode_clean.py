@@ -26,11 +26,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from utils import opencode_pin
+
 
 log = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRESET_ROOT = REPO_ROOT / "config" / "opencode_clean"
-DEFAULT_REQUIRED_MODELS: dict[str, set[str]] = {"openai/gpt-5.6-luna": {"medium"}}
+DEFAULT_REQUIRED_MODELS: dict[str, set[str]] = {"openai/gpt-6-luna": {"medium"}}
 PREFIX = "opencode:"  # a model id "opencode:openai/gpt-6-luna" is sent through the OpenCode subscription
 # pipeline reasoning names -> OpenCode variants ("default" / None: the model's own default)
 VARIANTS = {"off": "none", "minimal": "low", "max": "xhigh"}
@@ -39,10 +41,15 @@ VARIANTS = {"off": "none", "minimal": "low", "max": "xhigh"}
 class OpenCodeError(RuntimeError):
     """OpenCode refused or failed a request."""
 
-    def __init__(self, message: str, transient: bool = False, quota: bool = False) -> None:
+    def __init__(self, message: str, transient: bool = False, quota: bool = False, status: int | None = None,
+                 exhausted: bool = False, empty: bool = False, spent: float = 0.0) -> None:
         super().__init__(message)
         self.transient = transient
         self.quota = quota  # the subscription's usage limit is reached: retrying before its reset is pointless
+        self.status = status  # the HTTP status of OpenCode's answer, when there was one
+        self.exhausted = exhausted  # still failing after the whole retry budget (``generate_with_retry``)
+        self.empty = empty  # the answer had no text (retried a couple of times, never "the subscription is down")
+        self.spent = spent  # seconds of the retry budget used (pauses + requests) when ``exhausted``
 
 
 def is_quota_error(detail: str) -> bool:
@@ -77,6 +84,9 @@ def provider_models(payload: Any, provider: str) -> list[str]:
 
 
 CONFIG_SETTLE_S = 10.0  # how long a healthy server may still be reading its config
+WARMUP_TIMEOUT_S = 60.0  # how long a fresh server may need before its first generation works
+WARMUP_POLL_S = 2.0
+WARMUP_PROMPT = "Reply with OK"
 
 
 def _free_port() -> int:
@@ -132,7 +142,7 @@ class CleanOpenCodeServer:
 
     def __init__(self, *, enable_length_tool: bool = False,
                  required_models: Optional[dict[str, set[str]]] = None,
-                 timeout: float = 45.0) -> None:
+                 timeout: float = 45.0, binary: Optional[str] = None) -> None:
         if not isinstance(enable_length_tool, bool):
             raise TypeError("enable_length_tool must be bool")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
@@ -147,6 +157,8 @@ class CleanOpenCodeServer:
             raise TypeError("required_models must map model ids to variant sets")
         self.required_models = {model: set(variants) for model, variants in selected_models.items()}
         self.timeout = float(timeout)
+        self.binary = binary  # None: the binary chosen by ``opencode_pin.resolve_binary``
+        self.warmed: set[str] = set()  # providers whose first generation already worked on this server
         self.port = _free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
         self._process: Optional[subprocess.Popen[Any]] = None
@@ -175,6 +187,7 @@ class CleanOpenCodeServer:
             "OPENCODE_DISABLE_CLAUDE_CODE": "1",
             "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1",
             "OPENCODE_PURE": "1",
+            "OPENCODE_DISABLE_AUTOUPDATE": "1",  # the pipeline's OpenCode must not change under a running job
             "OPENCODE_SERVER_PASSWORD": self._password,
             "OPENCODE_SERVER_USERNAME": "opencode",
         })
@@ -263,12 +276,13 @@ class CleanOpenCodeServer:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
             quota = is_quota_error(detail)
             transient = not quota and (exc.code == 429 or exc.code >= 500 or is_model_missing_answer(exc.code, detail))
-            raise OpenCodeError(f"HTTP {exc.code}: {detail}", transient=transient, quota=quota) from exc
+            raise OpenCodeError(f"HTTP {exc.code}: {detail}", transient=transient, quota=quota,
+                                status=exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise OpenCodeError(f"{type(exc).__name__}: {exc}", transient=True) from exc
         text = (data.get("data") or {}).get("text") if isinstance(data, dict) else None
         if not isinstance(text, str):
-            raise OpenCodeError("answer without text", transient=True)
+            raise OpenCodeError("answer without text", transient=True, empty=True)
         return text
 
     def _verify_metadata(self) -> None:
@@ -339,6 +353,47 @@ class CleanOpenCodeServer:
             return False
         return False
 
+    def _binary_path(self) -> str:
+        if self.binary:
+            return self.binary
+        path, source = opencode_pin.resolve_binary()
+        if path is None:
+            raise RuntimeError("opencode binary not found (install it, or pin one: python -m utils.opencode_pin)")
+        opencode_pin.note_binary(path, source)
+        return str(path)
+
+    def warm_up(self, model: str, timeout: float = WARMUP_TIMEOUT_S, poll: float = WARMUP_POLL_S) -> bool:
+        """Wait until a fresh server really answers for ``model``'s provider (once per provider and server).
+
+        A freshly started OpenCode 2.x lists its models at once but answers the first generations with HTTP 404
+        ``ModelNotFoundError`` or 502 "authentication" for up to ~13 s; no status endpoint flips at that moment (checked:
+        ``/api/provider``, ``/api/model``, ``/api/credential``, ``/api/integration``), so a tiny generation is the probe.
+        Returns False when it never answered: the server is handed out anyway and the callers' retries take over.
+        """
+        model = model.removeprefix(PREFIX)
+        provider = model.split("/", 1)[0]
+        if provider in self.warmed or self.api_version != 2:
+            return True
+        start = time.monotonic()
+        while True:
+            try:
+                self.generate(WARMUP_PROMPT, model, None, timeout=60.0)
+            except OpenCodeError as exc:
+                if exc.quota:
+                    log.warning("OpenCode warm-up for %s stopped: %s", provider, exc)
+                    self.warmed.add(provider)
+                    return False
+                log.debug("OpenCode warming up (%s): %s", provider, exc)
+                if time.monotonic() - start + poll > timeout:
+                    log.warning("OpenCode did not answer for %s within %.0f s; carrying on", provider, timeout)
+                    self.warmed.add(provider)
+                    return False
+                time.sleep(poll)
+            else:
+                log.info("OpenCode warming up (%s): ready after %.1f s", provider, time.monotonic() - start)
+                self.warmed.add(provider)
+                return True
+
     def start(self) -> None:
         if self._process is not None:
             return
@@ -347,7 +402,7 @@ class CleanOpenCodeServer:
         try:
             self._make_config()
             assert self._neutral_dir is not None
-            command = ["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(self.port)]
+            command = [self._binary_path(), "serve", "--hostname", "127.0.0.1", "--port", str(self.port)]
             self._process = subprocess.Popen(command, cwd=str(self._neutral_dir), env=self._environment(),
                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + self.timeout
@@ -415,6 +470,7 @@ def shared_server(model: str) -> CleanOpenCodeServer:
         if model not in server.checked_models:
             server.require_models({model.removeprefix(PREFIX): set()})
             server.checked_models.add(model)
+        server.warm_up(model)
         return server
 
 
@@ -436,31 +492,54 @@ def subscription_retry_budget() -> float:
         return SUBSCRIPTION_RETRY_S
 
 
+EMPTY_ANSWER_RETRIES = 2  # an answer without text is retried this often, then fails that request only
+EMPTY_ANSWER_PAUSE_S = 2.0
+
+
 def generate_with_retry(get_server: Callable[[], Any], prompt: str, model: str, variant: Optional[str],
                         timeout: float, retry_s: float) -> str:
     """``generate`` on the subscription, retried while it is busy (shared by ``stt.llm`` and ``voiceover.llm``).
 
     Transient failures (429, 5xx, connection errors, the transient 404 ModelNotFound, a model list that does not
-    show the model for a moment) wait 5, 15, 30, ... s until ``retry_s`` of waiting is used up, then raise a
-    non-transient ``OpenCodeError``. A quota error or a refusal is raised at once. ``get_server`` is called for
-    every try (the model is only marked as checked once it was found).
+    show the model for a moment, a server that cannot start or log in yet) wait 5, 15, 30, ... s until ``retry_s``
+    is used up, then raise an ``OpenCodeError`` with ``exhausted=True``. The budget counts the pauses (nominal) plus the
+    measured duration of the failed requests; a request in flight is never cut short by it. A quota error or a
+    refusal is raised at once. An answer without text is retried ``EMPTY_ANSWER_RETRIES`` times, then raised as a
+    plain failure of that request (not ``exhausted``). ``get_server`` is called for every try (the model is only
+    marked as checked once it was found).
     """
-    waited = 0.0
+    spent = 0.0
+    empty = 0
     for attempt in range(1_000):
+        started = time.monotonic()
         try:
-            return str(get_server().generate(prompt, model, variant, timeout=timeout))
+            try:
+                server = get_server()
+            except (OpenCodeError, ModelNotOffered):
+                raise
+            except RuntimeError as exc:  # the server did not start or the login failed: it may work in a moment
+                raise OpenCodeError(f"OpenCode server not ready: {exc}", transient=True) from exc
+            return str(server.generate(prompt, model, variant, timeout=timeout))
         except (OpenCodeError, ModelNotOffered) as exc:
             transient = isinstance(exc, ModelNotOffered) or (exc.transient and not exc.quota)
             if not transient:
                 raise
-            remaining = retry_s - waited
-            if remaining <= 0:
-                raise OpenCodeError(f"subscription not answering after {waited:.0f} s: {exc}") from exc
-            pause = min(SUBSCRIPTION_BACKOFF_S[min(attempt, len(SUBSCRIPTION_BACKOFF_S) - 1)], remaining)
+            spent += max(0.0, time.monotonic() - started)
+            if isinstance(exc, OpenCodeError) and exc.empty:
+                empty += 1
+                if empty > EMPTY_ANSWER_RETRIES:
+                    raise OpenCodeError(f"{exc} (after {empty} tries)", empty=True) from exc
+                pause = EMPTY_ANSWER_PAUSE_S
+            else:
+                remaining = retry_s - spent
+                if remaining <= 0:
+                    raise OpenCodeError(f"subscription not answering after {spent:.0f} s: {exc}", exhausted=True,
+                                        spent=spent) from exc
+                pause = min(SUBSCRIPTION_BACKOFF_S[min(attempt, len(SUBSCRIPTION_BACKOFF_S) - 1)], remaining)
             log.warning("subscription busy (%s), retry in %.0f s", exc, pause)
             time.sleep(pause)
-            waited += pause
-    raise OpenCodeError("subscription not answering")
+            spent += pause
+    raise OpenCodeError("subscription not answering", exhausted=True, spent=spent)
 
 
 def main() -> int:

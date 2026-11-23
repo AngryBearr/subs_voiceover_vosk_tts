@@ -186,6 +186,15 @@ def _subscription(state: dict[str, Any]) -> str:
     return f"{models[0]} отвечает"
 
 
+def _opencode_binary(state: dict[str, Any]) -> str:
+    from stt.preflight import opencode_report
+
+    text, pinned = opencode_report()
+    if not pinned:
+        raise RuntimeError(text)
+    return text
+
+
 CHECKS = [
     Check("Видеокарта", _gpu),
     Check("ffmpeg", _ffmpeg),
@@ -193,6 +202,7 @@ CHECKS = [
     Check("Подготовка текста (числа, ударения)", _text),
     Check("Проверка речи (GigaAM)", _gigaam),
     Check("Ключ OpenRouter", _openrouter),
+    Check("OpenCode: какой файл и версия", _opencode_binary, required=False),
     Check("Подписка (opencode)", _subscription, required=False),
     Check("TeraTTS", _teratts, full_only=True),
     Check("Ударения на слух (TeraAnaly)", _stress, full_only=True),
