@@ -257,8 +257,9 @@ class Episode:
 
         The model id gets its route (``utils.llm_route``): models matching a pattern of
         ``llm.opencode`` (e.g. "openai/*") go through the OpenCode login of a subscription, with
-        ``llm.router`` ("openrouter", or a list tried in order) as fallback unless
-        ``llm.fallback`` is false; the rest go to ``llm.router``. Ids that already carry a route
+        ``llm.router`` ("openrouter", or a list tried in order) as a per-request fallback only when
+        ``llm.fallback`` is true (default false: the subscription is retried, never silently replaced by a paid
+        router); the rest go to ``llm.router``. Ids that already carry a route
         keep it.
         """
         llm = self.config.get("llm") or {"model": self.config.get("llm_model", "openai/gpt-6-luna")}
@@ -298,7 +299,7 @@ class Episode:
         routers = [router] if isinstance(router, str) else list(router)
         routers = [r for r in routers if self._known_router(r)] or ["openrouter"]
         if any(fnmatch.fnmatchcase(name, p) for p in llm.get("opencode") or []):
-            return with_route(name, ["opencode", *routers] if llm.get("fallback", True) else ["opencode"])
+            return with_route(name, ["opencode", *routers] if llm.get("fallback", False) else ["opencode"])
         return with_route(name, routers)
 
     def stamp(self, stage: str) -> Path:
@@ -1579,20 +1580,36 @@ def subscription_models(config: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(models))
 
 
+PROBE_TRIES = 3
+PROBE_PAUSE_S = 10.0  # between probes of the subscription (10 s, then 20 s)
+
+
 def check_subscription(config: dict[str, Any]) -> bool:
-    """Ask the subscription once before the episodes; False (with a warning) when it does not answer.
+    """Ask the subscription before the episodes; False (with a warning) when it does not answer.
 
-    With ``llm.fallback`` false the run stops here instead of failing at its first LLM step.
+    The probe is repeated ``PROBE_TRIES`` times: OpenCode sometimes answers "model not found" for a moment.
+    A model missing from the OpenCode list (renamed by an update) is named with the available ones.
+    With ``llm.fallback`` false (the default) the run stops here instead of failing at its first LLM step.
     """
-    from stt.llm import subscription_error
+    from stt.llm import SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S, subscription_error
 
+    llm = config.get("llm") or {}
+    os.environ[SUBSCRIPTION_RETRY_ENV] = str(llm.get("subscription_retry_s", SUBSCRIPTION_RETRY_S))
     for model in subscription_models(config):
-        error = subscription_error(model)
+        error: str | None = None
+        for attempt in range(PROBE_TRIES):
+            error = subscription_error(model)
+            if error is None:
+                break
+            if attempt + 1 < PROBE_TRIES:
+                log.warning("subscription probe for %s failed (%s); trying again", model, error)
+                time.sleep(PROBE_PAUSE_S * (attempt + 1))
         if error is None:
             continue
-        if not (config.get("llm") or {}).get("fallback", True):
-            raise SystemExit(f"{SUBSCRIPTION_DOWN}: {error}")
-        router = (config.get("llm") or {}).get("router", "openrouter")
+        if not llm.get("fallback", False):
+            raise SystemExit(f"{SUBSCRIPTION_DOWN}: {error}. Nothing was paid; fix it and run again. / "
+                             f"Подписка не отвечает, ничего не оплачено; исправьте и запустите снова.")
+        router = llm.get("router", "openrouter")
         log.warning("%s: %s. LLM steps with %s go through %s instead and cost money.", SUBSCRIPTION_DOWN, error,
                     model, " / ".join([router] if isinstance(router, str) else router))
         return False

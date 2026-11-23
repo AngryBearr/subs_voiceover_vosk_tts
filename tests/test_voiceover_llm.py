@@ -192,13 +192,14 @@ def test_opencode_model_goes_through_the_opencode_login(tmp_path: Path, monkeypa
             return str(answer)
 
     monkeypatch.setattr(opencode, "shared_server", lambda model: _Server())
+    monkeypatch.setattr(opencode.time, "sleep", lambda s: None)
     config = LLMConfig(provider="openrouter", model="opencode:openai/gpt-6-luna", api_key_env="NO_SUCH_KEY",
                        reasoning="high", cache_dir=tmp_path)
     client = LLMClient(config, sleep=lambda _: None)
     result = client.complete_json("sys", "user", prompt_version="v1", tag="t")
     assert result.content == {"ok": True} and result.model == "opencode:openai/gpt-6-luna"
     assert calls == [("sys\n\nuser", "openai/gpt-6-luna", "high")] * 2
-    assert client.stats()["calls_made"] == 2
+    assert client.stats()["calls_made"] == 1  # the 429 was retried inside the transport
 
 
 def test_opencode_refusal_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,13 +243,42 @@ def test_route_hands_over_to_the_paid_router(tmp_path: Path, monkeypatch: pytest
         return call
 
     monkeypatch.setattr(opencode, "shared_server", lambda model: _Down())
+    monkeypatch.setattr(opencode.time, "sleep", lambda s: None)
+    monkeypatch.setenv(opencode.SUBSCRIPTION_RETRY_ENV, "20")
     monkeypatch.setattr(vllm, "openai_transport", fake_openai)
     monkeypatch.setattr(vllm, "load_api_key", lambda name, env_file=None: "key")
     client = LLMClient(LLMConfig(model="opencode+openrouter:openai/gpt-6.1-sol", reasoning="high",
                                  cache_dir=tmp_path), sleep=lambda _: None)
     assert client.complete_json("sys", "user", prompt_version="v1", tag="t").content == {"a": 1}
     assert routed == [("https://openrouter.ai/api/v1", "openai/gpt-6.1-sol")]
-    assert client.stats()["calls_made"] == vllm.FAILOVER_AFTER  # two transient failures were retried first
+    assert client.stats()["calls_made"] == 1  # the subscription's own retries happen inside the transport
+    assert client.complete_json("sys", "user2", prompt_version="v1", tag="t").content == {"a": 1}
+    assert len(routed) == 2  # per request: the subscription is tried first again, no permanent switch
+
+
+def test_busy_subscription_is_retried_without_a_paid_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import utils.opencode_clean as opencode
+
+    answers: list[Any] = [opencode.OpenCodeError("HTTP 404: ModelNotFoundError", transient=True),
+                          opencode.ModelNotOffered("list refreshing"), '{"ok": true}']
+    sleeps: list[float] = []
+
+    class _Server:
+        def generate(self, *args: Any, **kwargs: Any) -> str:
+            item = answers.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return str(item)
+
+    monkeypatch.setattr(opencode, "shared_server", lambda model: _Server())
+    monkeypatch.setattr(opencode.time, "sleep", sleeps.append)
+    client = LLMClient(LLMConfig(model="opencode:openai/gpt-6-luna", cache_dir=tmp_path), sleep=lambda _: None)
+    assert client.complete_json("sys", "user", prompt_version="v1", tag="t").content == {"ok": True}
+    assert sleeps == [5.0, 15.0]
+    monkeypatch.setenv(opencode.SUBSCRIPTION_RETRY_ENV, "10")
+    answers[:] = [opencode.OpenCodeError("HTTP 503", transient=True)] * 10
+    with pytest.raises(Exception, match="subscription not answering"):  # nothing else to fall back to
+        client.complete_json("sys", "other", prompt_version="v1", tag="t")
 
 
 def test_route_prefix_parsing() -> None:

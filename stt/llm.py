@@ -3,7 +3,8 @@
 By default requests go to OpenRouter. Transports in front of the model id choose others
 (``utils.llm_route``): ``opencode:`` is the OpenCode login of a ChatGPT subscription (no API
 cost, no token counts), ``openrouter:`` the paid router;
-``opencode+openrouter:openai/gpt-6.1-sol`` falls back to OpenRouter when OpenCode fails.
+``opencode+openrouter:openai/gpt-6.1-sol`` falls back to OpenRouter for a request when OpenCode fails.
+The subscription itself is retried with a growing pause for ``SUBSCRIPTION_RETRY_S`` before that.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ from stt import progress
 from stt.runner import REPO_ROOT
 from utils.atomic_io import write_text_atomic
 from utils.llm_route import ROUTERS, router_model, split_route
-from utils.opencode_clean import OpenCodeError, flatten_messages, shared_server
+from utils.opencode_clean import (SUBSCRIPTION_BACKOFF_S, SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S,  # noqa: F401
+                                  ModelNotOffered, OpenCodeError, flatten_messages, generate_with_retry,
+                                  shared_server, subscription_retry_budget)
 
 DEFAULT_MODEL = "openai/gpt-6-luna"
 
@@ -97,12 +100,15 @@ class OpenRouterClient:
         api_key: str | None = None,
         timeout_s: float = 300.0,
         reasoning: str | None = None,
+        subscription_retry_s: float | None = None,
     ) -> None:
         self.model = model
         self.reasoning = reasoning  # off | minimal | low | medium | high; None: model default
         transports, self.bare_model = split_route(model)
         self.transports = transports or ["openrouter"]
-        self._active = 0  # index of the transport in use; moves on when one fails for good
+        self._answered_by = self.transports[0]  # the transport that gave the last answer
+        self.subscription_retry_s = (float(subscription_retry_s) if subscription_retry_s is not None
+                                     else subscription_retry_budget())
         self._api_keys: dict[str, str] = {}
         if api_key:
             self._api_keys[self.transports[0]] = api_key
@@ -114,7 +120,7 @@ class OpenRouterClient:
 
     @property
     def transport(self) -> str:
-        return self.transports[self._active]
+        return self._answered_by
 
     def _key(self, router: str) -> str:
         if router not in self._api_keys:
@@ -140,9 +146,13 @@ class OpenRouterClient:
             return json.loads(response.read().decode("utf-8"))
 
     def _generate(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        """The OpenCode answer in the OpenRouter response shape (no usage: the subscription pays)."""
-        text = shared_server(self.bare_model).generate(flatten_messages(messages), self.bare_model, self.reasoning,
-                                                       timeout=self.timeout_s)
+        """The OpenCode answer in the OpenRouter response shape (no usage: the subscription pays).
+
+        A transient failure (rate limit, 5xx, the model list refreshing) is retried here with a growing pause
+        until ``subscription_retry_s`` of waiting is used up; a quota error is not retried.
+        """
+        text = generate_with_retry(lambda: shared_server(self.bare_model), flatten_messages(messages),
+                                   self.bare_model, self.reasoning, self.timeout_s, self.subscription_retry_s)
         return {"model": "opencode:" + self.bare_model,
                 "choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
 
@@ -158,7 +168,7 @@ class OpenRouterClient:
         """Send one chat request and return the parsed JSON answer.
 
         Retries on HTTP/JSON errors; when a transport keeps failing, the next one of the model's
-        route takes over for this and all later requests of the client.
+        route takes over for this request only (the next request tries the first transport again).
 
         Inside a tracked ``stt.run`` stage every answer is also kept under ``<episode>/.partial/llm/<stage>/``
         and reused when the same request comes again, so a stage that was stopped does not pay twice.
@@ -191,18 +201,22 @@ class OpenRouterClient:
         return folder / f"{hashlib.sha256(request.encode('utf-8')).hexdigest()}.json"
 
     def _ask(self, system: str, user: str, temperature: float, max_tokens: int, retries: int) -> Any:
-        while True:
-            active = self._active
+        for index, transport in enumerate(self.transports):
             try:
-                return self._chat_once(self.transports[active], system, user, temperature, max_tokens, retries)
+                answer = self._chat_once(transport, system, user, temperature, max_tokens, retries)
             except RuntimeError as exc:
-                if active + 1 >= len(self.transports):
+                if index + 1 >= len(self.transports):
+                    if transport == "opencode":
+                        log.error("The subscription is not answering, nothing was paid for %s; run again later. / "
+                                  "Подписка не отвечает, за %s ничего не оплачено; запустите позже. (%s)",
+                                  self.bare_model, self.bare_model, exc)
                     raise
-                with self._lock:
-                    if self._active == active:
-                        self._active = active + 1
-                        log.warning("LLM %s via %s failed (%s); using %s from now on", self.bare_model,
-                                    self.transports[active], exc, self.transports[active + 1])
+                log.warning("LLM %s via %s failed (%s); this request goes to %s", self.bare_model, transport, exc,
+                            self.transports[index + 1])
+                continue
+            self._answered_by = transport
+            return answer
+        raise RuntimeError("no transport")  # unreachable: transports is never empty
 
     def _chat_once(self, transport: str, system: str, user: str, temperature: float, max_tokens: int,
                    retries: int) -> Any:
@@ -252,16 +266,16 @@ class OpenRouterClient:
         raise RuntimeError(f"LLM request to {self.bare_model} via {transport} failed: {last_error}")
 
 
-def subscription_error(model: str, timeout_s: float = 90.0) -> str | None:
+def subscription_error(model: str, timeout_s: float = 90.0, retry_s: float = 0.0) -> str | None:
     """None when the OpenCode login of the subscription answers for ``model``, else the reason.
 
     One tiny request; an expired login ("authentication token is expired") would otherwise only
     show up as LLM steps falling back to a paid router in the middle of a run.
     """
-    client = OpenRouterClient("opencode:" + split_route(model)[1], timeout_s=timeout_s)
+    client = OpenRouterClient("opencode:" + split_route(model)[1], timeout_s=timeout_s, subscription_retry_s=retry_s)
     try:
         client.chat_json("Answer in JSON.", 'Return {"ok": true}', max_tokens=50, retries=1)
     except Exception as exc:  # any failure means the subscription route is not usable now
-        return str(exc)[:300]
+        return str(exc)[:2000 if isinstance(exc, ModelNotOffered) else 300]  # keep the list of available models
     return None
 

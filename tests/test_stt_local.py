@@ -314,7 +314,7 @@ class RunTest(unittest.TestCase):
                                                   "openai/gpt-6.1-sol", "openai/gpt-6-luna:online"]}}}
             with mock.patch("stt.cast.main", side_effect=fake_main):
                 self.assertTrue(ep._find_cast())
-            self.assertIn("opencode+openrouter:openai/gpt-6.1-sol,openrouter:openai/gpt-6-luna:online",
+            self.assertIn("opencode:openai/gpt-6.1-sol,openrouter:openai/gpt-6-luna:online",
                           calls[1])  # the subscription reads Wikipedia; web search only by OpenRouter
             ep.cast.unlink()
             with mock.patch("stt.cast.main", side_effect=RuntimeError("no web")):
@@ -376,18 +376,21 @@ class RunTest(unittest.TestCase):
         legacy = Episode(Path("ep.mkv"), Path("out"), args, {"llm_model": "x/y"})
         self.assertEqual(legacy.llm("glossary"), "openrouter:x/y")
         routed = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
-            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": "openrouter",
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": "openrouter", "fallback": True,
             "stages": {"stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "openrouter:google/g"]}}})
         self.assertEqual(routed.llm("translate"), "opencode+openrouter:openai/gpt-6-luna")
         self.assertEqual(routed.llm("stress"), ["opencode+openrouter:openai/gpt-6.1-sol",
                                                 "openrouter:anthropic/claude-sonnet-5.5", "openrouter:google/g"])
         chain = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
-            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": ["openrouter"]}})
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": ["openrouter"], "fallback": True}})
         self.assertEqual(chain.llm("fuse"), "opencode+openrouter:openai/gpt-6-luna")
         self.assertEqual(chain.llm("stress"), "opencode+openrouter:openai/gpt-6-luna")
         no_fallback = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
             "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "fallback": False}})
         self.assertEqual(no_fallback.llm("fuse"), "opencode:openai/gpt-6-luna")
+        default = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
+            "model": "openai/gpt-6-luna", "opencode": ["openai/*"], "router": "openrouter"}})
+        self.assertEqual(default.llm("fuse"), "opencode:openai/gpt-6-luna")  # no paid route unless fallback is on
         self.assertEqual(chain.route("openai/gpt-6-luna:online"), "openrouter:openai/gpt-6-luna:online")  # web search
         self.assertEqual(chain.route("openrouter:anthropic/claude-haiku-5.5:online"),
                          "openrouter:anthropic/claude-haiku-5.5:online")
@@ -414,8 +417,7 @@ class RunTest(unittest.TestCase):
             client = stt.llm.OpenRouterClient("opencode+openrouter:openai/gpt-6.1-sol")
             self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
             self.assertEqual(client.chat_json("s", "u"), {"ok": 1})
-        self.assertEqual(posted, [("openrouter", "openai/gpt-6.1-sol")] * 2)
-        self.assertEqual(client.transport, "openrouter")
+        self.assertEqual(posted, [("openrouter", "openai/gpt-6.1-sol")] * 2)  # per request, not for good
 
     def test_router_without_the_model_is_not_retried(self) -> None:
         import io
@@ -485,7 +487,7 @@ class RunTest(unittest.TestCase):
         args = argparse.Namespace(season_glossary=None, force=None, until="dub")
         old = Episode(Path("ep.mkv"), Path("out"), args, {"llm": {
             "model": "openai/gpt-6-luna", "opencode": ["openai/*", "opencode-go/*"],
-            "router": ["orcarouter", "openrouter"],
+            "router": ["orcarouter", "openrouter"], "fallback": True,
             "stages": {"stress": ["orcarouter+openrouter:anthropic/x", "orcarouter:anthropic/y",
                                   "opencode-go/gemini-4-argon"]}}})
         self.assertEqual(old.llm("fuse"), "opencode+openrouter:openai/gpt-6-luna")
@@ -877,15 +879,54 @@ class SubscriptionCheckTest(unittest.TestCase):
 
         from stt import run
 
+        paid = {"llm": {**self.CONFIG["llm"], "fallback": True}}
         with mock.patch("stt.llm.subscription_error", return_value=None):
             self.assertTrue(run.check_subscription(self.CONFIG))
         with mock.patch("stt.llm.subscription_error", return_value="token is expired"), \
-                self.assertLogs("stt.run", "WARNING") as logs:
-            self.assertFalse(run.check_subscription(self.CONFIG))
-        self.assertIn("opencode auth login", logs.output[0])
+                mock.patch.object(run.time, "sleep"), self.assertLogs("stt.run", "WARNING") as logs:
+            self.assertFalse(run.check_subscription(paid))
+        self.assertIn("opencode auth login", logs.output[-1])
         strict = {"llm": {**self.CONFIG["llm"], "fallback": False}}
-        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), self.assertRaises(SystemExit):
+        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), \
+                mock.patch.object(run.time, "sleep"), self.assertRaises(SystemExit):
             run.check_subscription(strict)
+        with mock.patch("stt.llm.subscription_error", return_value="token is expired"), \
+                mock.patch.object(run.time, "sleep"), self.assertRaises(SystemExit):
+            run.check_subscription(self.CONFIG)  # default: no paid route
+
+    def test_probe_is_retried_and_a_renamed_model_is_named(self) -> None:
+        from unittest import mock
+
+        from stt import run
+
+        answers = iter(["HTTP 404: ModelNotFoundError", None, None])
+        with mock.patch("stt.llm.subscription_error", side_effect=lambda model: next(answers)) as probe, \
+                mock.patch.object(run.time, "sleep") as sleep:
+            self.assertTrue(run.check_subscription(self.CONFIG))
+        self.assertEqual(probe.call_count, 3)  # two probes for the first model, one for the second
+        sleep.assert_called_once_with(run.PROBE_PAUSE_S)
+        missing = ("OpenCode does not offer openai/gpt-6.1-sol [] with this login; "
+                   "available: openai/gpt-6-sol, openai/gpt-6-luna")
+        with mock.patch("stt.llm.subscription_error", return_value=missing) as probe, \
+                mock.patch.object(run.time, "sleep"), self.assertRaises(SystemExit) as stop:
+            run.check_subscription(self.CONFIG)
+        self.assertEqual(probe.call_count, run.PROBE_TRIES)
+        self.assertIn("openai/gpt-6.1-sol", str(stop.exception))
+        self.assertIn("openai/gpt-6-sol", str(stop.exception))
+
+    def test_missing_model_error_lists_the_provider_models(self) -> None:
+        from utils.opencode_clean import CleanOpenCodeServer, ModelNotOffered
+
+        server = CleanOpenCodeServer.__new__(CleanOpenCodeServer)
+        server.api_version = 2
+        server._request = lambda path: {"data": [  # type: ignore[method-assign]
+            {"providerID": "openai", "id": "gpt-6-sol", "variants": []},
+            {"providerID": "openai", "id": "gpt-6-luna", "variants": []},
+            {"providerID": "other", "id": "x", "variants": []}]}
+        with self.assertRaises(ModelNotOffered) as caught:
+            server.require_models({"openai/gpt-6.1-sol": set()})
+        self.assertIn("available: openai/gpt-6-luna, openai/gpt-6-sol", str(caught.exception))
+        server.require_models({"openai/gpt-6-sol": set()})
 
 
 class TurnEvalTest(unittest.TestCase):

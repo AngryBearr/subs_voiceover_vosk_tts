@@ -44,6 +44,7 @@
   "llm": {
     "model": "openai/gpt-6-luna",
     "router": "openrouter",
+    "fallback": false,
     "stages": {
       "stress": ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5", "google/gemini-4-argon"],
       "stress_screen": "openai/gpt-6-luna",

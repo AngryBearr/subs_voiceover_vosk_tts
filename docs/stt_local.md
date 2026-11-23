@@ -105,10 +105,12 @@ subtitles; each engine's run adds its track. `"separate"` writes `<name>.ru.<eng
 engine, each with a full copy of the video. The mixed WAV (~0.5 GB per episode and engine) is
 deleted once encoded to AAC unless `"keep_wav": true`.
 
-Before the episodes `stt.run` asks the OpenCode subscription once (`llm.opencode` models): an
-expired login is logged as a warning (the LLM steps then go through the paid router; with
-`"fallback": false` the run stops instead) and shown in the UI status, as is a fallback in the
-middle of a run. A stage that runs out of GPU memory (another program on the card) is started
+Before the episodes `stt.run` asks the OpenCode subscription (`llm.opencode` models): the
+login is probed up to 3 times (10 and 20 s apart: OpenCode sometimes answers "model not found" for a
+moment while it refreshes its model list). If it still fails (expired login, or the model was renamed
+by an OpenCode update: the message names it and lists the provider's available models), the run stops;
+only with `"fallback": true` it is logged as a warning and the LLM steps go through the paid router.
+A stage that runs out of GPU memory (another program on the card) is started
 again after a minute, up to twice; ASR with half the batch size.
 
 Several engines in one run: `stt.run ... --engine f5,teratts,vosk` (the UI does this) goes
@@ -241,7 +243,7 @@ e.g. `opencode-go/gemini-4-argon` -> `google/gemini-4-argon`): the OpenCode requ
 id, the OpenRouter request gets the mapped one. A Go model that is not in the table has no
 OpenRouter id: that transport fails for good and nothing is sent to OpenRouter. When the Go
 5-hour usage limit is used up OpenCode answers HTTP 502 "usage limit reached"; this is a
-permanent failure of the transport, so the paid fallback takes over at once. A model with no
+permanent failure of the transport, so the paid fallback (if turned on) takes over at once for that request. A model with no
 paid fallback on purpose is written with an explicit `opencode:` prefix (`opencode:openai/gpt-6-astra`
 costs $10/$50 per 1M tokens on OpenRouter); a voter that does not answer is left out of the vote.
 
@@ -265,9 +267,13 @@ Where requests go (`utils/llm_route.py`): transports in front of a model id, tri
 `stt.run` adds them from the config:
 
 - models matching a pattern of `llm.opencode` (default `["openai/*"]`) go through OpenCode
-  (a ChatGPT subscription or OpenCode Go), so they cost nothing beyond the subscription; with
-  `llm.fallback` (default true) the paid router takes over when OpenCode fails for good or 3
-  times in a row (`opencode+openrouter:openai/gpt-6.1-sol`);
+  (a ChatGPT subscription or OpenCode Go), so they cost nothing beyond the subscription. The subscription is retried with growing pauses (5, 15, 30, 60, 120, 240 s; `llm.subscription_retry_s`,
+  default 600 s in total) on rate limits, 5xx, connection errors and the transient HTTP 404
+  `ModelNotFoundError`; a usage-limit error is not retried. `llm.fallback` (default **false**: no silent paid
+  route) lets the paid router take over for one request only when the subscription still fails after that
+  (`opencode+openrouter:openai/gpt-6.1-sol`); the next request tries the subscription first again. With
+  fallback off the stage fails with "subscription not answering, nothing was paid, run again later", and the
+  answers already obtained stay in `.partial/llm`;
 - all other models go to `llm.router` (`openrouter`, key `OPENROUTER_API_KEY`); router names that
   no longer exist (an old `orcarouter`) are ignored with a warning;
 - an id that already has a route keeps it (`openrouter:google/gemini-4-argon`).

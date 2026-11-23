@@ -153,13 +153,15 @@ def openai_transport(config: LLMConfig, api_key: str) -> Transport:
 
 def opencode_transport(config: LLMConfig) -> Transport:
     """Transport for the OpenCode login of a ChatGPT subscription (``config.model`` is the bare id)."""
-    from utils.opencode_clean import OpenCodeError, flatten_messages, shared_server
+    import utils.opencode_clean as opencode
+    from utils.opencode_clean import OpenCodeError, flatten_messages
 
     def call(body: dict[str, Any]) -> dict[str, Any]:
         variant = None if config.reasoning == "default" else config.reasoning
-        try:
-            text = shared_server(config.model).generate(flatten_messages(body["messages"]), config.model, variant,
-                                                        timeout=config.timeout_sec)
+        try:  # a busy subscription is retried with a growing pause before the request fails
+            text = opencode.generate_with_retry(
+                lambda: opencode.shared_server(config.model), flatten_messages(body["messages"]), config.model,
+                variant, config.timeout_sec, opencode.subscription_retry_budget())
         except OpenCodeError as error:
             if error.quota:
                 raise LLMQuotaError(str(error)) from error
@@ -170,14 +172,12 @@ def opencode_transport(config: LLMConfig) -> Transport:
     return call
 
 
-FAILOVER_AFTER = 3  # transient failures in a row before the next transport of a route takes over
-
-
 def route_transport(config: LLMConfig, env_file: Path | None = None) -> Transport:
     """Transport for ``config.model``: its route prefix (``utils.llm_route``) or the configured provider.
 
-    With several transports (``opencode+openrouter:...``) a transport that fails for good, or
-    ``FAILOVER_AFTER`` times in a row, hands over to the next one for the rest of the run.
+    With several transports (``opencode+openrouter:...``, only when the route names a paid one) a transport that
+    fails (after the subscription's own retries) hands over to the next one for that request only; the next
+    request tries the first transport again.
     """
     from utils.llm_route import ROUTERS, router_model, split_route
 
@@ -198,35 +198,22 @@ def route_transport(config: LLMConfig, env_file: Path | None = None) -> Transpor
                 built[index] = openai_transport(routed, load_api_key(router.api_key_env, env_file))
         return built[index]
 
-    state = {"active": 0, "transient": 0}
-    lock = threading.Lock()
-
     def call(body: dict[str, Any]) -> dict[str, Any]:
-        while True:
-            active = state["active"]
+        for index, name in enumerate(names):
             request = {**body, "model": bare}
             try:
-                if names[active] != "opencode":
+                if name != "opencode":
                     request.pop("thinking", None)  # DeepSeek's field; not for OpenAI models on a router
                     mapped = router_model(bare)
-                    if mapped is None:  # permanent: hand over, never send an OpenCode Go id to a router
+                    if mapped is None:  # never send an OpenCode Go id to a router
                         raise LLMError(f"no OpenRouter id for {bare}")
                     request["model"] = mapped
-                response = transport(active)(request)
-                state["transient"] = 0
-                return response
+                return transport(index)(request)
             except Exception as error:  # noqa: BLE001 - any failure of a non-last transport hands over
-                last = active + 1 >= len(names)
-                transient = isinstance(error, LLMTransientError)
-                with lock:
-                    if transient and not last:
-                        state["transient"] += 1
-                    if last or (transient and state["transient"] < FAILOVER_AFTER):
-                        raise
-                    if state["active"] == active:
-                        state.update(active=active + 1, transient=0)
-                        log.warning("llm: %s via %s failed (%s); using %s from now on", bare, names[active],
-                                    error, names[active + 1])
+                if index + 1 >= len(names):
+                    raise
+                log.warning("llm: %s via %s failed (%s); this request goes to %s", bare, name, error, names[index + 1])
+        raise LLMError("no transport")  # unreachable: names is not empty
 
     return call
 

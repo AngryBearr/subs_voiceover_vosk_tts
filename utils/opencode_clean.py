@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import base64
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -23,9 +24,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
+log = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRESET_ROOT = REPO_ROOT / "config" / "opencode_clean"
 DEFAULT_REQUIRED_MODELS: dict[str, set[str]] = {"openai/gpt-5.6-luna": {"medium"}}
@@ -47,6 +49,31 @@ def is_quota_error(detail: str) -> bool:
     """An OpenCode answer saying the plan's usage limit is reached (OpenCode Go: "usage limit reached (5-hour,
     resets in 4h 23m)"); unlike a short rate limit it lasts hours."""
     return "usage limit" in detail.lower()
+
+
+def is_model_missing_answer(code: int, detail: str) -> bool:
+    """HTTP 404 ``ModelNotFoundError`` / "Model not found": OpenCode 2.x answers it for a while when its model list
+    refreshes, and the same model works again moments later, so it is not a permanent failure."""
+    lowered = detail.lower()
+    return code == 404 and ("modelnotfound" in lowered or "model not found" in lowered)
+
+
+class ModelNotOffered(RuntimeError):
+    """The login's model list does not contain the model (e.g. renamed by an OpenCode update)."""
+
+
+def provider_models(payload: Any, provider: str) -> list[str]:
+    """Ids ``provider/model`` the OpenCode model list (2.x ``/api/model`` or 1.x ``/provider``) offers for a provider."""
+    found: list[str] = []
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        found = [f"{provider}/{item.get('id')}" for item in payload["data"]
+                 if isinstance(item, dict) and item.get("providerID") == provider and item.get("id")]
+    else:
+        providers = payload.get("all") if isinstance(payload, dict) else payload
+        for item in providers if isinstance(providers, list) else []:
+            if isinstance(item, dict) and item.get("id") == provider and isinstance(item.get("models"), dict):
+                found = [f"{provider}/{name}" for name in item["models"]]
+    return sorted(found)
 
 
 CONFIG_SETTLE_S = 10.0  # how long a healthy server may still be reading its config
@@ -212,7 +239,10 @@ class CleanOpenCodeServer:
         for model, variants in models.items():
             available = _find_model_variants(payload, model)
             if available is None or not variants.issubset(available):
-                raise RuntimeError(f"OpenCode does not offer {model} {sorted(variants)} with this login")
+                offered = provider_models(payload, model.split("/", 1)[0]) if "/" in model else []
+                raise ModelNotOffered(
+                    f"OpenCode does not offer {model} {sorted(variants)} with this login"
+                    + (f"; available: {', '.join(offered)}" if offered else ""))
 
     def generate(self, prompt: str, model: str, variant: Optional[str] = None, timeout: float = 600.0) -> str:
         """One stateless generation (OpenCode 2.x): the model's text answer to ``prompt``."""
@@ -232,8 +262,8 @@ class CleanOpenCodeServer:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
             quota = is_quota_error(detail)
-            raise OpenCodeError(f"HTTP {exc.code}: {detail}", transient=not quota and (exc.code == 429 or exc.code >= 500),
-                                quota=quota) from exc
+            transient = not quota and (exc.code == 429 or exc.code >= 500 or is_model_missing_answer(exc.code, detail))
+            raise OpenCodeError(f"HTTP {exc.code}: {detail}", transient=transient, quota=quota) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise OpenCodeError(f"{type(exc).__name__}: {exc}", transient=True) from exc
         text = (data.get("data") or {}).get("text") if isinstance(data, dict) else None
@@ -391,6 +421,46 @@ def shared_server(model: str) -> CleanOpenCodeServer:
 def flatten_messages(messages: list[dict[str, str]]) -> str:
     """Chat messages as one prompt: the stateless route has no separate system role."""
     return "\n\n".join(m["content"] for m in messages if m.get("content"))
+
+
+SUBSCRIPTION_RETRY_S = 600.0  # how long a busy subscription is retried before the request fails (llm.subscription_retry_s)
+SUBSCRIPTION_RETRY_ENV = "STT_LLM_SUBSCRIPTION_RETRY_S"  # set by stt.run from the config for the stage processes
+SUBSCRIPTION_BACKOFF_S = (5.0, 15.0, 30.0, 60.0, 120.0, 240.0)  # pauses between tries; the last one repeats
+
+
+def subscription_retry_budget() -> float:
+    """Seconds of waiting a busy subscription gets: the env var set by ``stt.run``, else the default."""
+    try:
+        return float(os.environ.get(SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S))
+    except ValueError:
+        return SUBSCRIPTION_RETRY_S
+
+
+def generate_with_retry(get_server: Callable[[], Any], prompt: str, model: str, variant: Optional[str],
+                        timeout: float, retry_s: float) -> str:
+    """``generate`` on the subscription, retried while it is busy (shared by ``stt.llm`` and ``voiceover.llm``).
+
+    Transient failures (429, 5xx, connection errors, the transient 404 ModelNotFound, a model list that does not
+    show the model for a moment) wait 5, 15, 30, ... s until ``retry_s`` of waiting is used up, then raise a
+    non-transient ``OpenCodeError``. A quota error or a refusal is raised at once. ``get_server`` is called for
+    every try (the model is only marked as checked once it was found).
+    """
+    waited = 0.0
+    for attempt in range(1_000):
+        try:
+            return str(get_server().generate(prompt, model, variant, timeout=timeout))
+        except (OpenCodeError, ModelNotOffered) as exc:
+            transient = isinstance(exc, ModelNotOffered) or (exc.transient and not exc.quota)
+            if not transient:
+                raise
+            remaining = retry_s - waited
+            if remaining <= 0:
+                raise OpenCodeError(f"subscription not answering after {waited:.0f} s: {exc}") from exc
+            pause = min(SUBSCRIPTION_BACKOFF_S[min(attempt, len(SUBSCRIPTION_BACKOFF_S) - 1)], remaining)
+            log.warning("subscription busy (%s), retry in %.0f s", exc, pause)
+            time.sleep(pause)
+            waited += pause
+    raise OpenCodeError("subscription not answering")
 
 
 def main() -> int:
