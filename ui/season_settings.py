@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from stt.run import deep_merge
+from stt.config import resolve_config_layers
 from ui import settings
 from ui import state as ui_state
 from utils.atomic_io import write_text_atomic
@@ -51,7 +51,8 @@ def global_config(defaults_path: Path | None = None, state_path: Path | None = N
         own = settings.read_json(global_path(state_path))
     except ValueError:
         own = {}
-    return deep_merge(settings.read_json(defaults_path or settings.DEFAULTS), own)
+    return resolve_config_layers([("base", settings.read_json(defaults_path or settings.DEFAULTS)),
+                                  ("local", own)])[0]
 
 
 def choose_global(text: str, state_path: Path | None = None) -> tuple[str, str]:
@@ -133,7 +134,7 @@ def read_own(results: Path | None) -> dict[str, Any]:
 
 def effective(base: dict[str, Any], results: Path | None) -> dict[str, Any]:
     """A copy of ``base`` (standard + global) with the settings of the season on top, when it has them."""
-    return deep_merge(copy.deepcopy(base), read_own(results))
+    return resolve_config_layers([("base", base), ("season", read_own(results))])[0]
 
 
 def which(results: Path | None) -> str:

@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from stt import progress as stt_progress
-from stt.run import apply_preset, apply_show, dotenv, show_of
+from stt.config import apply_preset, apply_show, show_of
+from stt.run import dotenv
 from ui import season_settings, seasons, settings
 from utils.atomic_io import write_text_atomic
 

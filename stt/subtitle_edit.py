@@ -120,10 +120,10 @@ def current_lines(folder: Path) -> list[Line]:
 
 def _policy() -> dict[str, float]:
     """Tempo limits of the voice-over: base, comfort and ceiling syllables per second."""
-    from stt.run import load_config
+    from stt.config import effective_voiceover_policy, load_config
 
-    policy = dict(load_json(REPO_ROOT / "voiceover_config.json").get("policy") or {})
-    policy.update((load_config(REPO_ROOT / "stt_config.json").get("voiceover") or {}).get("policy") or {})
+    policy = effective_voiceover_policy(load_config(REPO_ROOT / "stt_config.json"),
+                                        load_json(REPO_ROOT / "voiceover_config.json"))
     return {key: float(policy.get(key, default)) for key, default in
             (("base_syl_per_sec", 5.0), ("comfort_syl_per_sec", 6.3), ("ceiling_syl_per_sec", 6.7))}
 

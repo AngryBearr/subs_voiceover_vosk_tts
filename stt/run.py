@@ -61,6 +61,9 @@ from pathlib import Path
 from typing import Any
 
 from stt import gpu_budget, progress
+from stt.config import (apply_preset, apply_show, deep_merge, effective_voiceover_policy,
+                        format_config_sources, load_config, read_config_layers, resolve_config_layers,
+                        show_of)
 from stt.gpu import VramPeak
 from stt.runner import REPO_ROOT, load_json, save_json
 from utils.llm_route import (COST_LOG_ENV, FALLBACK_AFTER_ENV, FALLBACK_AFTER_S, FALLBACK_ENV, LLM_STOP_EXIT, PAID_ENV,
@@ -71,57 +74,6 @@ log = logging.getLogger("stt.run")
 _WARNED_ROUTES: set[str] = set()  # unsupported router names already warned about
 
 STAGES = ["transcribe", "glossary", "speakers", "translate", "dub", "stress", "voiceover", "check", "mix"]
-
-
-def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """``base`` with ``override`` on top: nested dicts merge, everything else is replaced."""
-    out = dict(base)
-    for key, value in override.items():
-        out[key] = deep_merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
-    return out
-
-
-def load_config(path: Path) -> dict[str, Any]:
-    """The config, with ``<name>.local.json`` next to it on top (personal settings, not in git:
-    e.g. LLM requests through a ChatGPT subscription in OpenCode)."""
-    config = json.loads(path.read_text(encoding="utf-8"))
-    local = path.with_name(path.stem + ".local.json")
-    if local.exists():
-        config = deep_merge(config, json.loads(local.read_text(encoding="utf-8")))
-    return config
-
-
-def apply_preset(config: dict[str, Any], name: str | None) -> dict[str, Any]:
-    """The config with a named set of settings (``presets`` in the config) on top; no name: as it is."""
-    if not name:
-        return config
-    presets = config.get("presets") or {}
-    if name not in presets:
-        raise SystemExit(f"Unknown preset {name!r}; the config has: {', '.join(presets) or 'none'}")
-    return deep_merge(config, presets[name].get("settings") or {})
-
-
-def show_of(config: dict[str, Any], media: Path, forced: str | None = None) -> str | None:
-    """The show's profile key (``shows`` in the config): the first key whose words are in the video's path.
-    ``forced``: that profile by name ("none": no profile)."""
-    shows = config.get("shows") or {}
-    if forced:
-        if forced.lower() == "none":
-            return None
-        if forced not in shows:
-            raise SystemExit(f"Unknown show {forced!r}; the config has: {', '.join(shows) or 'none'}")
-        return forced
-    from stt.subtitles import path_words
-
-    path = path_words(media)
-    return next((key for key in shows if path_words(key) in path), None)
-
-
-def apply_show(config: dict[str, Any], name: str | None) -> dict[str, Any]:
-    """The config with the show's settings (``shows.<name>.settings``) on top; no name: as it is."""
-    if not name:
-        return config
-    return deep_merge(copy.deepcopy(config), (config.get("shows") or {})[name].get("settings") or {})
 
 
 def dotenv(path: Path = REPO_ROOT / ".env") -> dict[str, str]:
@@ -959,8 +911,8 @@ class Episode:
             normalization["stress_dict"] = str((self.out / "stress.json").resolve())
         vo_config["engine"] = {**vo_config["engine"], **engine, "name": self.engine, "normalization": normalization,
                                "voice": engine.get("voice") or self._engine()["voices"]["male"]}
-        for section in ("policy", "units"):  # dub-specific timing (preferred lag, base tempo, no unit merging)
-            vo_config[section] = {**vo_config.get(section, {}), **cfg.get(section, {})}
+        vo_config["policy"] = effective_voiceover_policy(self.config, vo_config)
+        vo_config["units"] = {**vo_config.get("units", {}), **cfg.get("units", {})}
         openrouter = {"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1",
                       "api_key_env": "OPENROUTER_API_KEY", "reasoning": "default", "max_tokens": 8192}
         vo_config["llm"] = {**vo_config.get("llm", {}), **openrouter, "model": self.llm("voiceover")}  # shortening
@@ -1724,10 +1676,12 @@ def expand_media(patterns: list[str]) -> tuple[list[Path], list[str]]:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="English video -> Russian voice-over, end to end")
-    parser.add_argument("media", nargs="+", help="Video files or glob patterns (a whole season works)")
+    parser.add_argument("media", nargs="*", help="Video files or glob patterns (a whole season works)")
     parser.add_argument("--out-root", default=None,
                         help="One sub-folder per episode (default: paths.work in the config, else output/stt)")
     parser.add_argument("--config", default=str(REPO_ROOT / "stt_config.json"))
+    parser.add_argument("--dump-config", action="store_true",
+                        help="Print effective settings and leaf sources without running models (media optional)")
     parser.add_argument("--preset", default=None, help="A named set of settings (presets in the config): main, upload, fast, previous")
     parser.add_argument("--show", default=None,
                         help="Settings profile of a show (shows in the config; auto by the video's path; none: no profile)")
@@ -1751,12 +1705,41 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--download-voice-model", action="store_true",
                         help="Download the trained weights of the season's voices first, when they are not here (115 MB, once)")
     args = parser.parse_args(argv)
+    if not args.media and not args.dump_config:
+        parser.error("the following arguments are required: media")
     if args.prepare and args.until not in (None, "speakers"):
         parser.error(f"--prepare stops after speakers, it cannot be combined with --until {args.until}")
     args.until = "speakers" if args.prepare else args.until or "mix"
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
-    config = apply_preset(load_config(Path(args.config)), args.preset)
+    layers = read_config_layers(Path(args.config)) if args.dump_config else []
+    base = resolve_config_layers(layers)[0] if args.dump_config else load_config(Path(args.config))
+    config = apply_preset(base, args.preset)
+    if args.dump_config:
+        if args.preset:
+            layers.append((f"preset:{args.preset}", base["presets"][args.preset].get("settings") or {}))
+        cli: dict[str, Any] = {}
+        if args.mode:
+            cli["mode"] = args.mode
+        if args.engine:
+            cli["voiceover"] = {"engine": args.engine}
+        if args.out_root:
+            cli["paths"] = {"work": args.out_root}
+        if args.no_subtitles:
+            cli["subtitles"] = {"enabled": False}
+        if args.no_season_voices:
+            cli["season_voices"] = {"enabled": False}
+        # Episode applies the show after the preset; CLI options remain authoritative.
+        media, _ = expand_media(args.media)
+        for path in media or [Path(p) for p in args.media] or [Path()]:
+            show = show_of(config, path, args.show)
+            per_media = list(layers)
+            if show:
+                per_media.append((f"show:{show}", config["shows"][show].get("settings") or {}))
+            per_media.append(("cli", cli))
+            resolved, sources = resolve_config_layers(per_media)
+            print(format_config_sources(resolved, sources))
+        return
     args.mode = args.mode or config["mode"]
     files, missing = expand_media(args.media)
     if missing or not files:
