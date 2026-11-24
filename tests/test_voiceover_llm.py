@@ -369,3 +369,16 @@ def test_go_model_without_an_openrouter_id_fails_without_a_request(tmp_path: Pat
     with pytest.raises(vllm.LLMError, match="no OpenRouter id for opencode-go/nope") as info:
         call({"model": "x", "messages": []})
     assert not isinstance(info.value, vllm.LLMTransientError) and sent == []
+
+
+def test_shipped_voiceover_config_uses_the_openrouter_default() -> None:
+    import json
+
+    from voiceover.llm import REPO_ROOT
+
+    config = json.loads((REPO_ROOT / "voiceover_config.json").read_text(encoding="utf-8"))
+    main = LLMConfig.from_dict(config["llm"])
+    assert (main.provider, main.base_url, main.model, main.api_key_env) == (
+        "openrouter", "https://openrouter.ai/api/v1", "openai/gpt-6-luna", "OPENROUTER_API_KEY")
+    assert main.reasoning == "default"  # "off" would send DeepSeek's "thinking" field to OpenRouter
+    assert "deepseek" not in json.dumps(config["llm"]).lower()
