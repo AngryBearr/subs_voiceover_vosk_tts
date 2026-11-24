@@ -3,7 +3,7 @@
 Этот файл имеет приоритет над другими инструкциями для агента (`CLAUDE.md` — ссылка на него).
 Он описывает, как работать с проектом: английское видео → распознание и перевод (`stt/`) →
 русская озвучка с подгонкой под время (`voiceover/`), а также классический пайплайн
-SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
+SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс (legacy, §4).
 
 ## 1. Общие правила
 
@@ -68,6 +68,9 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
     субтитров CBS, S20) и `stt.sdh_eval --cues` (SDH-метки, S51); скрипты замеров в `output/exp_boundary/`.
     Что уже пробовали и не помогло (DiCoW, аудио-LLM, громкость, вокальная дорожка, голосование диаризаторов,
     разделение голосов): `docs/experiments.md`.
+- **Документация**: открытые пункты — `docs/roadmap.md`; журнал завершённых этапов и исследований —
+    `docs/history.md`; устаревшие планы и описание классического пайплайна — `docs/archive/`;
+    разовые исследовательские скрипты — `research/`.
 - **Озвучка готовых русских субтитров**: `uv run -m voiceover.pipeline run <subs.json> --out <dir>`
     (настройки в `voiceover_config.json`).
 - **Правка реплик серии**: `corrections.json` в папке серии (интерфейс или `stt.subtitle_edit`
@@ -75,7 +78,12 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
 - Ключи API (`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, токен HF) лежат в `.env`;
     никогда не выводить их, как и токены opencode (`auth.json`).
 
-## 4. Классический пайплайн SRT → JSON → RUNorm + RUAccent → Vosk → микс
+## 4. Классический пайплайн SRT → JSON → RUNorm + RUAccent → Vosk → микс (legacy)
+
+- Устаревший, вспомогательный путь (`pipeline.py`, `utils.srt_to_json`, `synthesize.synthesize_cli`,
+    `utils.audio_mixer`): сохраняется для совместимости и простых случаев. Основной путь — `stt.run`
+    (§3): микс там делает `stt/mix.py`, а `voiceover/pipeline.py` озвучивает готовые русские субтитры.
+    Правила про RUNorm/RUAccent и Vosk ниже действуют и для основного пайплайна.
 
 - **SRT → JSON**
     - Вход: SRT-файл сабов.
@@ -126,7 +134,7 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс.
         в указанной папке.
 
 - **Микс сегментов в финальный звук**
-    - Основной путь: `utils.audio_mixer.mix_segments` или CLI
+    - Путь классического пайплайна (legacy): `utils.audio_mixer.mix_segments` или CLI
         `uv run -m utils.audio_mixer ...`.
         - Читает JSON сабов (ожидает `index`, `start`, `end`).
         - Берёт сегменты `<index>.wav` из папки и миксует в единый трек с
