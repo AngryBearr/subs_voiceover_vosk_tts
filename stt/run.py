@@ -40,8 +40,6 @@ both lanes share (stress check, review list, the finished video) take turns.
 from __future__ import annotations
 
 import argparse
-import copy
-import fnmatch
 import functools
 import glob
 import hashlib
@@ -49,31 +47,40 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
+import subprocess  # noqa: F401 - tests patch stt.run.subprocess.run (the stage programs)
 import sys
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from stt import gpu_budget, progress
-from stt.config import (apply_preset, apply_show, deep_merge, effective_voiceover_policy,
-                        format_config_sources, load_config, read_config_layers, resolve_config_layers,
-                        show_of)
-from stt.gpu import VramPeak
-from stt.runner import REPO_ROOT, load_json, save_json
-from utils.llm_route import (COST_LOG_ENV, FALLBACK_AFTER_ENV, FALLBACK_AFTER_S, FALLBACK_ENV, LLM_STOP_EXIT, PAID_ENV,
-                             PAID_MARK, ROUTERS, LLMStop, PaidNotAllowed, SubscriptionDown, paid_line, split_route,
-                             stop_message_in, with_route)
+from stt import gpu_budget, progress, run_llm, stage_runner
+from stt.config import (apply_preset, apply_show, format_config_sources, load_config, read_config_layers,
+                        resolve_config_layers, show_of)
+from stt.episode_media import _ONSCREEN_GUARD, _ONSCREEN_JOBS, MediaMixin
+from stt.episode_vo import VoiceoverMixin
+from stt.run_llm import SUBSCRIPTION_DOWN, check_paid_steps, export_llm_env, subscription_models
+from stt.runner import REPO_ROOT
+from stt.stage_runner import ENGINE_STAGES, SHARED_STAGES, STAGES, Background, ProcessMixin
+from utils.llm_route import COST_LOG_ENV, LLM_STOP_EXIT, PAID_MARK, LLMStop, SubscriptionDown, paid_line
+
+# Names that lived here before the split (other code and tests reach them through ``stt.run``; patching
+# ``stt.run.REPO_ROOT`` / ``load_json`` / ``dotenv`` still reaches the moved code, see ``stage_runner.run_module``).
+from stt.config import deep_merge, effective_voiceover_policy  # noqa: F401,E402
+from stt.episode_media import (_COMPRESS_GATE, _COMPRESS_GUARD, _COMPRESS_JOBS, _MIX_GATE, _MUXED,  # noqa: F401,E402
+                               finished_folder)
+from stt.episode_vo import _sha256  # noqa: F401,E402
+from stt.gpu import VramPeak  # noqa: F401,E402
+from stt.run_llm import llm_steps, paying_allowed  # noqa: F401,E402
+from stt.runner import load_json, save_json  # noqa: F401,E402
+from stt.stage_runner import (CPU_ENGINES, PROGRESS_LOG_LINES, PROGRESS_POLL_S, lanes,  # noqa: F401,E402
+                              lookahead_enabled)
+from utils.llm_route import (FALLBACK_AFTER_ENV, FALLBACK_AFTER_S, FALLBACK_ENV, PAID_ENV, ROUTERS,  # noqa: F401,E402
+                             PaidNotAllowed, split_route, stop_message_in, with_route)
 
 log = logging.getLogger("stt.run")
-_WARNED_ROUTES: set[str] = set()  # unsupported router names already warned about
-
-STAGES = ["transcribe", "glossary", "speakers", "translate", "dub", "stress", "voiceover", "check", "mix"]
 
 
 def dotenv(path: Path = REPO_ROOT / ".env") -> dict[str, str]:
@@ -85,64 +92,6 @@ def dotenv(path: Path = REPO_ROOT / ".env") -> dict[str, str]:
             if match:
                 values[match.group(1)] = match.group(2).strip().strip("'\"")
     return values
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def finished_folder(config: dict[str, Any], media: Path) -> Path | None:
-    """``paths.finished`` / ``paths.finished_folder`` with ``{season}`` = the video's folder name
-    ("STT_{season}" -> "STT_Season 20"); None when finished videos stay in the episode folders."""
-    paths = config.get("paths") or {}
-    if not paths.get("finished"):
-        return None
-    return Path(paths["finished"]).expanduser() / str(paths.get("finished_folder") or "{season}").format(
-        season=media.parent.name)
-
-
-class Background:
-    """Stage runs a lane hands to threads (the previous engine's mix) so it can go on; ``join`` waits for all of them and
-    raises the first error. Every thread is named after its engine, as the stages' log lines are."""
-
-    def __init__(self) -> None:
-        self._threads: list[threading.Thread] = []
-        self._errors: list[BaseException] = []
-
-    def start(self, name: str, func: Callable[[], None]) -> None:
-        def work() -> None:
-            try:
-                func()
-            except BaseException as error:  # noqa: BLE001 - raised by join in the lane's thread
-                log.error("%s failed: %s", name, error)
-                self._errors.append(error)
-
-        thread = threading.Thread(target=work, name=name)
-        self._threads.append(thread)
-        thread.start()
-
-    def failed(self) -> bool:
-        return bool(self._errors)
-
-    def join(self) -> None:
-        for thread in self._threads:
-            thread.join()
-        self._threads.clear()
-        if self._errors:
-            error, self._errors = self._errors[0], []
-            raise error
-
-
-# On-screen translation of an episode running in the background (``Episode.start_onscreen``), by episode folder
-_ONSCREEN_JOBS: dict[Path, Future[Path | None]] = {}
-_ONSCREEN_GUARD = threading.Lock()
-# Compressed videos being made in the background (``Episode.start_compression``), by the file they become
-_COMPRESS_JOBS: dict[Path, Future[Path | None]] = {}
-_COMPRESS_GUARD = threading.Lock()
-_COMPRESS_GATE = threading.Lock()  # one video encoding at a time, whichever episode it is for
-_MIX_GATE = threading.Lock()  # one mix at a time in the process: each holds the whole episode in RAM
-# What the combined video of an episode was last muxed from (the tracks and their times), by episode folder
-_MUXED: dict[Path, tuple[tuple[str, int], ...]] = {}
 
 
 def wait_onscreen() -> None:
@@ -160,7 +109,11 @@ def wait_onscreen() -> None:
         raise next((e for e in errors if isinstance(e, LLMStop)), errors[0])
 
 
-class Episode:
+class Episode(VoiceoverMixin, MediaMixin, ProcessMixin):
+    """One video in one engine: the stages, their order and when one has to run again. The English side (transcript,
+    glossary, names, translation) is here; the voice-over (``stt.episode_vo``), the on-screen text, mix and video
+    (``stt.episode_media``) and the stage programs (``stt.stage_runner``) come from the mixins."""
+
     def __init__(self, media: Path, out_root: Path, args: argparse.Namespace, config: dict[str, Any],
                  lock: threading.Lock | None = None) -> None:
         self.media = media
@@ -228,27 +181,6 @@ class Episode:
         model = stages[stage] if stages.get(stage) is not None else llm["model"]
         return [self.route(m) for m in model] if isinstance(model, list) else self.route(model)
 
-    @staticmethod
-    def _known_router(name: str) -> bool:
-        """False (with one warning per name) for a router that no longer exists, e.g. an old "orcarouter"."""
-        if name in ROUTERS:
-            return True
-        if name not in _WARNED_ROUTES:
-            _WARNED_ROUTES.add(name)
-            log.warning("llm: router %r is not supported any more and is ignored (OpenRouter is used)", name)
-        return False
-
-    @classmethod
-    def _known_route(cls, name: str) -> str:
-        """The model id without route names that no longer exist (``orcarouter+openrouter:x`` -> ``openrouter:x``)."""
-        head, sep, rest = name.partition(":")
-        if not (sep and rest and re.fullmatch(r"[a-z]+(\+[a-z]+)*", head)):
-            return name
-        names = head.split("+")
-        kept = [n for n in names if n == "opencode" or cls._known_router(n)]
-        if len(kept) == len(names):
-            return name
-        return "+".join(kept) + ":" + rest if kept else rest
 
     def route(self, name: str) -> str:
         """A model id with its route (``llm``): see ``llm()``; web search (``:online``) is OpenRouter's."""
@@ -257,16 +189,8 @@ class Episode:
     @classmethod
     def route_in(cls, config: dict[str, Any], name: str) -> str:
         """``route`` for a config (also used before any episode exists, by the startup check of paid steps)."""
-        llm = config.get("llm") or {}
-        if name.endswith(":online"):
-            return with_route(name, ["openrouter"])
-        name = cls._known_route(name)
-        router = llm.get("router", "openrouter")
-        routers = [router] if isinstance(router, str) else list(router)
-        routers = [r for r in routers if cls._known_router(r)] or ["openrouter"]
-        if any(fnmatch.fnmatchcase(name, p) for p in llm.get("opencode") or []):
-            return with_route(name, ["opencode", *routers] if llm.get("fallback", False) else ["opencode"])
-        return with_route(name, routers)
+        return run_llm.route_in(config, name)
+
 
     def stamp(self, stage: str) -> Path:
         """Marks when a stage last finished (per engine for the engine's stages)."""
@@ -583,835 +507,14 @@ class Episode:
         translate.main(argv)
         self.start_onscreen()  # the dub does not need it: only the finished video does
 
-    def on_screen(self) -> dict[str, Any]:
-        """``on_screen`` settings: the voice of captioned lines and the Russian on-screen text.
-        Voice ``text`` (captions only shown as Russian text) needs the track: without it the voice becomes
-        ``neutral`` so the captioned lines are not lost."""
-        settings = {"voice": "text", "neutral_gender": "male", "track": True, "burn_in_when_compressing": False,
-                    **(self.config.get("on_screen") or {})}
-        if settings["voice"] == "text" and not settings["track"]:
-            log.warning("[%s] on_screen.voice is 'text' but on_screen.track is off: captioned lines get the "
-                        "neutral voice instead", self.media.stem)
-            settings["voice"] = "neutral"
-        return settings
-
-    def start_onscreen(self) -> None:
-        """Translate the on-screen text in a background thread; ``translate_onscreen`` (the video) waits for it."""
-        job: Future[Path | None] = Future()
-        with _ONSCREEN_GUARD:
-            _ONSCREEN_JOBS[self.out] = job
-
-        def work() -> None:
-            try:
-                job.set_result(self._translate_onscreen())
-            except LLMStop as error:  # not swallowed: ``translate_onscreen`` raises it in the lane's thread
-                job.set_exception(error)
-            except BaseException as error:  # noqa: BLE001 - a failed translation only costs the track
-                log.warning("[%s] on-screen text not translated (%s): no Russian on-screen track", self.media.stem,
-                            error)
-                job.set_result(None)
-
-        threading.Thread(target=work, name=f"onscreen-{self.media.stem}").start()
-
-    def translate_onscreen(self) -> Path | None:
-        """``onscreen.ru.json``: on-screen captions, name cards and lower thirds in Russian (cached per text).
-        None without OCR results or with the on-screen track off; a failed translation only costs the track.
-        Waits for the background translation of this episode (``start_onscreen``) instead of asking again."""
-        with _ONSCREEN_GUARD:
-            job = _ONSCREEN_JOBS.get(self.out)
-        if job is not None:
-            return job.result()
-        return self._translate_onscreen()
-
-    def _translate_onscreen(self) -> Path | None:
-        source, target = self.out / "onscreen.json", self.out / "onscreen.ru.json"
-        if not source.exists() or not self.on_screen()["track"]:
-            return None
-        inputs = [p for p in (source, self.out / "subs.en.json", self.out / "speakers.json", self.out / "subs.ru.json")
-                  if p.exists()]  # speakers: genders; subs.ru: the dub's wording the captions follow
-        if target.exists() and target.stat().st_mtime >= max(p.stat().st_mtime for p in inputs):  # speakers: genders
-            return target
-        from stt import onscreen
-
-        started = time.monotonic()
-        try:
-            onscreen.main(["translate", str(self.out), "--glossary", str(self.out / "glossary.txt"),
-                           "--model", self.llm("translate")])
-        except LLMStop:
-            raise  # the subscription does not answer (or paying is not allowed): the run stops
-        except Exception as error:  # noqa: BLE001 - the video is still made, without the on-screen track
-            log.warning("[%s] on-screen text not translated (%s): no Russian on-screen track", self.media.stem, error)
-            return None
-        log.info("[%s] on-screen text translated in %d s", self.media.stem, round(time.monotonic() - started))
-        return target if target.exists() else None
-
-    def _engine(self) -> dict[str, Any]:
-        cfg = self.config["voiceover"]
-        engine = dict(cfg.get("engines", {}).get(self.engine, {}))
-        if "voices" not in engine:
-            raise SystemExit(f"voiceover.engines.{self.engine}.voices missing in the config")
-        engine.setdefault("listen_stress", bool(cfg.get("listen_stress", True)))  # takes heard for checked stress
-        host = cfg.get("host_voice")
-        if host and self.engine == "vosk":  # the host's lines in a TeraTTS voice inside the Vosk track
-            tera = {k: v for k, v in cfg.get("engines", {}).get("teratts", {}).items() if k not in ("voices", "sample_rate")}
-            engine["teratts"] = {"listen_stress": engine["listen_stress"], **tera, "voice": host}
-        if self.engine == "f5":  # speakers without a clip: TeraTTS voices, or a Vosk voice cloned by F5
-            from voiceover.engine_f5 import TERATTS, fallback_references, voice_id
-
-            vo = load_json(REPO_ROOT / cfg.get("config", "voiceover_config.json"))
-            vosk = cfg.get("engines", {}).get("vosk", {}).get("voices", {"female": 49, "male": 56})
-            refs = fallback_references(self.references.parent / "fallback_voices",
-                                       REPO_ROOT / vo["engine"]["model_path"], {g: int(v) for g, v in vosk.items()})
-            auto = {g: voice_id(refs[g]) for g in refs}
-            if engine.pop("fallback", "vosk") == "teratts":
-                tera = {k: v for k, v in cfg.get("engines", {}).get("teratts", {}).items() if k != "sample_rate"}
-                voices = tera.pop("voices", {"female": "ru_f1+ru_f2", "male": "ru_m5"})
-                engine["teratts"] = {"listen_stress": engine["listen_stress"], **tera, "voice": voices["male"]}
-                engine["voice"] = auto["male"]  # the default voice F5 clones (calibration probes it)
-                auto = {g: TERATTS + str(voices.get(g, voices["male"])) for g in engine["voices"]}
-            engine["voices"] = {g: auto[g] if v == "auto" else voice_id(v) for g, v in engine["voices"].items()}
-        return engine
-
-    @property
-    def references(self) -> Path:
-        """Voice-cloning clips of the season's people (stt.voice_bank --export)."""
-        return self.voice_bank.with_name(self.voice_bank.name.replace(".voices.json", ".references"))
-
-    def _reference_clip(self, ref: dict[str, Any], language: str, warned: set[str]) -> Path:
-        """A person's clip for F5: with ``reference_language: "ru"`` the Russian sample (``<stem>.ru.wav`` + ``.ru.txt``,
-        made by ``stt.ru_samples``) when both exist, else (logged once per person in ``warned``) the English clip."""
-        english = (self.references / ref["wav"]).resolve()
-        if language != "ru":
-            return english
-        russian = english.with_suffix(".ru.wav")
-        if russian.is_file() and russian.with_suffix(".txt").is_file():
-            return russian
-        if english.name not in warned:
-            warned.add(english.name)
-            log.warning("[%s] no Russian sample for %s (stt.ru_samples): the English clip is used", self.media.stem,
-                        ref.get("name") or english.stem)
-        return english
-
-    def _speaker_voices(self) -> Path:
-        """{speaker id: voice} of this episode's people (F5 engine): their own clip, else a season stand-in."""
-        from stt.voice_bank import person_key, same_key
-        from utils.atomic_io import write_text_atomic
-        from voiceover.engine_f5 import standin_voice, voice_id
-
-        if self.voice_bank.exists():  # people new in this episode get a clip; others keep theirs
-            # prints for everyone the final speakers name (subtitles, season voices), not only the LLM-sure first pass
-            self._module("voices_refresh", "stt.voice_bank", [str(self.voice_bank), "--refresh-episode", str(self.out)])
-            export = [str(self.voice_bank), "--export", str(self.references), "--missing"]
-            if not (self.config.get("voice_bank") or {}).get("stitch", False):
-                export.append("--no-stitch")
-            self._module("voices", "stt.voice_bank", export)
-        language = str(self.config["voiceover"].get("engines", {}).get("f5", {}).get("reference_language", "en"))
-        if language == "ru" and not (REPO_ROOT / "xvoice_env" / "bin" / "python").exists():
-            log.warning("[%s] xvoice_env is missing (bash scripts/setup_envs.sh xvoice): no Russian samples are made",
-                        self.media.stem)
-        elif language == "ru":  # makes only the missing / stale samples; a failure leaves English clips for those
-            try:
-                self._module("ru_samples", "stt.ru_samples", [str(self.references)])
-            except (Exception, SystemExit) as error:  # noqa: BLE001 - the episode goes on with the English clips
-                log.warning("[%s] Russian samples not made (%s), see logs/ru_samples.log: English clips are used "
-                            "for the missing ones", self.media.stem, error)
-        index = self.references / "references.json"
-        refs = load_json(index) if index.exists() else []
-        cards = load_json(self.out / "speakers.json")
-        subs = self.out / "subs.en.json"
-        spoken = {c.get("speaker") for c in load_json(subs)} if subs.exists() else None  # None: do not filter
-        pool: dict[str, list[str]] = self.config["voiceover"].get("engines", {}).get("f5", {}).get("standin_pool") or {}
-        standins_path = self.references / "standins.json"
-        standins: dict[str, dict[str, Any]] = load_json(standins_path) if standins_path.exists() else {}
-        before = json.dumps(standins, sort_keys=True)
-        mapping: dict[str, str] = {}
-        own = stand = generic = 0
-        bare: dict[str, str] = {}  # speaker id -> gender of the people left on the generic voice
-        warned: set[str] = set()
-        for card in cards:
-            key = person_key(card)
-            if spoken is not None and card["id"] not in spoken:
-                continue
-            ref = next((r for r in refs if key and (rk := person_key(r)) and same_key(rk, key)), None)
-            if ref:
-                mapping[card["id"]] = voice_id(self._reference_clip(ref, language, warned))
-                own += 1
-                continue
-            gender = card.get("gender") if card.get("gender") in pool else "male"
-            if not key or not pool.get(gender):
-                generic += 1
-                bare[card["id"]] = str(card.get("gender"))
-                continue
-            known = next((k for k in standins if same_key(k, key)), None)
-            if known is None:  # the pool voice of this gender that the fewest people have so far
-                taken = [v["voice"] for v in standins.values() if v.get("gender") == gender]
-                spec = min(pool[gender], key=lambda x: taken.count(x))
-                known = key
-                standins[key] = {"voice": spec, "gender": gender, "episode": self.out.name}
-            spec = standins[known]["voice"]
-            model = REPO_ROOT / load_json(REPO_ROOT / self.config["voiceover"].get(
-                "config", "voiceover_config.json"))["engine"]["model_path"] if spec.startswith("vosk:") else Path()
-            mapping[card["id"]] = standin_voice(spec, self.references.parent / "fallback_voices", model)
-            stand += 1
-        if json.dumps(standins, sort_keys=True) != before:
-            self.references.mkdir(parents=True, exist_ok=True)
-            write_text_atomic(standins_path, json.dumps(standins, ensure_ascii=False, indent=1) + "\n")
-        converted = self._own_voice_mapping(bare)
-        mapping.update(converted)
-        path = self.out / "speaker_voices.f5.json"
-        save_json(path, mapping)
-        log.info("[%s] F5 voices: %d speakers with their own clip, %d stand-ins from the pool, %d with an own-voice "
-                 "sample (X-Voice), %d on the generic voice", self.media.stem, own, stand, len(converted),
-                 generic - len(converted))
-        return path
-
-    def _own_voice_mapping(self, bare: dict[str, str]) -> dict[str, str]:
-        """``{speaker id: voice id of a Russian sample}`` for the male / female speakers left on the generic voice
-        when ``voiceover.engines.f5.own_voice.enabled``: X-Voice says their Russian lines in the voice of a clean
-        prompt of their speech in this episode (``stt.own_voice``) and ESpeech clones that sample like any clip.
-        Speakers without a prompt or sample stay as they are; the reasons are logged."""
-        settings = self.config["voiceover"].get("engines", {}).get("f5", {}).get("own_voice") or {}
-        todo = [sid for sid, gender in bare.items() if gender in ("male", "female")]
-        if not settings.get("enabled") or not todo:
-            return {}
-        from stt.own_voice import build_voices
-        from voiceover.engine_f5 import voice_id
-
-        reasons: dict[str, str] = {}
-        samples = build_voices(self.out, todo, settings, reasons=reasons)
-        for sid, reason in reasons.items():
-            log.info("[%s] no own-voice sample for %s (%s): the generic voice stays", self.media.stem, sid, reason)
-        return {sid: voice_id(wav) for sid, wav in samples.items()}
-
-    def _host_speakers(self) -> list[str]:
-        """Speaker ids of the show's host: people of the season cast with a "host" role (else the
-        speaker cards' own role)."""
-        from stt.voice_bank import same_person
-
-        cards = load_json(self.out / "speakers.json")
-        cast = load_json(self.cast).get("cast", []) if self.cast.exists() else []
-        hosts = [p["name"] for p in cast if "host" in str(p.get("role", "")).lower()]
-        if hosts:
-            return [c["id"] for c in cards if c.get("name") and any(same_person(c["name"], h) for h in hosts)]
-        return [c["id"] for c in cards if re.search(r"\bhost\b", str(c.get("role", "")).lower())]
-
-    def _host_voices(self) -> Path | None:
-        """{speaker id: voice} giving the host ``voiceover.host_voice`` (TeraTTS) in the Vosk / TeraTTS track."""
-        host = self.config["voiceover"].get("host_voice")
-        if not host or self.engine not in ("vosk", "teratts"):
-            return None
-        voice = f"teratts:{host}" if self.engine == "vosk" else str(host)
-        mapping = {sid: voice for sid in self._host_speakers()}
-        path = self.out / f"speaker_voices.{self.engine}.json"
-        save_json(path, mapping)
-        log.info("[%s] host voice %s for %s", self.media.stem, host, ", ".join(mapping) or "nobody (no host found)")
-        return path
-
-    def dub(self) -> None:
-        from stt import dub
-
-        voices = ",".join(f"{k}={v}" for k, v in self._engine()["voices"].items())
-        argv = [str(self.out), "--voices", voices, "--interjections", self.config["dub"].get("interjections", "overlap"),
-                "--output", f"dub.ru.{self.engine}.json",
-                "--fill-voice", str((self.config.get("fill") or {}).get("voice", "neutral"))]
-        if self.engine == "f5":
-            argv += ["--speaker-voices", str(self._speaker_voices())]
-        elif (host := self._host_voices()) is not None:
-            argv += ["--speaker-voices", str(host)]
-        on_screen = self.on_screen()
-        argv += ["--on-screen-voice", str(on_screen["voice"]), "--neutral-gender", str(on_screen["neutral_gender"])]
-        dub.main(argv)
-
-    def _module(self, name: str, module: str, args: list[str], *, oom_retries: int = 2,
-                oom_wait_s: float = 60.0) -> None:
-        """Run a module of this repo in the current interpreter, logging to logs/<name>.log.
-
-        A run that ran out of GPU memory is started again after a pause; the voice-over keeps
-        every line already synthesised, so it goes on where it stopped.
-        """
-        from stt.worker import gpu_out_of_memory
-
-        env = {**os.environ, **dotenv(), "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
-        env.update({k: v for k, v in os.environ.items() if k.startswith("STT_LLM_")})  # the run's, never ``.env``'s
-        tracker = progress.current()
-        if tracker is not None:  # the module's progress ticks go to this stage's progress file
-            env.update(tracker.environ())
-        log_path = self.out / "logs" / f"{name}.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        for attempt in range(oom_retries + 1):
-            with log_path.open("w", encoding="utf-8") as log_file:
-                command = [sys.executable, "-m", module, *args]
-                if tracker is None:  # outside a tracked stage there is no progress to watch
-                    code = subprocess.run(command, cwd=REPO_ROOT, env=env, stdout=log_file,
-                                          stderr=subprocess.STDOUT).returncode
-                else:
-                    code = self._run_watched(command, env, log_file, tracker, name)
-            if code == 0:
-                return
-            log_text = log_path.read_text(encoding="utf-8", errors="replace")
-            if code == LLM_STOP_EXIT:  # the stage stopped on purpose: no LLM answer without paying (see utils.llm_route)
-                raise SubscriptionDown(f"stage {name} stopped (exit {code}), see {log_path}", stop_message_in(log_text))
-            if attempt == oom_retries or not gpu_out_of_memory(log_text):
-                break
-            log.warning("[%s] %s ran out of GPU memory; retry %d/%d in %.0f s", self.media.stem, name, attempt + 1,
-                        oom_retries, oom_wait_s)
-            log_path.with_suffix(f".oom{attempt + 1}.log").write_text(log_text, encoding="utf-8")
-            time.sleep(oom_wait_s)
-        raise SystemExit(f"{name} failed (exit {code}), see {log_path}")
-
-    def _run_watched(self, command: list[str], env: dict[str, str], log_file: Any,
-                     tracker: progress.Tracker, name: str = "") -> int:
-        """Run ``command`` (output to ``log_file``) and return its exit code; while it runs, copy its progress
-        (``[<episode>] voiceover (f5): 25/640 lines``) into this log every ``PROGRESS_LOG_LINES`` lines."""
-        process = subprocess.Popen(command, cwd=REPO_ROOT, env=env, stdout=log_file, stderr=subprocess.STDOUT)
-        last = 0
-        code: int | None = None
-        try:
-            with VramPeak(interval_s=0.5, pid=process.pid) as peak:  # the module's own process (not its children)
-                while code is None:
-                    try:
-                        code = process.wait(timeout=PROGRESS_POLL_S)
-                    except subprocess.TimeoutExpired:
-                        last = self._log_progress(tracker, last)
-        except BaseException:  # Ctrl+C or an error here: do not leave the module running on its own
-            process.terminate()
-            raise
-        if name:
-            gpu_budget.record_peak(self.vram_peaks, name, peak.peak_mb)
-        return code
-
-    def _log_progress(self, tracker: progress.Tracker | None, last: int) -> int:
-        """Log the stage's progress if it moved far enough since ``last`` was logged; returns the new ``last``."""
-        if tracker is None:
-            return last
-        try:
-            record = json.loads(tracker.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return last
-        done, total, unit = record.get("done"), record.get("total"), record.get("unit")
-        if done is None or not total or not unit:
-            return last
-        if done < last or done - last >= (PROGRESS_LOG_LINES if unit in ("lines", "clips") else 1):
-            if done >= last:
-                label = f"{tracker.stage} ({tracker.engine})" if tracker.engine else tracker.stage
-                log.info("[%s] %s: %d/%d %s", self.media.stem, label, done, total, unit)
-            return done
-        return last
-
-    def _voiceover_config(self) -> Path:
-        """voiceover_config.json with this run's engine, voices, text preparation and timing; saved per engine."""
-        cfg = self.config["voiceover"]
-        vo_config = load_json(REPO_ROOT / cfg.get("config", "voiceover_config.json"))
-        engine = {k: v for k, v in self._engine().items() if k != "voices"}
-        if "sample_rate" in engine:  # export rate of the track (TeraTTS speaks at 44.1 kHz)
-            vo_config["export"] = {**vo_config.get("export", {}), "sample_rate": int(engine.pop("sample_rate"))}
-        normalization = {**vo_config["engine"].get("normalization", {}), **cfg.get("normalization", {}),
-                         **engine.pop("normalization", {})}
-        if (self.out / "stress.json").exists():
-            normalization["stress_dict"] = str((self.out / "stress.json").resolve())
-        vo_config["engine"] = {**vo_config["engine"], **engine, "name": self.engine, "normalization": normalization,
-                               "voice": engine.get("voice") or self._engine()["voices"]["male"]}
-        vo_config["policy"] = effective_voiceover_policy(self.config, vo_config)
-        vo_config["units"] = {**vo_config.get("units", {}), **cfg.get("units", {})}
-        openrouter = {"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1",
-                      "api_key_env": "OPENROUTER_API_KEY", "reasoning": "default", "max_tokens": 8192}
-        vo_config["llm"] = {**vo_config.get("llm", {}), **openrouter, "model": self.llm("voiceover")}  # shortening
-        vo_config["verify"] = {**vo_config.get("verify", {}),
-                               "llm": {**vo_config.get("verify", {}).get("llm", {}), **openrouter,
-                                       "model": self.llm("voiceover")}}  # meaning check of shortened lines
-        config_path = self.out / f"voiceover.{self.engine}.config.json"
-        save_json(config_path, vo_config)
-        return config_path
-
-    def _stress_input_unchanged(self) -> bool:
-        """The stress check was made on exactly the lines of this engine's dubbing script."""
-        from voiceover.stress_check import lines_sha256
-
-        dub, result = self.out / f"dub.ru.{self.engine}.json", self.out / "stress.json"
-        try:
-            recorded = load_json(result).get("lines_sha256")
-            return bool(recorded) and dub.exists() and recorded == lines_sha256(load_json(dub))
-        except (OSError, ValueError):
-            return False
-
-    def stress(self) -> None:
-        cfg = self.config["voiceover"]
-        if not cfg.get("stress_check", True):
-            save_json(self.out / "stress.json", {"schema": "voiceover-stress-v3", "skipped": True})
-            return
-        models = self.llm("stress")
-        screen = self.llm("stress_screen") if (self.config.get("llm") or {}).get("stages", {}).get("stress_screen") \
-            else None
-        args = [str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str((self.out / "stress.json").resolve()),
-                "--config", str(self._voiceover_config().resolve()),  # the texts exactly as this engine prepares them
-                "--models", ",".join(models if isinstance(models, list) else [models])]
-        if (self.out / "glossary.json").exists():  # the show's names, checked in every case form
-            args += ["--names", str((self.out / "glossary.json").resolve())]
-        if cfg.get("season_stress", True):  # one stress per name for the whole season
-            args += ["--season", str(self.season_stress.resolve())]
-        if cfg.get("stress_proofread", False):  # sol reads every line; its proposals go to the vote
-            proofreader = self.llm("stress_proofread")
-            args += ["--proofread", proofreader[0] if isinstance(proofreader, list) else proofreader,
-                     "--proofread-passes", str(int(cfg.get("stress_proofread_passes", 2)))]
-        self._module("stress", "voiceover.stress_check", args + (["--screen", screen] if screen else ["--no-screen"]))
-
-    def voiceover(self) -> None:
-        config_path = self._voiceover_config()
-        self._reset_voiceover_dir()
-        self._module(f"voiceover.{self.engine}", "voiceover.pipeline", [
-            "run", str((self.out / f"dub.ru.{self.engine}.json").resolve()), "--out", str(self.vo_dir.resolve()),
-            "--config", str(config_path.resolve())])
-
-    def _reset_voiceover_dir(self) -> None:
-        """A new dubbing script needs a fresh voice-over folder; manual overrides are kept."""
-        cues = self.vo_dir / "cues.json"
-        if not cues.exists() or load_json(cues).get("source_sha256") == _sha256(self.out / f"dub.ru.{self.engine}.json"):
-            return
-        overrides = self.vo_dir / "overrides.json"
-        kept = overrides.read_bytes() if overrides.exists() else None
-        shutil.rmtree(self.vo_dir)
-        if kept is not None:
-            self.vo_dir.mkdir(parents=True)
-            overrides.write_bytes(kept)
-        log.info("[%s] voiceover: dubbing script changed, started a fresh %s", self.media.stem, self.vo_dir.name)
-
-    def check(self) -> None:
-        if not self.config["voiceover"].get("speech_check", True):
-            save_json(self.vo_dir / "speech_check.json", {"schema": "voiceover-speech-check-v1", "skipped": True})
-            return
-        self._module(f"check.{self.engine}", "voiceover.speech_check", [str(self.vo_dir.resolve()),
-                                                                         "--root", str(REPO_ROOT)])
-        review = self.out / "review.json"
-        with self.lock or nullcontext():  # the other lane may be writing it
-            if self.config.get("review", True) and (
-                    not review.exists() or review.stat().st_mtime < (self.out / "subs.ru.json").stat().st_mtime):
-                try:  # lines to check by ear: a help for a person, never a reason to stop the episode
-                    self._module("review", "stt.review", [str(self.out.resolve())])
-                except SystemExit as error:
-                    log.warning("[%s] %s", self.media.stem, error)
-
-    def track(self, engine: str) -> Path:
-        """The engine's finished voice-over mix (AAC), kept for the videos."""
-        return self.out / f"{self.media.stem}.ru.{engine}.m4a"
-
-    @property
-    def finished(self) -> Path:
-        """Folder of the finished video: ``paths.finished`` / ``paths.finished_folder`` (``{season}``:
-        the video's folder name), else the episode folder (always for a test piece)."""
-        folder = finished_folder(self.config, self.media)
-        return self.out if folder is None or self.args.start or self.args.duration else folder
-
-    def finished_video(self, engine: str | None = None) -> Path:
-        """The video with all voice-overs (``mix.tracks: combined``) or with ``engine``'s (separate)."""
-        combined = (self.config.get("mix") or {}).get("tracks", "combined") == "combined"
-        return self.finished / f"{self.media.stem}.ru{'' if combined else f'.{engine or self.engine}'}.mkv"
-
-    def mux(self) -> None:
-        """The finished video: the voice-overs finished so far (combined) or this engine's (separate)."""
-        from stt import mix
-
-        cfg = self.config["mix"]
-        if cfg.get("tracks", "combined") == "combined":
-            order = [*cfg.get("track_order", []), *self.config["voiceover"].get("engines", {}), self.engine]
-            engines = [e for e in dict.fromkeys(order) if self.track(e).exists()]
-        else:
-            engines = [self.engine]
-        titles = cfg.get("track_titles") or {}
-        tracks = [(self.track(e), titles.get(e, f"Русский ({e})")) for e in engines]
-        srt = None
-        if cfg.get("subtitles", True):  # the voiced lines (the same in every engine); the translation if none
-            voiced = self.out / f"voiceover.{engines[0]}" / "export" / "display.srt"
-            srt = voiced if voiced.exists() else self.out / "subs.ru.srt"
-        out = self.finished_video()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        video_cfg = cfg.get("video") or {}
-        compress = bool(video_cfg.get("compress")) and not (self.args.start or self.args.duration)
-        video_source = self.small_video(video_cfg, len(self.planned_tracks(engines))) if compress else None
-        onscreen_ass, fonts = None, []
-        if not (video_source and self.burn_onscreen()):  # burned into the compressed picture: no second copy
-            onscreen_ass, fonts = self.onscreen_track()
-        mix.mux_tracks(self.media, tracks, out, srt, self.args.start or 0.0, self.args.duration,
-                       video_source=video_source,
-                       original_audio_kbps=int(video_cfg.get("original_audio_kbps", 160)) if video_source else None,
-                       onscreen_ass=onscreen_ass, fonts=fonts)
-        log.info("[%s] %s: %s", self.media.stem, out, ", ".join(engines))
-        if video_source:
-            log.info("[%s] finished video %.2f GB", self.media.stem, out.stat().st_size / 1e9)
-
-    def burn_onscreen(self) -> bool:
-        return bool(self.on_screen()["burn_in_when_compressing"]) and self.translate_onscreen() is not None
-
-    def onscreen_track(self) -> tuple[Path | None, list[Path]]:
-        """The Russian on-screen text as an ASS track (default, forced) and the fonts to attach; (None, []) if none."""
-        items = self.translate_onscreen()
-        if items is None:
-            return None, []
-        from stt import onscreen_render, video_compress
-
-        info = video_compress.probe(self.media)
-        ass = onscreen_render.write_ass(onscreen_render.load_items(items), self.out / "onscreen.ass",
-                                        int(info["width"]), int(info["height"]), offset_s=self.args.start or 0.0)
-        return ass, list(onscreen_render.font_files() or []) if ass else []
-
-    def planned_tracks(self, engines: list[str]) -> list[str]:
-        """Voice-over tracks the finished video will have: those in it now and the engines of this run."""
-        if (self.config["mix"].get("tracks", "combined") != "combined"):
-            return engines
-        return list(dict.fromkeys([*engines, *getattr(self.args, "planned_engines", [])]))
-
-    def _small_target(self, video_cfg: dict[str, Any], tracks: int) -> tuple[dict[str, Any], int, Path] | None:
-        """(probe, bitrate, file) of the compressed video; None when the picture is already small enough."""
-        from stt import video_compress
-
-        codec = str(video_cfg.get("codec", "hevc_nvenc"))
-        original_kbps = int(video_cfg.get("original_audio_kbps", 160))
-        info = video_compress.probe(self.media)
-        bitrate = video_compress.video_bitrate(info["duration"], float(video_cfg.get("target_gb", 2.0)),
-                                               tracks * 192 + original_kbps, info["video_kbps"])
-        if bitrate is None:
-            return None
-        return info, bitrate, self.out / f"video.{codec}.{bitrate}k.mkv"
-
-    def _encode_small(self, small: Path, bitrate: int, codec: str, overlays: Any = None) -> Path | None:
-        """Make ``small`` (one encoding at a time); None when the encoding failed (the video is copied then)."""
-        from stt import video_compress
-
-        with _COMPRESS_GATE:
-            if small.exists():
-                return small
-            started = time.monotonic()
-            try:
-                with VramPeak(interval_s=0.5) as peak:  # this process's total: includes a voice separation at the time
-                    video_compress.encode_video(self.media, small, bitrate, codec, overlays=overlays)
-                gpu_budget.record_peak(self.vram_peaks, "nvenc", peak.peak_mb)
-            except Exception as error:  # noqa: BLE001 - a big video is better than no video
-                log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
-                return None
-            log.info("[%s] compressed video made in %d s", self.media.stem, round(time.monotonic() - started))
-        return small
-
-    def start_compression(self) -> None:
-        """Start the compressed video in the background, once per file, as soon as the episode's voicing starts, so
-        the final mux finds it ready. Not for a test piece, nor with the on-screen text burned in (that picture needs
-        the final translation: ``small_video`` makes it then). The bitrate counts the tracks of this run."""
-        cfg = self.config.get("mix") or {}
-        video_cfg = cfg.get("video") or {}
-        if not (cfg.get("mux") and video_cfg.get("compress")) or self.args.start or self.args.duration \
-                or self.on_screen()["burn_in_when_compressing"]:
-            return
-        existing = [e for e in self.config.get("voiceover", {}).get("engines", {}) if self.track(e).exists()]
-        try:
-            target = self._small_target(video_cfg, len(self.planned_tracks([*existing, self.engine])))
-        except Exception as error:  # noqa: BLE001 - the mux tries again and falls back to copying
-            log.warning("[%s] could not prepare the compressed video (%s)", self.media.stem, error)
-            return
-        if target is None:
-            return
-        _, bitrate, small = target
-        gpu_encoder = str(video_cfg.get("codec", "hevc_nvenc")).endswith("_nvenc")
-        if small.exists() or not self.gpu_overlap("compress", uses_gpu=gpu_encoder):
-            return  # not enough video memory beside the voicing: the final mux compresses it (small_video)
-        job: Future[Path | None] = Future()
-        with _COMPRESS_GUARD:
-            if small in _COMPRESS_JOBS or small.exists():
-                return
-            _COMPRESS_JOBS[small] = job
-
-        def work() -> None:
-            try:
-                job.set_result(self._encode_small(small, bitrate, str(video_cfg.get("codec", "hevc_nvenc"))))
-            except BaseException as error:  # noqa: BLE001
-                log.warning("[%s] compressing the video failed (%s): the video is copied as it is", self.media.stem, error)
-                job.set_result(None)
-
-        log.info("[%s] compressing the video in the background (%d kbps)", self.media.stem, bitrate)
-        threading.Thread(target=work, name=f"compress-{self.media.stem}", daemon=True).start()
-
-    def small_video(self, video_cfg: dict[str, Any], tracks: int) -> Path | None:
-        """The episode's video with a smaller picture for ``mix.video.target_gb`` (made once, shared by the engines'
-        videos; the background one of ``start_compression`` is awaited, never made twice); None when the picture is
-        already small enough or the encoding failed (the video is copied then)."""
-        target = self._small_target(video_cfg, tracks)
-        if target is None:
-            log.info("[%s] the video is already close to the target size: copied as it is", self.media.stem)
-            return None
-        info, bitrate, small = target
-        with _COMPRESS_GUARD:
-            job = _COMPRESS_JOBS.get(small)
-        if job is not None:
-            if not job.done():
-                log.info("[%s] waiting for the compressed video", self.media.stem)
-            result = job.result()
-            if result is None or result.exists():
-                return result
-        overlays = None
-        if self.burn_onscreen():
-            from stt import onscreen_render
-
-            overlays = onscreen_render.render_overlays(onscreen_render.load_items(self.out / "onscreen.ru.json"),
-                                                       int(info["width"]), int(info["height"]))
-            # the burned-in text is part of the picture: a changed translation needs a new video
-            digest = hashlib.sha256((self.out / "onscreen.ru.json").read_bytes()).hexdigest()[:8]
-            small = small.with_name(small.stem + f".onscreen-{digest}" + small.suffix) if overlays else small
-        if small.exists():
-            return small
-        return self._encode_small(small, bitrate, str(video_cfg.get("codec", "hevc_nvenc")), overlays)
-
-    def mix(self) -> None:
-        from stt import mix
-
-        cfg = self.config["mix"]
-        out_wav = self.out / f"{self.media.stem}.ru.{self.engine}.wav"
-        voice = self.widened_track(self.vo_dir / "export" / "track.wav")
-        argv = [str(self.media), str(voice), "--out", str(out_wav),
-                "--duck-db", str(cfg["duck_db"])]
-        if not self.args.start and not self.args.duration:
-            argv.append("--full-duration")
-        if cfg.get("duck") == "voices":  # lower only the original voices, keep music and effects
-            argv += ["--duck-voices-only", "--rest-duck-db", str(cfg.get("rest_duck_db", 6.0)),
-                     "--separation-cache", str(self.out / "separation"),  # one separation for all engines
-                     "--vram-peaks", str(self.vram_peaks)]
-        argv += ["--voice-gain-db", str(cfg.get("voice_gain_db", 3.0))]
-        if cfg.get("loudness_lufs") is not None:  # the whole mix to this level, peaks limited (null: leave as mixed)
-            argv += ["--loudness-lufs", str(cfg["loudness_lufs"])]
-        if self.args.start:  # a test piece: the voice-over is on the episode timeline from 0
-            argv += ["--start", str(self.args.start), "--voice-from-zero"]
-        crowd = self.config.get("crowd", {})
-        if crowd.get("enabled"):  # shouts the dub left out, on a layer of their own under the voice-over
-            from stt import crowd as crowd_layer
-
-            generic = ",".join(f"{k}={v}" for k, v in self._engine()["voices"].items())  # this engine's, not the last dub's
-            crowd_layer.main([str(self.out), "--engine", self.engine, "--voices", str(crowd.get("voices", 1)),
-                              "--neutral-gender", str(self.on_screen()["neutral_gender"]), "--generic-voices", generic]
-                             + (["--solo"] if crowd.get("solo", True) else []))
-            argv += ["--extra", f"{self.out / f'crowd.{self.engine}.wav'}:{crowd.get('gain_db', -3.0)}"]
-        with _MIX_GATE:  # two lanes mixing at once, or a mix beside the F5 worker without room, got the process OOM-killed
-            gpu_budget.wait_for_mix_ram(self.episode_minutes(), self.media.stem)
-            mix.main(argv)
-        started = time.monotonic()
-        mix.encode_track(out_wav, self.track(self.engine))
-        log.info("[%s] mix (%s): AAC encode %.0f s", self.media.stem, self.engine, time.monotonic() - started)
-        if not cfg.get("keep_wav"):  # ~0.5 GB per episode and engine; the AAC track is what the video gets
-            out_wav.unlink()
-        if cfg.get("mux"):  # a test piece gets a short re-encoded video of the piece
-            self.mux_when_ready()
-
-    def widened_track(self, track: Path) -> Path:
-        """The voice track to mix: for a cloned engine whose references are narrowband (old seasons), ``track.wide.wav``
-        with the band drawn above their edge (``stt.widen``, ``mix.widen`` in the config); else ``track`` itself."""
-        from stt import widen
-
-        cfg = (self.config.get("mix") or {}).get("widen") or {}
-        if not cfg.get("enabled", False) or self.engine not in cfg.get("engines", ["f5"]) or not track.exists():
-            return track
-        edge = widen.references_edge(self.out / f"speaker_voices.{self.engine}.json")
-        if edge is None or edge >= float(cfg.get("max_band_hz", widen.MAX_BAND_HZ)):
-            return track
-        out = track.with_name("track.wide.wav")
-        if out.exists() and out.stat().st_mtime >= track.stat().st_mtime:
-            return out
-        started = time.monotonic()
-        if not widen.widen_track(track, out, edge):
-            return track
-        log.info("[%s] mix (%s): the voices' band widened above %.0f Hz (LavaSR) in %.0f s", self.media.stem, self.engine,
-                 edge, time.monotonic() - started)
-        return out
-
-    def mux_when_ready(self) -> None:
-        """Mux the finished video. ``combined``: once, by the engine whose track is the last of this run's engines
-        (the others only log that the mux waits); ``separate``: this engine's own video."""
-        combined = (self.config.get("mix") or {}).get("tracks", "combined") == "combined"
-        with self.lock or nullcontext():  # one video for all engines: one writer at a time
-            signature: tuple[tuple[str, int], ...] = ()
-            if combined:
-                planned = self.planned_tracks([self.engine])
-                waiting = [e for e in planned if not self.track(e).exists()]
-                if waiting:
-                    log.info("[%s] mix (%s): mux deferred until %s finish", self.media.stem, self.engine,
-                             ", ".join(waiting))
-                    return
-                signature = tuple(sorted((e, self.track(e).stat().st_mtime_ns) for e in planned))
-                if _MUXED.get(self.out) == signature and self.finished_video().exists():
-                    log.info("[%s] mix (%s): the video with these tracks is already made", self.media.stem, self.engine)
-                    return
-            started = time.monotonic()
-            self.mux()
-            log.info("[%s] mix (%s): mux %.0f s", self.media.stem, self.engine, time.monotonic() - started)
-            if combined:
-                _MUXED[self.out] = signature
-            self._clear_separation()
-
-    def _clear_separation(self) -> None:
-        """Delete the cached voice separation (~1.5 GB per hour) once the video is made and every engine of this run
-        has its track; before that (or after a failed mux, which never gets here) a rerun reuses it.
-        Done whatever ``mix.keep_wav`` says: that setting is about the mixed WAVs."""
-        cache = self.out / "separation"
-        engines = dict.fromkeys([self.engine, *getattr(self.args, "planned_engines", [])])
-        waiting = [e for e in engines if not self.track(e).exists()]
-        if waiting or not cache.exists():
-            return
-        shutil.rmtree(cache, ignore_errors=True)
-        log.info("[%s] mix (%s): voice separation cache removed (%s)", self.media.stem, self.engine, cache)
-
-
-PROGRESS_POLL_S = 2.0  # how often a running module's progress file is looked at
-PROGRESS_LOG_LINES = 25  # progress of lines / clips goes to the log every this many
-SHARED_STAGES = {"transcribe", "glossary", "speakers", "translate", "stress"}  # one result for all engines
-ENGINE_STAGES = {"dub", "voiceover", "check", "mix"}
-CPU_ENGINES = {"vosk"}  # synthesise on the CPU: can run next to the GPU engines
-
-
-def lanes(engines: list[str], parallel: bool) -> list[list[str]]:
-    """Engines in the order they run: one lane, or the GPU engines and the CPU ones side by side."""
-    gpu = [e for e in engines if e not in CPU_ENGINES]
-    cpu = [e for e in engines if e in CPU_ENGINES]
-    return [gpu, cpu] if parallel and gpu and cpu else [engines]
-
-
-def lookahead_enabled(files: list[Path], args: argparse.Namespace, config: dict[str, Any]) -> bool:
-    """Translate the next episode while the current one is voiced (``overlap_episodes``, several episodes, run
-    reaches the translation). Off when a stage up to the translation is forced: the lookahead and the lane would both run it."""
-    if not config.get("overlap_episodes", True) or len(files) < 2:
-        return False
-    translate = STAGES.index("translate")
-    if STAGES.index(args.until) < translate:
-        return False
-    force = getattr(args, "force", None)
-    if force and STAGES.index(force) <= translate:
-        log.info("episodes overlap is off: --force %s is at or before the translation and would run twice", force)
-        return False
-    return True
-
 
 def run_lanes(files: list[Path], out_root: Path, args: argparse.Namespace, config: dict[str, Any],
               engines: list[str]) -> None:
-    """Every episode in every engine; the second lane (CPU engines) starts an episode once the first
-    has its shared stages, so the GPU-heavy recognition never runs twice at once.
+    """Every episode in every engine (``stt.stage_runner.run_lanes``) with this module's ``Episode`` and
+    ``wait_onscreen``."""
+    stage_runner.run_lanes(files, out_root, args, config, engines, episode_cls=Episode, wait_onscreen=wait_onscreen)
 
-    Lookahead (``lookahead_enabled``): a third thread runs the next episode up to ``translate`` (LLM only) while
-    the first lane voices the current one. The first lane waits for it before it touches that episode. Events:
-    ``voicing[i]`` (lane 0 started the engines of episode i), ``ahead_done[i]`` (the lookahead is done with i or
-    skipped it). An error anywhere is appended to ``errors`` and sets every event, so no thread waits forever."""
-    groups = lanes(engines, bool((config.get("voiceover") or {}).get("parallel_cpu", True)))
-    locks = {media: threading.Lock() for media in files}
-    shared = {media: threading.Event() for media in files}
-    voicing = {media: threading.Event() for media in files}
-    ahead_done = {media: threading.Event() for media in files}
-    errors: list[BaseException] = []
-    ahead = lookahead_enabled(files, args, config)
-    translate_stage = STAGES[min(STAGES.index(args.until), STAGES.index("translate"))]
-    shared_forced: set[Path] = set()  # episodes whose forced shared stages have run already
-    forced_guard = threading.Lock()
-    # A forced shared stage up to the translation runs once per episode; the finish marks make every engine's later stages
-    # run. The stress check of an engine whose dubbing lines did not change then keeps its result (same lines, same marks).
-    force_shared = bool(getattr(args, "force", None)) and STAGES.index(args.force) <= STAGES.index("translate")
 
-    def release_all() -> None:
-        for events in (shared, voicing, ahead_done):
-            for event in events.values():
-                event.set()
-
-    def fail(error: BaseException) -> None:
-        errors.append(error)
-        release_all()
-
-    def episode(media: Path, engine: str, until: str | None = None) -> Episode:
-        lane_args = argparse.Namespace(**{**vars(args), "engine": engine, "until": until or args.until})
-        if force_shared:
-            with forced_guard:  # the forced shared stages run once per episode, the finish marks pull the rest along
-                if media in shared_forced:
-                    lane_args.force = None
-                shared_forced.add(media)
-        return Episode(media, out_root, lane_args, config, lock=locks[media])
-
-    def lane(group: list[str], first: bool) -> None:
-        for media in files:
-            if errors:
-                return
-            background = Background()  # this lane's mixes running while its next engine dubs and voices
-            try:
-                if first and ahead:
-                    ahead_done[media].wait()  # the lookahead may be on this episode
-                    if errors:
-                        return
-                if first and (len(groups) > 1 or ahead):
-                    try:
-                        episode(media, group[0], translate_stage).run()
-                    finally:
-                        shared[media].set()
-                elif not first:
-                    shared[media].wait()
-                if errors:
-                    return
-                voicing[media].set()
-                for engine in group:
-                    if background.failed() or errors:  # another thread failed: no new engine starts
-                        break
-                    ep = episode(media, engine)
-                    ep.args.mix_background = background
-                    ep.run()
-            except BaseException as error:  # noqa: BLE001 - stop all threads, report after they end
-                fail(error)
-            finally:
-                try:
-                    background.join()
-                except BaseException as error:  # noqa: BLE001
-                    fail(error)
-            if errors:
-                return
-
-    def lookahead() -> None:
-        try:
-            for previous, media in zip(files, files[1:]):
-                voicing[previous].wait()
-                if errors:
-                    return
-                probe = episode(media, groups[0][0], "translate")
-                if probe.gpu_stage_needed():
-                    log.info("[%s] not translated ahead: it needs recognition or names first", media.stem)
-                else:
-                    log.info("[%s] translate ahead while %s is voiced", media.stem, previous.stem)
-                    probe.run()
-                ahead_done[media].set()
-        except BaseException as error:  # noqa: BLE001
-            fail(error)
-        finally:
-            for event in ahead_done.values():
-                event.set()
-
-    ahead_done[files[0]].set()  # nothing runs before the first episode
-    helper = threading.Thread(target=lookahead, name="lookahead") if ahead else None
-    threads: list[threading.Thread] = []
-    if helper:
-        helper.start()
-    try:
-        if len(groups) == 1:
-            lane(groups[0], True)
-        else:
-            from voiceover.engine import CPU_THREADS_ENV
-
-            # Vosk on all cores starved the GPU engines' own CPU work (10-min piece: ESpeech 7.5 -> 12.3 min)
-            os.environ.setdefault(CPU_THREADS_ENV, str(max(2, (os.cpu_count() or 4) // 2)))
-            log.info("engines in two lanes: %s on the GPU, %s on the CPU alongside (%s CPU threads)",
-                     ", ".join(groups[0]), ", ".join(groups[1]), os.environ[CPU_THREADS_ENV])
-            for n, group in enumerate(groups):
-                thread = threading.Thread(target=lane, args=(group, n == 0), name=f"lane-{n}")
-                thread.start()
-                threads.append(thread)
-    finally:  # whatever happened above: nothing may stay waiting
-        try:
-            for thread in threads:
-                thread.join()
-        finally:
-            if helper:
-                release_all()  # a lane that returned early (or never started) must not leave the lookahead waiting
-                helper.join()
-    try:
-        wait_onscreen()  # a run that ends at the translation still gets onscreen.ru.json
-    except LLMStop as error:
-        errors.append(error)
-    if errors:  # the reason the run stops (no money, no subscription) is reported before any other error
-        raise next((e for e in errors if isinstance(e, LLMStop)), errors[0])
 
 
 VIDEO_SUFFIXES = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts"}
@@ -1540,83 +643,6 @@ def prepare_summary(files: list[Path], out_root: Path) -> list[str]:
     return lines
 
 
-SUBSCRIPTION_DOWN = "The ChatGPT subscription login of OpenCode does not work (run `opencode auth login`)"
-
-
-def subscription_models(config: dict[str, Any]) -> list[str]:
-    """Model ids of the LLM steps that go through the OpenCode subscription (see ``Episode.llm``)."""
-    llm = config.get("llm") or {}
-    patterns = llm.get("opencode") or []
-    names: list[str] = []
-    for value in [llm.get("model"), *(llm.get("stages") or {}).values()]:
-        names += value if isinstance(value, list) else [value] if value else []
-    models = []
-    for name in names:
-        transports, bare = split_route(name)
-        if "opencode" in transports or (not transports and any(fnmatch.fnmatchcase(bare, p) for p in patterns)):
-            models.append(bare)
-    return list(dict.fromkeys(models))
-
-
-def paying_allowed(config: dict[str, Any]) -> bool:
-    """May this run pay for LLM requests? Yes when no model goes through the subscription (``llm.opencode`` empty: the
-    run was set up for OpenRouter, or there is no subscription) or when ``llm.fallback`` allows the paid fallback."""
-    llm = config.get("llm") or {}
-    return not llm.get("opencode") or bool(llm.get("fallback", False))
-
-
-def export_llm_env(config: dict[str, Any]) -> None:
-    """Settings of the LLM clients for this process and the stage processes it starts (environment variables):
-    the subscription's retry budget, its per-request fallback model and whether paying is allowed."""
-    from stt.llm import SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S
-
-    llm = config.get("llm") or {}
-    os.environ[SUBSCRIPTION_RETRY_ENV] = str(llm.get("subscription_retry_s", SUBSCRIPTION_RETRY_S))
-    os.environ[FALLBACK_ENV] = json.dumps(llm.get("subscription_fallback") or {})
-    os.environ[FALLBACK_AFTER_ENV] = str(llm.get("subscription_fallback_after_s", FALLBACK_AFTER_S))
-    os.environ[PAID_ENV] = "allow" if paying_allowed(config) else "deny"
-
-
-def llm_steps(config: dict[str, Any]) -> dict[str, list[str]]:
-    """The LLM steps of this run: name -> model ids with their routes (a list is a chain of models; ``model`` is the
-    default of the steps without their own). Steps that will not run are left out."""
-    llm = config.get("llm") or {}
-    voiceover, stages = config.get("voiceover") or {}, llm.get("stages") or {}
-    off = set()
-    if not voiceover.get("stress_check", True):
-        off |= {"stress", "stress_screen", "stress_proofread"}
-    if not voiceover.get("stress_proofread", False):
-        off.add("stress_proofread")
-    if not (config.get("cast") or {}).get("enabled", True):
-        off.add("cast")
-    if not (config.get("translate") or {}).get("proofread", True):
-        off.add("translate_proofread")
-    steps = {"model": llm.get("model", config.get("llm_model", "openai/gpt-6-luna")), **stages}
-    steps = {k: v for k, v in steps.items() if k not in off and v}
-    return {k: [Episode.route_in(config, m) for m in (v if isinstance(v, list) else [v])] for k, v in steps.items()}
-
-
-def check_paid_steps(config: dict[str, Any]) -> None:
-    """When this run may not pay: drop paid models that come after a subscription one in a step's list (with a
-    warning) and stop (``PaidNotAllowed``) when a step's only or first model is paid, naming the steps."""
-    if paying_allowed(config):
-        return
-    blocked: list[str] = []
-    stages = (config.get("llm") or {}).get("stages") or {}
-    for step, models in llm_steps(config).items():
-        paid = [split_route(m)[0][:1] != ["opencode"] for m in models]
-        if paid[0]:
-            blocked.append(f"{step}: {models[0]}")
-        elif any(paid):
-            kept = [m for m, is_paid in zip(models, paid) if not is_paid]
-            log.warning("llm: %s is paid and this run may not pay: left out of step %r / платная модель убрана из "
-                        "шага %r в этом запуске", ", ".join(m for m, is_paid in zip(models, paid) if is_paid), step,
-                        step)
-            if isinstance(stages.get(step), list):
-                stages[step] = [m for m in stages[step] if Episode.route_in(config, m) in kept]
-    if blocked:
-        raise PaidNotAllowed("these steps use a paid model: " + "; ".join(blocked)
-                             + " (pick a subscription model for them in the settings, or allow paying for this run)")
 
 
 def check_subscription(config: dict[str, Any]) -> bool:
@@ -1681,7 +707,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="One sub-folder per episode (default: paths.work in the config, else output/stt)")
     parser.add_argument("--config", default=str(REPO_ROOT / "stt_config.json"))
     parser.add_argument("--dump-config", action="store_true",
-                        help="Print effective settings and leaf sources without running models (media optional)")
+                        help="Print effective settings and leaf sources without running models (media optional); the "
+                             "layers are the command line's (base/local/preset/show/cli), the season_settings.json "
+                             "that the UI saves separately is not included")
     parser.add_argument("--preset", default=None, help="A named set of settings (presets in the config): main, upload, fast, previous")
     parser.add_argument("--show", default=None,
                         help="Settings profile of a show (shows in the config; auto by the video's path; none: no profile)")
@@ -1794,4 +822,8 @@ def run_all(args: argparse.Namespace, config: dict[str, Any], files: list[Path],
 
 
 if __name__ == "__main__":
-    main()
+    # ``python -m stt.run`` runs this file as ``__main__``: run the importable ``stt.run`` instead, so the code split
+    # out of it (``stt.stage_runner.run_module``) and this entry point share one module and its state.
+    from stt import run as _run
+
+    _run.main()
