@@ -39,7 +39,9 @@ fi
 if has f5; then
   venv f5_env 3.12
   # torch, torchaudio and the rest of subs_env are visible to f5_env; its own packages win
-  echo "$PWD/subs_env/lib/python3.12/site-packages" > f5_env/lib/python3.12/site-packages/subs_env.pth
+  [ -d subs_env/lib/python3.12/site-packages ] || { echo "Create subs_env first: bash scripts/setup_envs.sh" >&2; exit 1; }
+  subs_site="$(cd subs_env/lib/python3.12/site-packages && pwd -P)"
+  printf '%s\n' "$subs_site" > f5_env/lib/python3.12/site-packages/subs_env.pth
   VIRTUAL_ENV=$PWD/f5_env uv pip install f5-tts==1.1.22 --override overrides-f5.txt
   f5_env/bin/python -c "import f5_tts, torch; print('f5-tts ok, CUDA:', torch.cuda.is_available())"
 fi
@@ -57,7 +59,10 @@ if has xvoice; then
   # (stt.ru_samples); the system library espeak-ng is used by phonemizer
   venv xvoice_env 3.11
   VIRTUAL_ENV=$PWD/xvoice_env uv pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-  [ -d models/X-Voice ] || git clone https://github.com/sunnyxrxrx/X-Voice models/X-Voice
+  if [ ! -d models/X-Voice ]; then
+    git clone https://github.com/sunnyxrxrx/X-Voice models/X-Voice
+    git -C models/X-Voice checkout 817bcdd9f8173eb01c7d5c895858b1d93780d9d0
+  fi
   VIRTUAL_ENV=$PWD/xvoice_env uv pip install -e models/X-Voice
   VIRTUAL_ENV=$PWD/xvoice_env uv pip install "pyarrow<20"
   xvoice_env/bin/python -c "import x_voice, torch; print('X-Voice ok, CUDA:', torch.cuda.is_available())"
