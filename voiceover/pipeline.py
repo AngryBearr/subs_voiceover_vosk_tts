@@ -19,7 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from utils.llm_route import exiting_on_stop
+from utils.llm_core import note_fallback
+from utils.llm_route import exiting_on_stop, split_route
 from utils.srt_to_json import parse_srt_file
 from voiceover.calibrate import (CALIBRATION_VERSION, Calibration, calibrate, derive_timeline_policy,
                                  engine_identity, load_shared_calibration, probe_texts, shared_calibration_path,
@@ -290,6 +291,19 @@ def _stats_delta(client: LLMClient, before: dict[str, int]) -> dict[str, int]:
     return {key: value - before.get(key, 0) for key, value in client.stats().items()}
 
 
+def _carry_fallback_provenance(artifact: dict[str, Any], client: LLMClient) -> None:
+    """Keep stand-in provenance alive when a resumed run reuses a cached LLM artifact."""
+    calls = int((artifact.get("llm_stats") or {}).get("subscription_fallback_calls") or 0)
+    if calls <= 0:
+        return
+    requested = split_route(client.config.model)[1]
+    seen = [str(model) for model in (artifact.get("llm_models") or []) if model]
+    fallbacks = [model for model in seen if split_route(model)[1] != requested] or seen or [requested]
+    note_fallback(requested, fallbacks[0], count=calls)
+    for model in fallbacks[1:]:
+        note_fallback(requested, model, count=0)
+
+
 def stage_annotate(units_artifact: dict[str, Any], durations: dict[str, Any], schedule_artifact: dict[str, Any],
                    policy: CompressionPolicy, client: LLMClient, out: Path) -> dict[str, Any]:
     """One cached model call per scene that holds a unit to shorten."""
@@ -303,6 +317,7 @@ def stage_annotate(units_artifact: dict[str, Any], durations: dict[str, Any], sc
     if path.exists():
         existing = read_json(path)
         if existing.get("inputs") == inputs:
+            _carry_fallback_provenance(existing, client)
             log.info("annotate: artifact matches, skipping")
             return existing
     before = client.stats()
@@ -329,6 +344,7 @@ def stage_compress(units_artifact: dict[str, Any], durations: dict[str, Any], sc
     if path.exists():
         existing = read_json(path)
         if existing.get("inputs") == inputs:
+            _carry_fallback_provenance(existing, client)
             log.info("compress: artifact matches, skipping")
             return existing
     jobs, scenes = build_jobs(units_artifact["units"], schedule_artifact["placements"], durations["rows"], policy)
@@ -420,6 +436,7 @@ def stage_verify(candidates: dict[str, Any], durations1: dict[str, Any], policy:
     if path.exists():
         existing = read_json(path)
         if existing.get("inputs") == inputs:
+            _carry_fallback_provenance(existing, client)
             log.info("verify: artifact matches, skipping")
             return existing
     measured = {(row["unit_id"], row["rung"]) for row in rows1 if not row.get("error")}

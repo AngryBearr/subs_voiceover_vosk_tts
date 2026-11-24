@@ -408,3 +408,29 @@ def test_stand_in_answer_is_recorded_for_the_stage_and_cleared_by_a_clean_restar
         client = make_client(tmp_path, lambda body: sol, model="opencode:openai/gpt-6.1-sol")
         assert client.complete_json("s", "u", prompt_version="v", tag="t").content == {"a": 2}
     assert not (episode / "llm_provenance.json").exists()
+
+
+def test_resumed_voiceover_stage_keeps_provenance_of_reused_luna_artifact(tmp_path: Path) -> None:
+    from stt import progress
+    from utils.llm_core import read_provenance
+    from voiceover.pipeline import _carry_fallback_provenance
+
+    episode = tmp_path / "ep"
+    luna = {**chat_response('{"a": 1}', model="opencode:openai/gpt-6-luna"), "subscription_fallback": True}
+    with pytest.raises(KeyboardInterrupt):
+        with progress.track(episode, "voiceover", "f5"):
+            client = make_client(tmp_path, lambda body: luna, model="opencode:openai/gpt-6.1-sol")
+            client.complete_json("s", "u", prompt_version="v", tag="t")
+            saved_artifact = {"llm_stats": client.stats(), "llm_models": sorted(client.models_seen)}
+            raise KeyboardInterrupt
+    assert read_provenance(episode)["stages"]["voiceover.f5"]["fallback_calls"] == 1
+
+    # Resumed run reuses the saved Luna artifact without making any new LLM calls.
+    with progress.track(episode, "voiceover", "f5"):
+        resumed_client = make_client(tmp_path, lambda body: (_ for _ in ()).throw(AssertionError("no call")),
+                                     model="opencode:openai/gpt-6.1-sol")
+        _carry_fallback_provenance(saved_artifact, resumed_client)
+    entry = read_provenance(episode)["stages"]["voiceover.f5"]
+    assert entry["fallback_calls"] == 1
+    assert entry["requested_models"] == ["openai/gpt-6.1-sol"]
+    assert entry["fallback_models"] == ["opencode:openai/gpt-6-luna"]

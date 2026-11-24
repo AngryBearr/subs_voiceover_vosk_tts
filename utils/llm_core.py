@@ -212,8 +212,8 @@ def stage_key(stage: str, engine: str | None = None) -> str:
 
 
 def record_fallback(folder: Path, key: str, stage_started: float, requested_model: str,
-                    answered_model: str) -> Path | None:
-    """Count one stand-in answer for stage ``key`` (started at ``stage_started``) in ``<folder>/llm_provenance.json``.
+                    answered_model: str, *, count: int = 1) -> Path | None:
+    """Count stand-in answers for stage ``key`` (started at ``stage_started``) in ``<folder>/llm_provenance.json``.
 
     The entry is started afresh when the stage itself started again (its ``stage_started`` differs). Returns the
     file, or None when it could not be locked or written (the answer itself must not be lost over a label).
@@ -227,7 +227,7 @@ def record_fallback(folder: Path, key: str, stage_started: float, requested_mode
         if not isinstance(entry, dict) or entry.get("stage_started") != stage_started:
             entry = {"stage_started": stage_started, "fallback_calls": 0, "requested_models": [],
                      "fallback_models": []}
-        entry["fallback_calls"] = int(entry.get("fallback_calls") or 0) + 1
+        entry["fallback_calls"] = int(entry.get("fallback_calls") or 0) + count
         entry["requested_models"] = sorted({*entry.get("requested_models", []), requested_model})
         entry["fallback_models"] = sorted({*entry.get("fallback_models", []), answered_model})
         entry["updated"] = datetime.now().isoformat(timespec="seconds")
@@ -240,7 +240,7 @@ def record_fallback(folder: Path, key: str, stage_started: float, requested_mode
     return path
 
 
-def note_fallback(requested_model: str, answered_model: str) -> Path | None:
+def note_fallback(requested_model: str, answered_model: str, *, count: int = 1) -> Path | None:
     """Record that the current ``stt.run`` stage (``stt.progress.current()``) used an answer of the stand-in model.
 
     Outside a tracked stage (a standalone run of ``voiceover`` or a test) nothing is written and None is returned.
@@ -252,7 +252,7 @@ def note_fallback(requested_model: str, answered_model: str) -> Path | None:
     if tracker is None:
         return None
     return record_fallback(tracker.folder, stage_key(tracker.stage, tracker.engine), tracker.started,
-                           requested_model, answered_model)
+                           requested_model, answered_model, count=count)
 
 
 def clear_stale_provenance(folder: Path, key: str, stage_started: float) -> bool:
