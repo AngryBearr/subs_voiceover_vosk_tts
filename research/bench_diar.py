@@ -5,7 +5,7 @@ Data: one or more parquet shards of `diarizers-community/voxconverse` (test spli
         --repo-type dataset --local-dir output/stt_data/voxconverse
 
 Run (from repo root):
-    subs_env/bin/python -m stt.bench_diar --parquet output/stt_data/voxconverse/data/test-00006-of-00011.parquet \
+    subs_env/bin/python -m research.bench_diar --parquet output/stt_data/voxconverse/data/test-00006-of-00011.parquet \
         --models pyannote-community-1 --out output/stt_bench/diar_voxconverse
 """
 
@@ -20,7 +20,7 @@ from typing import Any
 
 from stt.runner import load_json, run_module, save_json
 
-log = logging.getLogger("stt.bench_diar")
+log = logging.getLogger("research.bench_diar")
 
 COLLAR_S = 0.25  # VoxConverse challenge scoring collar
 

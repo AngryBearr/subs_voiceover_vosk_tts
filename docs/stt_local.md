@@ -1112,15 +1112,15 @@ Past experiments, what came of them and which outputs were deleted: `docs/experi
 
 ```bash
 # ASR vs English subtitles (clip snapped to subtitle gaps, SDH markup removed)
-subs_env/bin/python -m stt.bench asr --media ep.mkv --srt ep.en.srt --start 600 --duration 600 --out output/stt_bench/ep_10m
-subs_env/bin/python -m stt.bench summary output/stt_bench/ep_10m ...
+subs_env/bin/python -m research.bench asr --media ep.mkv --srt ep.en.srt --start 600 --duration 600 --out output/stt_bench/ep_10m
+subs_env/bin/python -m research.bench summary output/stt_bench/ep_10m ...
 # diarization: VoxConverse DER, or SDH speaker labels of a real episode
-subs_env/bin/python -m stt.bench_diar --parquet voxconverse-test.parquet --out output/stt_bench/diar
+subs_env/bin/python -m research.bench_diar --parquet voxconverse-test.parquet --out output/stt_bench/diar
 subs_env/bin/python -m stt.sdh_eval --srt ep.en.srt output/stt/ep/diarization.*.json
 # speaker changes vs the '>>' turn marks of CBS captions (S20, S29 WEB-DL; roll-up lines de-duplicated)
 subs_env/bin/python -m stt.turn_eval --srt ep.en.srt output/stt/ep/words.json
 # translations side by side
-subs_env/bin/python -m stt.compare_translations output/stt/ep --variants a b --ass ep.ru.ass
+subs_env/bin/python -m research.compare_translations output/stt/ep --variants a b --ass ep.ru.ass
 ```
 
 Why these models (Australian Survivor S10, three 10-minute clips, WER against English SDH

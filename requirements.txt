@@ -62,7 +62,7 @@ mcp==1.30.0
 gradio==6.30.0
 pytest==9.0.3
 
-# Benchmarks (stt.bench)
+# Benchmarks (research.bench)
 jiwer==4.0.0
 whisper-normalizer==0.1.15
 pyarrow==26.0.0

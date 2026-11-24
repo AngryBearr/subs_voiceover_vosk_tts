@@ -92,7 +92,7 @@ qwen ignore `reasoning.effort` and think until the 16k token limit (empty answer
 `--reasoning off`.
 
 
-## Per-model summary over the three clips (`stt.bench summary`)
+## Per-model summary over the three clips (`research.bench summary`)
 
 | Model | Clips | WER (pooled) | Audio, s | RTFx | Peak VRAM, MB |
 |---|---:|---:|---:|---:|---:|

@@ -1,8 +1,8 @@
 """Small script to test `synthesize.synthesize.synthesize_text` with a random speaker.
 
 Usage:
-    python scripts/synthesize_test.py         # uses default text and model
-    python scripts/synthesize_test.py -t "Привет, мир" --device cpu
+    python research/synthesize_test.py         # uses default text and model
+    python research/synthesize_test.py -t "Привет, мир" --device cpu
 
 The script loads `models/vosk-model-tts-ru-0.10-multi/config.json`, selects a random
 speaker from `speaker_id_map` (or falls back to `num_speakers`) and writes a .wav.

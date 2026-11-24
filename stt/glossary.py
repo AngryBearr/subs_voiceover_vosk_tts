@@ -3,7 +3,7 @@
     subs_env/bin/python -m stt.glossary output/stt/ep01 [--season output/stt/survivor_s10.glossary.json]
 
 Writes `glossary.json`, `glossary.txt` (EN -> RU lines for `stt.translate --glossary`) and
-`hotwords.txt` (English names/terms for ASR biasing, `stt.bench asr --hotwords-file`).
+`hotwords.txt` (English names/terms for ASR biasing, `research.bench asr --hotwords-file`).
 With `--season`, the season file is extended and used as the starting point, so names and
 renderings stay consistent across episodes.
 """

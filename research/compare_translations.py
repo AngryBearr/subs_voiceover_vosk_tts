@@ -1,6 +1,6 @@
 """Side-by-side comparison of translation variants of one transcription folder.
 
-    subs_env/bin/python -m stt.compare_translations output/stt/ep01 --variants luna deepseek \
+    subs_env/bin/python -m research.compare_translations output/stt/ep01 --variants luna deepseek \
         [--ass existing.ru.ass] [--cps 14] [--from 0 --to 600]
 
 Variant `X` is `subs.ru.X.json` (written by `stt.translate --suffix .X`). Writes
@@ -19,7 +19,7 @@ from typing import Any
 
 from stt.runner import load_json
 
-log = logging.getLogger("stt.compare_translations")
+log = logging.getLogger("research.compare_translations")
 
 _GENDER_MARK = {"female": "♀", "male": "♂"}
 
