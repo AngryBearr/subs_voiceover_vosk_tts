@@ -15,12 +15,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
-import re
 import threading
 import time
 import urllib.error
-import urllib.request
+import urllib.request  # noqa: F401 - tests patch ``stt.llm.urllib.request.urlopen``
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,9 +26,10 @@ from typing import Any
 from stt import progress
 from stt.runner import REPO_ROOT
 from utils.atomic_io import write_text_atomic
-from utils.llm_route import (ROUTERS, PaidDown, PaidNotAllowed, SubscriptionDown, generate_via_subscription,
-                             is_paid_dead, is_subscription_down, paid_allowed, paid_run, record_paid, require_paid,
-                             router_model, split_route)
+from utils.llm_core import (env_value, extract_json, post_chat_completions, record_answer_cost, routed_model,
+                            subscription_chat)
+from utils.llm_route import (ROUTERS, PaidDown, PaidNotAllowed, SubscriptionDown, is_paid_dead,  # noqa: F401
+                             is_subscription_down, paid_allowed, paid_run, require_paid, split_route)
 from utils.opencode_clean import (SUBSCRIPTION_BACKOFF_S, SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S,  # noqa: F401
                                   ModelNotOffered, OpenCodeError, flatten_messages, generate_with_retry,
                                   shared_server, subscription_retry_budget)
@@ -44,12 +43,7 @@ _KEPT_NOW: set[Path] = set()  # answers kept by this process: a repeated request
 
 def load_api_key(env_file: Path = REPO_ROOT / ".env", name: str = "OPENROUTER_API_KEY") -> str:
     """API key ``name`` from the environment or the repo `.env` file (parsed as data)."""
-    value = os.environ.get(name)
-    if not value and env_file.is_file():
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            match = re.match(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=\s*(.*?)\s*$", line)
-            if match:
-                value = match.group(1).strip().strip("'\"")
+    value = env_value(name, env_file)
     if not value:
         raise RuntimeError(f"Set {name} in the environment or in .env at the repo root")
     return value
@@ -91,13 +85,7 @@ class Usage:
         }
 
 
-def _extract_json(text: str) -> Any:
-    text = text.strip()
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
-    start = min((i for i in (text.find("{"), text.find("[")) if i >= 0), default=0)
-    return json.loads(text[start:])
+_extract_json = extract_json  # kept for callers of the old private name
 
 
 class OpenRouterClient:
@@ -136,22 +124,9 @@ class OpenRouterClient:
         return self._api_keys[router]
 
     def _post(self, body: dict[str, Any], router: str = "openrouter") -> dict[str, Any]:
-        model = router_model(self.bare_model)
-        if model is None:  # permanent: the next transport (if any) takes over, nothing is sent
-            raise RuntimeError(f"no OpenRouter id for {self.bare_model}")
-        body = {**body, "model": model}
-        request = urllib.request.Request(
-            ROUTERS[router].base_url + "/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._key(router)}",
-                "Content-Type": "application/json",
-                "X-Title": "subs-voiceover-stt",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-            return json.loads(response.read().decode("utf-8"))
+        # no router id is permanent: the next transport (if any) takes over, nothing is sent
+        body = {**body, "model": routed_model(self.bare_model)}
+        return post_chat_completions(ROUTERS[router].base_url, self._key(router), body, self.timeout_s)
 
     def _generate(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """The OpenCode answer in the OpenRouter response shape (no usage: the subscription pays).
@@ -160,10 +135,8 @@ class OpenRouterClient:
         until ``subscription_retry_s`` of waiting is used up; a quota error is not retried. A model with a
         subscription fallback hands this one request to the weaker model when it does not answer in time.
         """
-        text, used = generate_via_subscription(shared_server, flatten_messages(messages), self.bare_model,
-                                               self.reasoning, self.timeout_s, self.subscription_retry_s)
-        return {"model": "opencode:" + used, "subscription_fallback": used != self.bare_model,
-                "choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+        return subscription_chat(shared_server, messages, self.bare_model, self.reasoning, self.timeout_s,
+                                 self.subscription_retry_s)
 
     def chat_json(
         self,
@@ -259,7 +232,7 @@ class OpenRouterClient:
                 response = self._generate(messages) if transport == "opencode" else self._post(body, transport)
                 self.usage.add(response)
                 if transport != "opencode":
-                    record_paid(self.bare_model, transport, float((response.get("usage") or {}).get("cost") or 0.0))
+                    record_answer_cost(self.bare_model, transport, response)
                 choice = response["choices"][0]
                 content = choice["message"].get("content") or ""
                 try:

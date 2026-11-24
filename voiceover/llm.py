@@ -10,8 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
-import re
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -19,17 +17,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from utils.llm_route import (PaidDown, PaidNotAllowed, SubscriptionDown, generate_via_subscription, is_paid_dead,
-                             is_subscription_down, paid_allowed, paid_run, record_paid, require_paid, split_route)
+from utils.llm_core import (REPO_ROOT, answered_by_fallback, env_value, parse_env_file,  # noqa: F401
+                            parse_json_object, record_answer_cost, routed_model, strip_code_fence,
+                            subscription_chat)
+from utils.llm_route import (PaidDown, PaidNotAllowed, SubscriptionDown, is_paid_dead, is_subscription_down,
+                             paid_allowed, paid_run, require_paid, split_route)
 
 log = logging.getLogger("voiceover")
 
 Transport = Callable[[dict[str, Any]], dict[str, Any]]
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKOFF_SEC = (2.0, 4.0, 8.0)
 JSON_REMINDER = "Ответ должен быть только корректным JSON без пояснений."
-_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?\s*```$", re.DOTALL)
 
 
 class LLMError(RuntimeError):
@@ -93,38 +92,12 @@ class LLMResult:
     tag: str
 
 
-def parse_env_file(path: Path) -> dict[str, str]:
-    """Parse plain ``KEY=VALUE`` lines; comments and blank lines are ignored."""
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip().removeprefix("export ").strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        values[key] = value
-    return values
-
-
 def load_api_key(env_name: str, env_file: Path | None = None) -> str:
     """Return the key from the environment, falling back to the repo ``.env``."""
-    key = os.environ.get(env_name, "").strip()
-    if not key:
-        key = parse_env_file(env_file if env_file is not None else REPO_ROOT / ".env").get(env_name, "").strip()
+    key = env_value(env_name, env_file)
     if not key:
         raise LLMError(f"API key is missing: set the {env_name} environment variable or add it to .env")
     return key
-
-
-def strip_code_fence(text: str) -> str:
-    stripped = text.strip()
-    match = _FENCE_RE.match(stripped)
-    return match.group(1).strip() if match else stripped
 
 
 def canonical_json(value: Any) -> str:
@@ -165,20 +138,17 @@ def opencode_transport(config: LLMConfig) -> Transport:
     that does not answer (budget used up, usage limit) raises ``SubscriptionDown``.
     """
     import utils.opencode_clean as opencode
-    from utils.opencode_clean import OpenCodeError, flatten_messages
+    from utils.opencode_clean import OpenCodeError
 
     def call(body: dict[str, Any]) -> dict[str, Any]:
         variant = None if config.reasoning == "default" else config.reasoning
         try:  # a busy subscription is retried with a growing pause before the request fails
-            text, used = generate_via_subscription(
-                opencode.shared_server, flatten_messages(body["messages"]), config.model, variant,
-                config.timeout_sec, opencode.subscription_retry_budget())
+            return subscription_chat(opencode.shared_server, body["messages"], config.model,
+                                     variant, config.timeout_sec, opencode.subscription_retry_budget())
         except OpenCodeError as error:
             if is_subscription_down(error):
                 raise SubscriptionDown(str(error)) from error
             raise (LLMTransientError if error.transient else LLMError)(str(error)) from error
-        return {"model": "opencode:" + used, "subscription_fallback": used != config.model,
-                "choices": [{"message": {"content": text}, "finish_reason": "stop"}], "usage": {}}
 
     return call
 
@@ -222,10 +192,7 @@ def route_transport(config: LLMConfig, env_file: Path | None = None) -> Transpor
                 require_paid(name, bare)  # before anything is sent
                 if name != "opencode":
                     request.pop("thinking", None)  # DeepSeek's field; not for OpenAI models on a router
-                    mapped = router_model(bare)
-                    if mapped is None:  # never send an OpenCode Go id to a router
-                        raise LLMError(f"no OpenRouter id for {bare}")
-                    request["model"] = mapped
+                    request["model"] = routed_model(bare, LLMError)  # never send an OpenCode Go id to a router
                 return transport(index)(request)
             except PaidNotAllowed:
                 raise
@@ -303,7 +270,7 @@ class LLMClient:
         usage = _usage(response)
         with self._lock:
             self.models_seen.add(model)
-        if response.get("subscription_fallback"):  # the weaker stand-in answered: not cached as the main model's
+        if answered_by_fallback(response):  # the weaker stand-in answered: not cached as the main model's
             return LLMResult(content, False, model, usage, request_sha, tag)
         self._write_cache(path, {
             "request_sha": request_sha, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -357,12 +324,11 @@ class LLMClient:
         with self._lock:
             self.tokens_in += usage.get("prompt_tokens", 0)
             self.tokens_out += usage.get("completion_tokens", 0)
-            self.subscription_fallback_calls += 1 if response.get("subscription_fallback") else 0
+            self.subscription_fallback_calls += 1 if answered_by_fallback(response) else 0
         answered = str(response.get("model") or cfg.model)
         if not answered.startswith("opencode:"):  # a paid answer: its price goes to the run's cost log
             names = split_route(cfg.model)[0]
-            record_paid(answered, next((n for n in names if n != "opencode"), cfg.provider),
-                        float((response.get("usage") or {}).get("cost") or 0.0))
+            record_answer_cost(answered, next((n for n in names if n != "opencode"), cfg.provider), response)
         return response
 
     def _paid_last(self) -> bool:
@@ -414,11 +380,7 @@ def _finish_reason(response: dict[str, Any]) -> str:
         return ""
 
 
-def _parse_json_object(text: str) -> dict[str, Any]:
-    value = json.loads(strip_code_fence(text))
-    if not isinstance(value, dict):
-        raise ValueError("JSON answer is not an object")
-    return value
+_parse_json_object = parse_json_object  # kept for callers of the old private name
 
 
 def _usage(response: dict[str, Any]) -> dict[str, int]:
