@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pytest
 
 from stt.refine_speakers import _overlapping, refine_turns
 
@@ -47,3 +48,39 @@ def test_refine_diarization_keeps_embeddings_and_reports(monkeypatch: Any) -> No
     out = rs.refine_diarization(np.zeros(10), diar, "resnet293", 0.1)
     assert [t["speaker"] for t in out["exclusive"]] == ["S1", "S2", "S2", "S1"]
     assert out["embeddings"] == {"S1": [1.0]} and out["refined"]["moved_exclusive"] == 1
+
+
+@pytest.mark.parametrize(
+    "name,backend,tuned",
+    [
+        ("resnet293", "wespeaker", None),
+        ("resnet293-ft", "wespeaker", None),
+        ("redimnet2-b6", "redimnet2", None),
+        ("redimnet2-b6-vb2", "redimnet2", None),
+        ("redimnet2-plus", "plus", None),
+        ("redimnet2-plus-ft", "plus", "redimnet2-plus-ft"),
+        ("redimnet2-plus-ft2", "plus", "redimnet2-plus-ft2"),
+    ],
+)
+def test_live_embedding_backends_remain_available(
+    monkeypatch: pytest.MonkeyPatch, name: str, backend: str, tuned: str | None,
+) -> None:
+    """Keep the CLI backends and the training script's backbones, without loading weights."""
+    from stt import refine_speakers as rs
+
+    monkeypatch.setattr(rs, "WespeakerTorch", lambda name, device: ("wespeaker", name, device, None))
+    monkeypatch.setattr(rs, "ReDimNet2Torch", lambda name, device: ("redimnet2", name, device, None))
+    monkeypatch.setattr(rs, "ReDimNet2Plus", lambda device, tuned: ("plus", name, device, tuned))
+    assert rs.make_embedder(name, "cpu") == (backend, name, "cpu", tuned)
+    if backend == "wespeaker":
+        assert name in rs.WESPEAKER
+
+
+def test_transcribe_still_exposes_both_redimnet2_variants(capsys: pytest.CaptureFixture[str]) -> None:
+    from stt import transcribe
+
+    with pytest.raises(SystemExit) as stopped:
+        transcribe.main(["--help"])
+    assert stopped.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "redimnet2-b6," in help_text and "redimnet2-b6-vb2" in help_text

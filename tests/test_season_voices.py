@@ -646,6 +646,57 @@ def test_clean_voices_come_from_cards_and_named_lines(season: list[Path], monkey
     assert clean.fingerprint != plain.fingerprint
 
 
+def test_clean_voice_cache_does_not_replace_the_default(
+    tmp_path: Path, season: list[Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The experimental source is still used; switching it must not reuse the other source's cache."""
+    monkeypatch.setattr(
+        sv, "subtitle_hints",
+        lambda episode: WordHints(persons={"ALICE": list(range(12)) + list(range(20, 30))})
+        if episode.folder.name == "e1" else None,
+    )
+    path = tmp_path / "voices.npz"
+    plain = sv.ensure_voices(season, path, MODEL, 20)
+    clean = sv.ensure_voices(season, path, MODEL, 20, source="clean")
+    assert clean.counts[clean.names.index("Alice Smith")] == 22
+    assert clean.fingerprint != plain.fingerprint
+    restored = sv.ensure_voices(season, path, MODEL, 20)
+    assert restored.fingerprint == plain.fingerprint and restored.counts == plain.counts
+
+
+@pytest.mark.parametrize("source", [None, "all", "clean"])
+def test_run_forwards_the_live_voice_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None,
+) -> None:
+    run, args, config, files, _ = _season_run(tmp_path, monkeypatch)
+    if source is not None:
+        config["season_voices"]["voice_source"] = source
+    seen: dict[str, Any] = {}
+
+    def apply(every: list[Path], targets: list[Path], path: Path, **kwargs: Any) -> dict[str, sv.Result]:
+        seen.update(kwargs)
+        return {folder.name: sv.Result("unchanged", "") for folder in targets}
+
+    monkeypatch.setattr(sv, "apply_season", apply)
+    run.run_season_voices(files, tmp_path / "work", args, config, ["vosk"])
+    assert seen["voice_source"] == (source or "all")
+    assert seen["tribe_prior"] == 0.0
+
+
+def test_cli_forwards_clean_voice_source(
+    season: list[Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def apply(*args: Any, **kwargs: Any) -> dict[str, sv.Result]:
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(sv, "apply_season", apply)
+    sv.main([str(season[0].parent), "--dry-run", "--voice-source", "clean", "--tribe-prior", "0.1"])
+    assert seen["voice_source"] == "clean" and seen["tribe_prior"] == 0.1
+
+
 # ---------------------------------------------------------------- voice identities
 def test_an_unnamed_voice_with_an_identity_is_a_season_person(tmp_path: Path) -> None:
     root = tmp_path / "ids"
