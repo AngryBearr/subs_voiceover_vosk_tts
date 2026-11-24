@@ -607,3 +607,62 @@ def test_usage_report_keeps_its_old_fields() -> None:
     assert report["subscription_fallback_calls"] == 1 and report["fallback_used"] is True
     assert report["fallback_models"] == ["opencode:" + LUNA] and report["models"] == sorted(["opencode:" + SOL,
                                                                                              "opencode:" + LUNA])
+
+
+def test_clean_restart_clears_the_stale_stand_in_record_of_its_stage_only(sub: dict[str, Any], tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    from stt import progress
+
+    monkeypatch.setattr(stt.llm, "_KEPT_NOW", set())
+    sub["server"] = ModelServer({SOL: [busy()] * 50, LUNA: ['{"luna": 1}', '{"luna": 2}']})
+    with pytest.raises(KeyboardInterrupt):  # translate stops after Luna stood in
+        with progress.track(tmp_path, "translate"):
+            assert stt.llm.OpenRouterClient("opencode:" + SOL).chat_json("s", "u") == {"luna": 1}
+            raise KeyboardInterrupt
+    with progress.track(tmp_path, "glossary"):  # another stage finishes with a Luna answer: it stays recorded
+        assert stt.llm.OpenRouterClient("opencode:" + SOL).chat_json("s", "g") == {"luna": 2}
+    assert set(stt.llm.read_provenance(tmp_path)["stages"]) == {"translate", "glossary"}
+
+    monkeypatch.setattr(stt.llm, "_KEPT_NOW", set())
+    sub["server"] = ModelServer({SOL: ['{"sol": 3}']})
+    with progress.track(tmp_path, "translate"):  # the restart finishes cleanly on Sol
+        assert stt.llm.OpenRouterClient("opencode:" + SOL).chat_json("s", "u") == {"sol": 3}
+    stages = stt.llm.read_provenance(tmp_path)["stages"]
+    assert "translate" not in stages and stages["glossary"]["fallback_calls"] == 1
+
+    with progress.track(tmp_path, "glossary"):  # glossary again, cleanly: nothing is left, the file goes away
+        pass
+    assert not (tmp_path / "llm_provenance.json").exists()
+
+
+def test_a_stand_in_answer_of_this_attempt_survives_the_end_of_the_stage(tmp_path: Path) -> None:
+    from stt import progress
+
+    with progress.track(tmp_path, "voiceover", engine="f5") as tracker:
+        # a program started by the stage writes with the stage's own start time (``Tracker.environ``)
+        stt.llm.record_fallback(tmp_path, "voiceover.f5", tracker.started, SOL, "opencode:" + LUNA)
+    assert stt.llm.read_provenance(tmp_path)["stages"]["voiceover.f5"]["fallback_calls"] == 1
+    with pytest.raises(RuntimeError):  # a failed attempt clears nothing
+        with progress.track(tmp_path, "voiceover", engine="f5"):
+            raise RuntimeError
+    assert "voiceover.f5" in stt.llm.read_provenance(tmp_path)["stages"]
+
+
+def test_provenance_is_not_rewritten_without_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      caplog: pytest.LogCaptureFixture) -> None:
+    from stt import progress
+    from utils import llm_core
+
+    with progress.track(tmp_path, "glossary") as tracker:
+        stt.llm.note_fallback(SOL, "opencode:" + LUNA)
+    before = (tmp_path / "llm_provenance.json").read_text(encoding="utf-8")
+
+    def refuse(fd: int, op: int) -> None:
+        raise OSError(37, "No locks available")
+
+    monkeypatch.setattr(llm_core.fcntl, "flock", refuse)
+    with progress.track(tmp_path, "glossary"):
+        assert stt.llm.note_fallback(SOL, "opencode:" + LUNA) is None  # not written without the lock
+    assert not stt.llm.clear_stale_provenance(tmp_path, "glossary", tracker.started + 1.0)
+    assert (tmp_path / "llm_provenance.json").read_text(encoding="utf-8") == before
+    assert "could not lock" in caplog.text

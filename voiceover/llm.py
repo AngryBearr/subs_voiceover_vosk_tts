@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from utils.llm_core import (REPO_ROOT, answered_by_fallback, env_value, parse_env_file,  # noqa: F401
-                            parse_json_object, record_answer_cost, routed_model, strip_code_fence,
+from utils.llm_core import (REPO_ROOT, answered_by_fallback, env_value, note_fallback,  # noqa: F401
+                            parse_env_file, parse_json_object, record_answer_cost, routed_model, strip_code_fence,
                             subscription_chat)
 from utils.llm_route import (PaidDown, PaidNotAllowed, SubscriptionDown, is_paid_dead, is_subscription_down,
                              paid_allowed, paid_run, require_paid, split_route)
@@ -271,6 +271,8 @@ class LLMClient:
         with self._lock:
             self.models_seen.add(model)
         if answered_by_fallback(response):  # the weaker stand-in answered: not cached as the main model's
+            # Inside a ``stt.run`` stage the episode records that this stage's output holds such an answer
+            note_fallback(split_route(cfg.model)[1], model)
             return LLMResult(content, False, model, usage, request_sha, tag)
         self._write_cache(path, {
             "request_sha": request_sha, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

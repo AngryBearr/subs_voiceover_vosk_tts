@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from utils.atomic_io import write_text_atomic
+from utils.llm_core import clear_stale_provenance, stage_key
 
 DIR = ".progress"
 PARTIAL_DIR = ".partial"  # <episode>/.partial/<kind>/<stage>[.<engine>]/: kept only while the stage is unfinished
@@ -144,6 +145,8 @@ def track(folder: Path, stage: str, engine: str | None = None) -> Iterator[Track
     else:
         tracker.adopt_counts()
         tracker.write("done", finished=time.time())
+        # Stand-in answers of an earlier attempt are gone from the output of this one (those of this attempt stay)
+        clear_stale_provenance(tracker.folder, stage_key(stage, engine), tracker.started)
     finally:
         _CURRENT.reset(token)
 

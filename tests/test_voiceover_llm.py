@@ -382,3 +382,29 @@ def test_shipped_voiceover_config_uses_the_openrouter_default() -> None:
         "openrouter", "https://openrouter.ai/api/v1", "openai/gpt-6-luna", "OPENROUTER_API_KEY")
     assert main.reasoning == "default"  # "off" would send DeepSeek's "thinking" field to OpenRouter
     assert "deepseek" not in json.dumps(config["llm"]).lower()
+
+
+def test_stand_in_answer_is_recorded_for_the_stage_and_cleared_by_a_clean_restart(tmp_path: Path) -> None:
+    from stt import progress
+    from utils.llm_core import read_provenance
+
+    episode = tmp_path / "ep"
+    luna = {**chat_response('{"a": 1}', model="opencode:openai/gpt-6-luna"), "subscription_fallback": True}
+    client = make_client(tmp_path, lambda body: luna, model="opencode:openai/gpt-6.1-sol")
+    assert client.complete_json("s", "u", prompt_version="v", tag="t").content == {"a": 1}  # outside a stage
+    assert not (episode / "llm_provenance.json").exists()
+
+    with pytest.raises(KeyboardInterrupt):
+        with progress.track(episode, "voiceover", "f5"):
+            client = make_client(tmp_path, lambda body: luna, model="opencode:openai/gpt-6.1-sol")
+            client.complete_json("s", "u", prompt_version="v", tag="t")
+            raise KeyboardInterrupt
+    entry = read_provenance(episode)["stages"]["voiceover.f5"]
+    assert entry["fallback_calls"] == 1 and entry["requested_models"] == ["openai/gpt-6.1-sol"]
+    assert entry["fallback_models"] == ["opencode:openai/gpt-6-luna"]
+
+    sol = chat_response('{"a": 2}', model="opencode:openai/gpt-6.1-sol")
+    with progress.track(episode, "voiceover", "f5"):  # the restart asks Sol (Luna's answer was not cached)
+        client = make_client(tmp_path, lambda body: sol, model="opencode:openai/gpt-6.1-sol")
+        assert client.complete_json("s", "u", prompt_version="v", tag="t").content == {"a": 2}
+    assert not (episode / "llm_provenance.json").exists()
