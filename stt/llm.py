@@ -12,22 +12,25 @@ Without a paid transport in the route (or when the run may not pay) a subscripti
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import urllib.error
 import urllib.request  # noqa: F401 - tests patch ``stt.llm.urllib.request.urlopen``
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from stt import progress
 from stt.runner import REPO_ROOT
 from utils.atomic_io import write_text_atomic
-from utils.llm_core import (env_value, extract_json, post_chat_completions, record_answer_cost, routed_model,
-                            subscription_chat)
+from utils.llm_core import (answered_by_fallback, env_value, extract_json, post_chat_completions, record_answer_cost,
+                            routed_model, subscription_chat)
 from utils.llm_route import (ROUTERS, PaidDown, PaidNotAllowed, SubscriptionDown, is_paid_dead,  # noqa: F401
                              is_subscription_down, paid_allowed, paid_run, require_paid, split_route)
 from utils.opencode_clean import (SUBSCRIPTION_BACKOFF_S, SUBSCRIPTION_RETRY_ENV, SUBSCRIPTION_RETRY_S,  # noqa: F401
@@ -39,6 +42,8 @@ DEFAULT_MODEL = "openai/gpt-6-luna"
 log = logging.getLogger(__name__)
 _USAGE_LOCK = threading.Lock()  # clients may be shared by worker threads
 _KEPT_NOW: set[Path] = set()  # answers kept by this process: a repeated request is a retry and asks again
+PROVENANCE_FILE = "llm_provenance.json"  # <episode>/llm_provenance.json: stages with answers of the stand-in model
+_PROVENANCE_LOCK = threading.Lock()
 
 
 def load_api_key(env_file: Path = REPO_ROOT / ".env", name: str = "OPENROUTER_API_KEY") -> str:
@@ -59,6 +64,7 @@ class Usage:
     cost: float = 0.0
     subscription_fallback_calls: int = 0  # requests answered by the weaker model of the subscription
     models: set[str] = field(default_factory=set)
+    fallback_models: set[str] = field(default_factory=set)  # the stand-in models that answered those requests
 
     def add(self, response: dict[str, Any]) -> None:
         with _USAGE_LOCK:
@@ -70,9 +76,12 @@ class Usage:
         self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
         self.completion_tokens += int(usage.get("completion_tokens") or 0)
         self.cost += float(usage.get("cost") or 0.0)
-        self.subscription_fallback_calls += 1 if response.get("subscription_fallback") else 0
         if response.get("model"):
             self.models.add(response["model"])
+        if answered_by_fallback(response):
+            self.subscription_fallback_calls += 1
+            if response.get("model"):
+                self.fallback_models.add(response["model"])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,8 +90,78 @@ class Usage:
             "completion_tokens": self.completion_tokens,
             "cost_usd": round(self.cost, 6),
             "subscription_fallback_calls": self.subscription_fallback_calls,
+            "fallback_used": bool(self.subscription_fallback_calls),
+            "fallback_models": sorted(self.fallback_models),
             "models": sorted(self.models),
         }
+
+
+def provenance_path(episode_dir: Path) -> Path:
+    """The episode's record of the stages whose output holds answers of the subscription's stand-in model."""
+    return Path(episode_dir) / PROVENANCE_FILE
+
+
+def read_provenance(episode_dir: Path) -> dict[str, Any]:
+    """``{"stages": {stage: {...}}}`` of ``provenance_path``; empty when there is none (or it is unreadable)."""
+    try:
+        data = json.loads(provenance_path(episode_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"stages": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("stages"), dict):
+        return {"stages": {}}
+    return data
+
+
+class _folder_lock:
+    """An exclusive ``flock`` on a folder (other processes writing its provenance file wait); no-op on failure."""
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = Path(folder)
+        self.fd: int | None = None
+
+    def __enter__(self) -> None:
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            self.fd = os.open(self.folder, os.O_RDONLY)
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except OSError:
+            self.__exit__()
+
+    def __exit__(self, *args: object) -> None:
+        if self.fd is not None:
+            os.close(self.fd)  # closing drops the lock
+            self.fd = None
+
+
+def note_fallback(requested_model: str, answered_model: str) -> Path | None:
+    """Record in ``<episode>/llm_provenance.json`` that the current stage used an answer of the stand-in model.
+
+    Outside a tracked ``stt.run`` stage nothing is written (None). The entry of a stage is started afresh when the
+    stage itself starts again (its ``started`` differs): answers of the stand-in are never reused from ``.partial``,
+    so an earlier attempt of the stage leaves none of them in the new output.
+    """
+    tracker = progress.current()
+    if tracker is None:
+        return None
+    name = f"{tracker.stage}.{tracker.engine}" if tracker.engine else tracker.stage
+    path = provenance_path(tracker.folder)
+    with _PROVENANCE_LOCK, _folder_lock(tracker.folder):  # stages of one episode may run in parallel processes
+        data = read_provenance(tracker.folder)
+        entry = data["stages"].get(name)
+        if not isinstance(entry, dict) or entry.get("stage_started") != tracker.started:
+            entry = {"stage_started": tracker.started, "fallback_calls": 0, "requested_models": [],
+                     "fallback_models": []}
+        entry["fallback_calls"] = int(entry.get("fallback_calls") or 0) + 1
+        entry["requested_models"] = sorted({*entry.get("requested_models", []), requested_model})
+        entry["fallback_models"] = sorted({*entry.get("fallback_models", []), answered_model})
+        entry["updated"] = datetime.now().isoformat(timespec="seconds")
+        data["stages"][name] = entry
+        try:
+            write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        except OSError as exc:  # the answer itself must not be lost over a label
+            log.warning("could not write %s: %s", path, exc)
+            return None
+    return path
 
 
 _extract_json = extract_json  # kept for callers of the old private name
@@ -153,7 +232,9 @@ class OpenRouterClient:
         route takes over for this request only (the next request tries the first transport again).
 
         Inside a tracked ``stt.run`` stage every answer is also kept under ``<episode>/.partial/llm/<stage>/``
-        and reused when the same request comes again, so a stage that was stopped does not pay twice.
+        and reused when the same request comes again, so a stage that was stopped does not pay twice. An answer
+        of the subscription's stand-in model (``llm.subscription_fallback``) is not kept: the restarted stage asks the
+        main model again. Such answers are counted in ``usage`` and noted in ``<episode>/llm_provenance.json``.
         """
         kept = self._partial_path(system, user, temperature, max_tokens)
         if kept is not None and kept not in _KEPT_NOW:
@@ -164,7 +245,14 @@ class OpenRouterClient:
                 return answer
             except (OSError, ValueError, KeyError, TypeError):
                 pass  # no answer yet, or a half-written one: ask again
-        answer = self._ask(system, user, temperature, max_tokens, retries)
+        answer, stand_in = self._ask(system, user, temperature, max_tokens, retries)
+        if stand_in is not None:
+            # The weaker stand-in answered: never kept under the main model's key, so a restarted stage asks the
+            # main model again; the episode records which stage holds such an answer.
+            log.info("LLM answer of the stand-in %s (instead of %s) is not kept for a restart", stand_in,
+                        self.bare_model)
+            note_fallback(self.bare_model, stand_in)
+            return answer
         if kept is not None:
             try:
                 write_text_atomic(kept, json.dumps({"answer": answer}, ensure_ascii=False))
@@ -182,7 +270,9 @@ class OpenRouterClient:
                              ensure_ascii=False)
         return folder / f"{hashlib.sha256(request.encode('utf-8')).hexdigest()}.json"
 
-    def _ask(self, system: str, user: str, temperature: float, max_tokens: int, retries: int) -> Any:
+    def _ask(self, system: str, user: str, temperature: float, max_tokens: int,
+             retries: int) -> tuple[Any, str | None]:
+        """(parsed answer, the stand-in model that gave it or None when the requested model answered)."""
         for index, transport in enumerate(self.transports):
             require_paid(transport, self.bare_model)  # before anything is sent
             try:
@@ -209,7 +299,7 @@ class OpenRouterClient:
         raise RuntimeError("no transport")  # unreachable: transports is never empty
 
     def _chat_once(self, transport: str, system: str, user: str, temperature: float, max_tokens: int,
-                   retries: int) -> Any:
+                   retries: int) -> tuple[Any, str | None]:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         body = {
             "model": self.bare_model,
@@ -236,7 +326,7 @@ class OpenRouterClient:
                 choice = response["choices"][0]
                 content = choice["message"].get("content") or ""
                 try:
-                    return _extract_json(content)
+                    parsed = _extract_json(content)
                 except json.JSONDecodeError as exc:
                     details = (response.get("usage") or {}).get("completion_tokens_details") or {}
                     raise ValueError(
@@ -244,6 +334,8 @@ class OpenRouterClient:
                         f"content chars={len(content)}, reasoning tokens={details.get('reasoning_tokens')}): "
                         f"{content[:120]!r}"
                     ) from exc
+                stand_in = str(response.get("model") or "opencode:?") if answered_by_fallback(response) else None
+                return parsed, stand_in
             except OpenCodeError as exc:
                 last_error = exc
                 if not exc.transient:

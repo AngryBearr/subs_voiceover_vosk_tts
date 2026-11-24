@@ -546,3 +546,64 @@ def test_voiceover_paid_failure_is_paid_down_and_the_jury_goes_on(monkeypatch: p
     stress_check._require_answered([client, fine], "voter", ["a", "b"])  # the run goes on with the others
     with pytest.raises(llm_route.PaidDown):  # nobody answers: stop
         stress_check._require_answered([client], "voter", ["a"])
+
+
+def test_luna_answer_is_not_kept_under_sol_and_the_restart_asks_sol(sub: dict[str, Any], tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    from stt import progress
+
+    monkeypatch.setattr(stt.llm, "_KEPT_NOW", set())
+    partial = tmp_path / ".partial" / "llm" / "translate"
+    sub["server"] = ModelServer({SOL: [busy()] * 50, LUNA: ['{"luna": 1}']})
+    with pytest.raises(KeyboardInterrupt):  # the stage stops after the stand-in answered
+        with progress.track(tmp_path, "translate"):
+            client = stt.llm.OpenRouterClient("opencode:" + SOL)
+            assert client.chat_json("s", "u") == {"luna": 1}
+            raise KeyboardInterrupt
+    assert not list(partial.glob("*.json"))  # Luna's answer is not kept as Sol's
+    record = stt.llm.read_provenance(tmp_path)["stages"]["translate"]
+    assert record["fallback_calls"] == 1 and record["fallback_models"] == ["opencode:" + LUNA]
+    assert record["requested_models"] == [SOL]
+    assert client.usage.to_dict()["fallback_used"] is True
+    assert client.usage.to_dict()["fallback_models"] == ["opencode:" + LUNA]
+
+    monkeypatch.setattr(stt.llm, "_KEPT_NOW", set())  # a new process
+    sub["server"] = ModelServer({SOL: ['{"sol": 2}']})
+    with progress.track(tmp_path, "translate"):  # the restarted stage asks Sol again
+        again = stt.llm.OpenRouterClient("opencode:" + SOL)
+        assert again.chat_json("s", "u") == {"sol": 2}
+    assert sub["server"].calls == [SOL] and len(list(partial.glob("*.json"))) == 1  # Sol's answer is kept
+    assert again.usage.to_dict()["fallback_used"] is False
+
+
+def test_fallback_provenance_is_per_stage_attempt_and_only_inside_a_stage(sub: dict[str, Any],
+                                                                          tmp_path: Path) -> None:
+    from stt import progress
+
+    assert stt.llm.note_fallback(SOL, "opencode:" + LUNA) is None  # outside a stage: nothing is written
+    assert stt.llm.read_provenance(tmp_path) == {"stages": {}}
+    with progress.track(tmp_path, "glossary"):
+        stt.llm.note_fallback(SOL, "opencode:" + LUNA)
+        path = stt.llm.note_fallback(SOL, "opencode:" + LUNA)
+    with progress.track(tmp_path, "voiceover", engine="vosk"):
+        stt.llm.note_fallback(SOL, "opencode:" + LUNA)
+    assert path == tmp_path / "llm_provenance.json"
+    stages = stt.llm.read_provenance(tmp_path)["stages"]
+    assert stages["glossary"]["fallback_calls"] == 2 and stages["voiceover.vosk"]["fallback_calls"] == 1
+    with progress.track(tmp_path, "glossary") as tracker:  # the stage starts again: its old record is replaced
+        tracker.started += 1.0
+        stt.llm.note_fallback(SOL, "opencode:" + LUNA)
+    assert stt.llm.read_provenance(tmp_path)["stages"]["glossary"]["fallback_calls"] == 1
+
+
+def test_usage_report_keeps_its_old_fields() -> None:
+    usage = stt.llm.Usage()
+    usage.add({"model": "opencode:" + SOL, "usage": {"prompt_tokens": 2, "cost": 0.5}})
+    assert usage.to_dict() == {"calls": 1, "prompt_tokens": 2, "completion_tokens": 0, "cost_usd": 0.5,
+                               "subscription_fallback_calls": 0, "fallback_used": False, "fallback_models": [],
+                               "models": ["opencode:" + SOL]}
+    usage.add({"model": "opencode:" + LUNA, "subscription_fallback": True})
+    report = usage.to_dict()
+    assert report["subscription_fallback_calls"] == 1 and report["fallback_used"] is True
+    assert report["fallback_models"] == ["opencode:" + LUNA] and report["models"] == sorted(["opencode:" + SOL,
+                                                                                             "opencode:" + LUNA])
