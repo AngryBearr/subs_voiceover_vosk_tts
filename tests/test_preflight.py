@@ -16,6 +16,12 @@ BASE = {"diarizer": "diarizen-v2", "mix": {"widen": {"enabled": True, "engines":
 def _make_env(root: Path, name: str) -> None:
     (root / name / "bin").mkdir(parents=True)
     (root / name / "bin" / "python").write_text("")
+    if name == "f5_env":
+        site = root / name / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        shared_site = root / "subs_env" / "lib" / "python3.12" / "site-packages"
+        shared_site.mkdir(parents=True)
+        (site / "subs_env.pth").write_text(str(shared_site.resolve()) + "\n", encoding="utf-8")
 
 
 def test_all_needed_envs_listed() -> None:
@@ -75,6 +81,51 @@ def test_link_script_lists_the_same_items() -> None:
     items = re.search(r"^ITEMS=\((.*)\)$", script, re.M)
     assert items is not None
     assert tuple(items.group(1).split()) == preflight.SHARED_ITEMS
+
+
+@pytest.mark.parametrize("contents", [None, "", "# only a comment\n", "/missing/shared/site-packages\n",
+                                     "import nonexistent\n"])
+def test_f5_pth_missing_or_invalid_is_reported(tmp_path: Path, contents: str | None) -> None:
+    _make_env(tmp_path, "f5_env")
+    pth = tmp_path / "f5_env/lib/python3.12/site-packages/subs_env.pth"
+    if contents is None:
+        pth.unlink()
+    else:
+        pth.write_text(contents, encoding="utf-8")
+    missing = preflight.missing_envs(tmp_path, {"diarizer": "pyannote-community-1"}, ["f5"], "voiceover", STAGES)
+    assert len(missing) == 1
+    assert "f5_env" in missing[0] and "subs_env.pth" in missing[0] and "setup_envs.sh f5" in missing[0]
+    assert preflight.missing_envs(tmp_path, BASE, ["f5"], "speakers", STAGES) == [
+        "diarizen_env (who speaks when: «diarizen-v2» (setting diarizer))"]
+
+
+def test_f5_pth_checks_symlink_targets_without_running_python(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    def no_process(*args: object, **kwargs: object) -> None:
+        raise AssertionError("preflight must not launch an interpreter")
+
+    monkeypatch.setattr(subprocess, "run", no_process)
+    monkeypatch.setattr(subprocess, "Popen", no_process)
+    _make_env(tmp_path, "f5_env")
+    pth = tmp_path / "f5_env/lib/python3.12/site-packages/subs_env.pth"
+    shared_site = tmp_path / "subs_env/lib/python3.12/site-packages"
+    link = tmp_path / "shared-packages"
+    link.symlink_to(shared_site, target_is_directory=True)
+    pth.write_text(f"# Shared packages\n\n{link}\n", encoding="utf-8")
+    assert preflight.f5_shared_packages_error(tmp_path) is None
+    shared_site.rmdir()
+    assert "shared-packages" in (preflight.f5_shared_packages_error(tmp_path) or "")
+    pth.unlink()
+    pth.symlink_to(tmp_path / "missing.pth")
+    assert "cannot read" in (preflight.f5_shared_packages_error(tmp_path) or "")
+
+
+def test_f5_pth_relative_paths_follow_site_packages(tmp_path: Path) -> None:
+    _make_env(tmp_path, "f5_env")
+    pth = tmp_path / "f5_env/lib/python3.12/site-packages/subs_env.pth"
+    pth.write_text("../../../../subs_env/lib/python3.12/site-packages\n", encoding="utf-8")
+    assert preflight.f5_shared_packages_error(tmp_path) is None
 
 
 def test_opencode_report_warns_without_a_pinned_copy(monkeypatch: pytest.MonkeyPatch) -> None:

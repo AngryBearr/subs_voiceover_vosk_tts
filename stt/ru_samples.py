@@ -36,7 +36,7 @@ from typing import Any
 
 import numpy as np
 
-from stt.runner import REPO_ROOT, load_json
+from stt.runner import ENV_WORKERS, REPO_ROOT, load_json, run_worker as launch_worker
 from utils.atomic_io import write_text_atomic
 from voiceover.text import syllables
 
@@ -157,18 +157,13 @@ def _read_mono(path: Path, rate: int) -> np.ndarray:
 
 def run_worker(items: list[dict[str, Any]], tmp: Path) -> list[dict[str, Any]]:
     """Make the takes in ``xvoice_env`` (``voiceover.xvoice_worker``, one model load); return its per-item results."""
-    python = REPO_ROOT / "xvoice_env" / "bin" / "python"
+    python = REPO_ROOT / ENV_WORKERS["xvoice"].env / "bin" / "python"
     repo = (REPO_ROOT / "models" / "X-Voice").resolve()
     if not python.exists() or not repo.is_dir():
         raise SystemExit("xvoice_env or models/X-Voice missing: create them with `bash scripts/setup_envs.sh xvoice`")
     job, out, log_path = tmp / "job.json", tmp / "results.json", tmp / "worker.log"
     job.write_text(json.dumps({"xvoice_repo": str(repo), "items": items}, ensure_ascii=False), encoding="utf-8")
-    with log_path.open("w", encoding="utf-8") as worker_log:  # a full pipe would stall the worker
-        done = subprocess.run([str(python), "-I", str(REPO_ROOT / "voiceover" / "xvoice_worker.py"), str(job), str(out)],
-                              cwd=repo, stderr=worker_log, check=False)
-    if done.returncode != 0:
-        raise RuntimeError(f"X-Voice worker failed (exit {done.returncode}): "
-                           f"{log_path.read_text(encoding='utf-8', errors='replace')[-2000:]}")
+    launch_worker(ENV_WORKERS["xvoice"], [str(job), str(out)], log_path, python=python, cwd=repo)
     return json.loads(out.read_text(encoding="utf-8"))
 
 

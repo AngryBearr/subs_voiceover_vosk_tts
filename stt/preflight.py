@@ -43,9 +43,36 @@ def needed_envs(config: dict[str, Any], engines: list[str], until: str, stages: 
 
 def missing_envs(root: Path, config: dict[str, Any], engines: list[str], until: str,
                  stages: list[str]) -> list[str]:
-    """Lines naming each needed environment whose interpreter is not in ``root``."""
-    return [f"{env} ({why})" for env, why in needed_envs(config, engines, until, stages).items()
-            if not (root / env / "bin" / "python").exists()]
+    """Lines naming missing interpreters or broken F5 shared-package paths, without importing models."""
+    missing: list[str] = []
+    for env, why in needed_envs(config, engines, until, stages).items():
+        if not (root / env / "bin" / "python").exists():
+            missing.append(f"{env} ({why})")
+        elif env == "f5_env":
+            problem = f5_shared_packages_error(root)
+            if problem:
+                missing.append(f"{env} ({why}): {problem}")
+    return missing
+
+
+def f5_shared_packages_error(root: Path) -> str | None:
+    """Validate only the paths in F5's subs_env.pth; never execute its contents or an interpreter."""
+    files = sorted((root / "f5_env" / "lib").glob("python*/site-packages/subs_env.pth"))
+    fix = "run `bash scripts/setup_envs.sh f5` to repair subs_env.pth"
+    if not files:
+        return f"subs_env.pth missing; {fix}"
+    for pth in files:
+        try:
+            paths = [line.strip() for line in pth.read_text(encoding="utf-8").splitlines()
+                     if line.strip() and not line.lstrip().startswith("#")]
+            if not paths:
+                return f"{pth} has no shared-package path; {fix}"
+            for value in paths:
+                if value.startswith(("import ", "import\t")) or not (pth.parent / value).is_dir():
+                    return f"{pth} has an invalid shared-package path: {value!r}; {fix}"
+        except (OSError, UnicodeError, ValueError) as exc:
+            return f"cannot read {pth}: {exc}; {fix}"
+    return None
 
 
 def message(missing: list[str]) -> str:

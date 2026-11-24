@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from stt.audio import SAMPLE_RATE
+from stt.runner import ENV_WORKERS
 
 log = logging.getLogger(__name__)
 
@@ -56,13 +57,13 @@ DIARIZERS: dict[str, DiarSpec] = {
     "diarizen-v2": DiarSpec(
         "diarizen",
         "BUT-FIT/diarizen-wavlm-large-s80-md-v2",
-        env="diarizen_env",
+        env=ENV_WORKERS["diarizen"].env,
         note="DiariZen v2, CC-BY-NC-4.0 weights, own venv: bash scripts/setup_envs.sh diarizen",
     ),
     "diarizen-local": DiarSpec(
         "diarizen",
         "",
-        env="diarizen_env",
+        env=ENV_WORKERS["diarizen"].env,
         note="DiariZen checkpoint from the directory in $DIARIZEN_LOCAL_DIR (config.toml, pytorch_model.bin, plda/)",
         model_env="DIARIZEN_LOCAL_DIR",
     ),

@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 
 from stt import progress
+from stt.runner import ENV_WORKERS, run_worker, worker_python
 from voiceover.engine import (TERATTS, PreparedText, SynthResult, VoskEngine, _sha256_file, cache_key,
                               postprocess_wav, read_cache_entry, write_cache_entry)
 from voiceover.stress_listen import listened
@@ -111,7 +112,8 @@ class F5Engine(VoskEngine):
         self.slack_s = float(config.get("slack_s", 0.3))
         self.retry_lost_words = bool(config.get("retry_lost_words", True))
         self.listen_stress = bool(config.get("listen_stress", True))  # takes heard for the checked words' stress
-        self.python = Path(str(config.get("python", REPO_ROOT / "f5_env" / "bin" / "python")))
+        self.python = worker_python(ENV_WORKERS["f5"],
+                                    Path(str(config.get("python", REPO_ROOT / "f5_env" / "bin" / "python"))))
         self.normalization = dict(config.get("normalization", {}))
         self.trim = dict(config.get("trim", {}))
         self._identity: dict[str, Any] | None = None
@@ -119,8 +121,6 @@ class F5Engine(VoskEngine):
         self._accentizer: Any = None
         self.teratts_config = dict(config.get("teratts", {}))  # for teratts:<voice> lines
         self._teratts: Any = None
-        if not self.python.exists():
-            raise FileNotFoundError(f"{self.python} missing: create f5_env with `bash scripts/setup_envs.sh f5`")
         if not self.voice.startswith(TERATTS) and not Path(clip_path(self.voice)).is_file():
             raise FileNotFoundError(f"F5 default voice (reference WAV) not found: {self.voice!r}")
 
@@ -239,19 +239,12 @@ class F5Engine(VoskEngine):
                                        "retry_lost_words": self.retry_lost_words, "items": items,
                                        "stats_path": str(cache_dir / "f5_timing.json")},
                                       ensure_ascii=False), encoding="utf-8")
-            with log_path.open("w", encoding="utf-8") as worker_log:
-                process = subprocess.Popen([str(self.python), "-m", "voiceover.f5_worker", str(job), str(out)],
-                                           cwd=REPO_ROOT, stderr=worker_log, text=True)
-                while True:
-                    try:
-                        process.wait(timeout=WORKER_POLL_S)
-                        break
-                    except subprocess.TimeoutExpired:
-                        progress.tick(before + sum((cache_dir / f"{i['key']}.take.json").exists() for i in items),
-                                      total, "lines")
-            if process.returncode != 0:
-                tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
-                raise RuntimeError(f"F5 worker failed (exit {process.returncode}): {tail}")
+            def report_progress() -> None:
+                progress.tick(before + sum((cache_dir / f"{i['key']}.take.json").exists() for i in items),
+                              total, "lines")
+
+            run_worker(ENV_WORKERS["f5"], [str(job), str(out)], log_path, python=self.python,
+                       cwd=REPO_ROOT, on_poll=report_progress, poll_s=WORKER_POLL_S)
             results = {r["key"]: r for r in json.loads(out.read_text(encoding="utf-8"))}
         for item in items:
             item["result"] = results.get(item["key"])

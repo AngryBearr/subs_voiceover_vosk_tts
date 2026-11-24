@@ -27,6 +27,8 @@ from typing import Any
 
 import numpy as np
 
+from stt.runner import ENV_WORKERS, run_worker
+
 log = logging.getLogger("stt.widen")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -78,7 +80,7 @@ def references_edge(voices_json: Path) -> float | None:
 
 
 def lava_python(root: Path = REPO_ROOT) -> Path:
-    return root / "lava_env" / "bin" / "python"
+    return root / ENV_WORKERS["lava"].env / "bin" / "python"
 
 
 def widen_track(track: Path, out: Path, edge_hz: float, python: Path | None = None) -> bool:
@@ -89,8 +91,8 @@ def widen_track(track: Path, out: Path, edge_hz: float, python: Path | None = No
         log.warning("widen: %s is missing (bash scripts/setup_envs.sh lava): the voice track keeps its narrow band", python)
         return False
     tmp = out.with_name(out.stem + ".tmp.wav")
-    cmd = [str(python), "-m", "stt.widen", "--worker", str(track), str(tmp), "--edge", f"{edge_hz:.0f}"]
-    done = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    done = run_worker(ENV_WORKERS["lava"], ["--worker", str(track), str(tmp), "--edge", f"{edge_hz:.0f}"],
+                      python=python, cwd=REPO_ROOT, capture_output=True, check=False)
     if done.returncode or not tmp.exists():
         log.warning("widen: LavaSR failed (%s): the voice track keeps its narrow band", (done.stderr or "").strip()[-400:])
         tmp.unlink(missing_ok=True)
