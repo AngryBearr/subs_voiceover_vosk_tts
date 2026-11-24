@@ -527,7 +527,7 @@ SRT -> JSON (`utils.srt_to_json`) -> RUNorm + RUAccent (`utils.text_normalizer`:
 normalisation and stress) -> Vosk TTS (`synthesize.synthesize_cli`) -> mix
 (`utils.audio_mixer`). It is still there, and `uv run -m voiceover.pipeline run <subs.json> --out <dir>`
 voices ready Russian subtitles with the engines of the main pipeline. Presets do not apply to
-it. Details: `AGENTS.md` section 4 and `docs/pipeline.md`.
+it. Details: `AGENTS.md` section 4 and `docs/archive/pipeline.md`.
 
 ## 19. Training the speaker model
 
@@ -574,6 +574,6 @@ subs_env/bin/python -m pytest tests -q
 - `docs/stt_local.md` - the main pipeline in detail: models, language models and their costs,
   measurements.
 - `docs/experiments.md` - what was tried, what helped and what did not.
-- `docs/roadmap.md` - what is done and what is next.
-- `docs/pipeline.md` and `AGENTS.md` - the classic pipeline and the working rules of the repository.
+- `docs/roadmap.md` - what is next; `docs/history.md` - what was done and measured.
+- `docs/archive/pipeline.md` and `AGENTS.md` - the classic pipeline and the working rules of the repository.
 - `ui/help.md` - the in-app help (Russian).

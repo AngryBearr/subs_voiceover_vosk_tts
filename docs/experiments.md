@@ -7,17 +7,17 @@ What helps (in use), with the measurement that decided it:
 | What | Measured gain | Where |
 |---|---|---|
 | LLM fusion of Cohere + Whisper (accurate mode) | S10 clips WER ~17% vs 19.6% / 20.2% alone; S20 episodes 6.5-12.9% of words differ from the CBS captions, better than either model in every episode | `docs/stt_benchmarks.md` |
-| DiariZen v2 as the diarizer (28.10) | speaker-change F1 vs the captions' `>>` marks 0.73 -> 0.82-0.85; S10 SDH lines on their person 69.4% -> 71.3%; +2.5 min per episode | roadmap §6 |
+| DiariZen v2 as the diarizer (28.10) | speaker-change F1 vs the captions' `>>` marks 0.73 -> 0.82-0.85; S10 SDH lines on their person 69.4% -> 71.3%; +2.5 min per episode | history §6 |
 | WeSpeaker ResNet293 speaker refinement | S10 SDH cues on the right speaker 63.5% -> 71.1% | `docs/stt_local.md` |
-| Gender per line for speakers of unknown gender (28.10) | S10 SDH-labelled lines with the right gender 78.2% -> 84.8% | `stt/line_gender.py`, roadmap |
+| Gender per line for speakers of unknown gender (28.10) | S10 SDH-labelled lines with the right gender 78.2% -> 84.8% | `stt/line_gender.py`, history |
 | Stress check of names, silero-stress disagreements, gpt-6.1-sol as the free screener (28.10) | ~20% of name uses were stressed wrong; S29E03 28 corrections (before: 15) with 110 paid answers instead of 325 | `docs/stt_local.md` |
-| Spoken stress check of the checked words (28.10) | small: S29E03 11 of ~780 such lines heard wrong in the three engines, 4 fixed by another take | roadmap §6 |
-| ESpeech: "— " before the line, +0.3 s, retake while a word is not heard (28.10) | lines losing a word 40% -> 19%, character errors 2.3% -> 0.85% | roadmap §7 |
-| TeraTTS: retake while a word is not heard; sampler temperature 0.667 | words not heard 93 -> 64 (S29E03); first takes 1.51% -> 0.74% character errors (S29E01) | roadmap §7, `docs/stt_local.md` |
+| Spoken stress check of the checked words (28.10) | small: S29E03 11 of ~780 such lines heard wrong in the three engines, 4 fixed by another take | history §6 |
+| ESpeech: "— " before the line, +0.3 s, retake while a word is not heard (28.10) | lines losing a word 40% -> 19%, character errors 2.3% -> 0.85% | history §7 |
+| TeraTTS: retake while a word is not heard; sampler temperature 0.667 | words not heard 93 -> 64 (S29E03); first takes 1.51% -> 0.74% character errors (S29E01) | history §7, `docs/stt_local.md` |
 | TeraTTS voices for people without a clip in the ESpeech track (28.10) | S29E06 character errors 1.65% -> 1.03%, flagged lines 12 -> 5 | `docs/stt_local.md` |
-| TeraTTS female voice ru_f1+ru_f2 (28.10) | the user's choice by ear (ru_f1 alone sounded cartoonish) | roadmap §6 |
+| TeraTTS female voice ru_f1+ru_f2 (28.10) | the user's choice by ear (ru_f1 alone sounded cartoonish) | history §6 |
 | Stability: GPU out-of-memory retries, the subscription check before a run, UI warning | runs no longer die on a busy GPU or fall back to paid routers unnoticed | `docs/stt_local.md` |
-| One-command install, self-test, settings page, TTS cache cleanup (28-29.10) | not yet tried by a person on a clean machine | roadmap §5 |
+| One-command install, self-test, settings page, TTS cache cleanup (28-29.10) | not yet tried by a person on a clean machine | history §5 |
 | Stress vote through the subscriptions: sol + gemini-4-argon + claude-haiku-5.5 of OpenCode Go (29.10) | S29E03, 164 sentences: the same 27 corrections as the paid trio; free, ~1 min per episode | `docs/stt_local.md`, Language models |
 | One stress per name for the season (29.10) | S29E01-E10: no name was stressed differently between episodes even without it; ~180 questions saved per season, hand fixes season-wide | `docs/stt_local.md` |
 | Vosk in a CPU lane beside the GPU engines, half the CPU threads (29.10) | 10-min piece, three engines: 25.4 -> 16.4 min (all cores for Vosk: 19.6 min) | `docs/stt_local.md` |
@@ -25,7 +25,7 @@ What helps (in use), with the measurement that decided it:
 | Numbers by ru-normalizr + a range rule (29.10) | 64 subtitle-like phrases: ~15 wrong -> 0 ("Мне 22 года", "около 3-4 лет"); the dubbing translations write numbers in words (4 of 18003 lines had digits) | `voiceover/normalize.py` |
 | Season cast from Wikipedia through the subscription (29.10) | free; S51, S29, S20, Australian S10 as complete as the paid web search | `stt/cast.py` |
 | DiariZen exclusive layer (30.10) | S20 E01/E05/E10/E14 speaker changes vs the `>>` marks: F1 0.841 -> 0.856; S51 SDH lines 62.0% -> 61.7% (noise), people merged 44 -> 41; S29E01/E03/E07, not used for tuning: 0.824 -> 0.840. One segmentation pass since 30.10: same turns, 253 -> 170 s on S51E01 | `docs/stt_local.md`, Models |
-| Word-level Viterbi relabelling (30.10) | on top of it: S20 F1 0.856 -> 0.878 (recall 0.828 -> 0.873); S51 lines 61.7% -> 63.5%, people merged 41 -> 39; 9 of 9 episodes better; S29E01/E03/E07, not used for tuning: 0.840 -> 0.861, 3 of 3 better. Adds 30-45 s per episode (word embeddings). Only filling the words without a diarizer label gives S20 0.863, S51 62.9%; moving labelled words gives the rest | `stt/boundaries.py`, roadmap 30.10 |
+| Word-level Viterbi relabelling (30.10) | on top of it: S20 F1 0.856 -> 0.878 (recall 0.828 -> 0.873); S51 lines 61.7% -> 63.5%, people merged 41 -> 39; 9 of 9 episodes better; S29E01/E03/E07, not used for tuning: 0.840 -> 0.861, 3 of 3 better. Adds 30-45 s per episode (word embeddings). Only filling the words without a diarizer label gives S20 0.863, S51 62.9%; moving labelled words gives the rest | `stt/boundaries.py`, history 30.10 |
 
 Tried and dropped:
 
@@ -115,7 +115,7 @@ points of word accuracy (66.1% -> 66.6%), with the 30 s locality +0.9 (67.1%), b
 five episodes; replacing a cluster's centroid by the card centroid is worse (60.5%). Not built: the gain
 is about one point and the locality costs S29 recall.
 
-Not done yet (see `docs/roadmap.md`): the user's pick of the host's voice (`output/host_voices/`), re-voicing
+Not done yet (see `docs/history.md`): the user's pick of the host's voice (`output/host_voices/`), re-voicing
 S20 and S29 with all of the above, finishing S29 (E11, E13-E15, missing tracks of E01-E08), a
 clean-machine test of `scripts/install.sh`, Vosk TTS 0.11 when it is out, RuVoice stress placer,
 Shmyrev's TTS metrics, newer diarization and speaker-embedding models, S20E02/E03 in Courtney's and Danielle's own voices.
@@ -123,7 +123,7 @@ Shmyrev's TTS metrics, newer diarization and speaker-embedding models, S20E02/E0
 ## Deleted on 30.10.2026
 
 The data of the speaker boundary experiments (the conclusions are in the tables above and in
-`docs/roadmap.md`, plan of 30.10). Scripts, logs and the text LLM's report stay, not in git:
+`docs/history.md`, plan of 30.10). Scripts, logs and the text LLM's report stay, not in git:
 `output/exp_boundary/` (`prepare.py` + `run.sh` make the variant folders again, `sweep_words.py`,
 `score.py`; `dicow/boundary.py` scores a boundary exactly on the `>>` marks, `stt.turn_eval` allows one
 word either side), `output/exp_ahc/`, `output/exp_joined/` (with the paid answers of the audio LLMs).
@@ -142,14 +142,14 @@ the tables above and in the docs named there):
 
 | Deleted | What was tried | Written in |
 |---|---|---|
-| `output/stt_dz_test` | DiariZen v2 on S29E01/E05-E08 end to end; S29E06 voiced both ways (`AB.mkv`) | roadmap §6 |
-| `output/stt_dz_sweep` | DiariZen clustering sweep (AHC threshold, VBx Fb), the line-gender check | roadmap §6 (AHC 0.5; lower Fb splits people into 25-150 clusters) |
+| `output/stt_dz_test` | DiariZen v2 on S29E01/E05-E08 end to end; S29E06 voiced both ways (`AB.mkv`) | history §6 |
+| `output/stt_dz_sweep` | DiariZen clustering sweep (AHC threshold, VBx Fb), the line-gender check | history §6 (AHC 0.5; lower Fb splits people into 25-150 clusters) |
 | `output/stt_dz_vocals` | DiariZen on the vocal stem (S10E01/E12/E16, S20E05/E10) | "Tried and dropped" above |
-| `output/stt_s10_lc`, `output/stt_linecheck` | per-line checks on S10 (SDH labels) and S29: gender per line, the voice bank | roadmap "Next steps" |
-| `output/tts_eval/firered`, `models/fireredtts3` | FireRedTTS3 (own environment, 19 GB) | roadmap §6 |
+| `output/stt_s10_lc`, `output/stt_linecheck` | per-line checks on S10 (SDH labels) and S29: gender per line, the voice bank | history "Next steps" |
+| `output/tts_eval/firered`, `models/fireredtts3` | FireRedTTS3 (own environment, 19 GB) | history §6 |
 | `output/tts_eval/vc`, `models/seedvc` | Seed-VC voice conversion, Whisper P(ru) as an accent measure | "Tried and dropped" above |
-| `output/tts_eval/f5_words`, `tera_teacher`, `tera_female` | ESpeech short words, TeraTTS teacher sampler and retakes, female voices | roadmap §6, §7 |
-| `output/tts_eval/stress_scan`, `stress_retake`, `stress_heard.py` | heard stress of all words, names check, silero-stress, the sol screener; the spoken stress check | `docs/stt_local.md`, roadmap §6 (`voiceover/stress_listen.py` is the tool now) |
+| `output/tts_eval/f5_words`, `tera_teacher`, `tera_female` | ESpeech short words, TeraTTS teacher sampler and retakes, female voices | history §6, §7 |
+| `output/tts_eval/stress_scan`, `stress_retake`, `stress_heard.py` | heard stress of all words, names check, silero-stress, the sol screener; the spoken stress check | `docs/stt_local.md`, history §6 (`voiceover/stress_listen.py` is the tool now) |
 | `output/stt_s29_v2/eval`, `output/stt_s20/eval` | turn-change metric, recognition vs captions, ESpeech first-word probes | `stt/turn_eval.py`; the S20 section below |
 | `output/stt_bench`, `output/stt_data` | the ASR and diarization benchmarks (S10 SDH, VoxConverse) | `docs/stt_benchmarks.md` |
 | `models/diarizen` except `repo/` | the first DiariZen environment and its run scripts | `diarizen_env` (`bash scripts/setup_envs.sh diarizen`) uses `repo/` |
@@ -172,15 +172,15 @@ each line; re-running an experiment means running its command again on the same 
 | Folder (deleted) | What was tried | What came of it, and where it is written |
 |---|---|---|
 | `stt_bench/s10e*_10m*` | 23 ASR models on three 10-min clips of Australian Survivor S10 against the SDH subtitles | LLM fusion of Cohere + Whisper best (~17% vs 19.6% / 20.2%); `docs/stt_benchmarks.md` |
-| `stt_bench/sdh` | Speaker refinement and cluster splitting on S10 SDH speaker labels | WeSpeaker ResNet293 refinement 63.5% → 71.1% of cues on the right speaker; splitting a cluster into sub-voices lost accuracy; `docs/stt_local.md`, roadmap §2 |
-| `stt_s10_eval` | The season cast from the web as naming evidence (S10E01/E12/E16, SDH labels; gpt-6.1-sol and gpt-6-luna, three runs each) | No gain in names (sol 65.5% with and without, luna 63.9-65.9%), one spelling per person, gender from the web only logged; `stt/cast.py`, roadmap §2 |
+| `stt_bench/sdh` | Speaker refinement and cluster splitting on S10 SDH speaker labels | WeSpeaker ResNet293 refinement 63.5% → 71.1% of cues on the right speaker; splitting a cluster into sub-voices lost accuracy; `docs/stt_local.md`, history §2 |
+| `stt_s10_eval` | The season cast from the web as naming evidence (S10E01/E12/E16, SDH labels; gpt-6.1-sol and gpt-6-luna, three runs each) | No gain in names (sol 65.5% with and without, luna 63.9-65.9%), one spelling per person, gender from the web only logged; `stt/cast.py`, history §2 |
 | `stt_full` | First end-to-end run of a whole episode (S10E01, Vosk) | The pipeline works on a full episode; superseded by everything after it |
 | `stt` (`s10e01*`, `_проба`) | Early S10E01 runs and test pieces from the UI | — |
-| `stt_s29` | First S29E01-E04 runs: Vosk / TeraTTS, mixing variants (v2-v6) | 23-31 min per episode, 0.5-1.1% character errors; roadmap §1. Replaced by `stt_s29_v2` |
+| `stt_s29` | First S29E01-E04 runs: Vosk / TeraTTS, mixing variants (v2-v6) | 23-31 min per episode, 0.5-1.1% character errors; history §1. Replaced by `stt_s29_v2` |
 | `stt_s29_sol`, `stt_s29_oc` | S29E01 with gpt-6.1-sol through OpenRouter and through the opencode subscription | The subscription works as a transport (OpenRouter / OrcaRouter as fallback); `docs/stt_local.md`, Language models |
 | `stt_s29_tr`, `stt_s29_bank`, `voices` | Translation check on S29E02; the first voice bank and reference clip exports | Became `stt.voice_bank` (prints, clean clips, `--recheck`); `docs/stt_local.md`, Season voice bank |
-| `demo` | Listening demos: ESpeech F5 at 7/16/32 steps, three S29 scenes in cloned voices next to TeraTTS / Vosk | 32 steps for the voice-over, 7 as a fast mode; ESpeech chosen for the heroes' voices; roadmap §3 |
-| `voiceover_branch` | Outputs of the older voice-over branch (shortening v3 on AU S01E04) | `docs/shortening_v3_plan.md` |
+| `demo` | Listening demos: ESpeech F5 at 7/16/32 steps, three S29 scenes in cloned voices next to TeraTTS / Vosk | 32 steps for the voice-over, 7 as a fast mode; ESpeech chosen for the heroes' voices; history §3 |
+| `voiceover_branch` | Outputs of the older voice-over branch (shortening v3 on AU S01E04) | `docs/archive/shortening_v3_plan.md` |
 | `stt_tar` | The Amazing Race S20E01 voiced with Vosk (22.10): another show end to end | Works; the video was kept: `/media/angrybear/new_large_storage/The Amazing Race/STT_Season 20/` |
 | `tts_cache` (40 of 45 sets) | Synthesised lines of older engine versions and settings | Only the sets used by the S20 / S29 runs were kept |
 
@@ -203,7 +203,7 @@ LLM cache and the TTS cache sets in use.
 - Pauses inside a sentence that split it into cues are real: Whisper decoded no words of the
   phrase in 92 of 99 such gaps where its own word times had put the words side by side.
 - ESpeech F5 loses the first word of a line in 5-7% of lines (Vosk / TeraTTS 2.5-3.5%, partly the
-  checking ASR); causes and the probe in roadmap §3.
+  checking ASR); causes and the probe in history §3.
 
 Scripts of these checks (not in git): `output/stt_s20/eval/` (`asr_wer.py`, `split_gaps.py`,
 `gap_truth.py`, `first_word.py`, `f5_cut_probe.py`, `f5_prefix_probe.py`).
@@ -215,7 +215,7 @@ Scripts of these checks (not in git): `output/stt_s20/eval/` (`asr_wer.py`, `spl
 | A gender classifier for shouts (3.11, `output/exp_gender/`: `labels.py`, `gender_exp.py`, `override.py`; logistic regression on resnet293-ft prints of whole lines, trained on the speaker training set, 27.8k lines of 332 people incl. 2638 shouts Whisper did not hear, genders from sol; held-out people 88.9%) | Contestant lines of S51E01-E05 and Australian S10 E02-E10 (1143; the host apart): audeering 84.2%, TeraAnaly 81.9%, ours 82.5%, ours + audeering 86.0%; shouts (cue lines, 93) 71.0 / 62.4 / 67.7 / 69.9%, men's shouts 74.5 / 52.7 / 72.7 / 72.7%; the host (376 lines over music) ours 52.7%. No judge hears shouts well. As an automatic fix of the gender the pipeline voiced (S51 as voiced on 29.10, 899 named contestant lines, 86.2% right, cue lines 58.2%): audeering sure at 0.9 changes 73 lines, 37 fixed, 36 broken (as found before); ours + audeering sure at 0.9 changes 26, 22 fixed, 4 broken: 86.2% -> 88.2%. Threshold read on the same lines; not in the pipeline. TeraAnaly also has an emotion head ("angry" tags 236 of 1519 lines), licence CC BY-NC-SA |
 | Gender classifiers from Hugging Face (3.11, `output/exp_gender/hf/`, `tables.md`; same 1519 lines; only standard classes or re-written module code with safetensors) | Contestants / shouts / men's shouts / host: JaesungHuh/voice-gender-classifier (ECAPA, VoxCeleb2, MIT, 62 MB) 87.5 / 72.0 / 69.1 / 94.4%, the best single judge; with ours and audeering averaged 88.0 / 77.4 / 78.2 / 89.6%. tiantiaf/wavlm-large-age-sex 83.3 / 64.5%. The Common Voice and LibriSpeech wav2vec2 models, AudioSet AST and CLAP lean to one gender (women 31-50% or half the men called women). Automatic fix on S51 at 0.9: ECAPA + ours 31 fixed / 7 broken (88.9%), ours + audeering (in the pipeline) 22 / 4 (88.2%), ECAPA alone 50 / 32. Not adopted yet: ECAPA needs its own module code |
 | Shouts and the speech recognition (3.11, `output/exp_shout/asr/`: `lost_table.md`, `score.md`, `fill.md`, `examples_*.md`) | S51E01-E05: ~175 SDH lines per episode get no recognised words (3.3 min), three quarters are 1-3 word shouts; ~44 per episode have 4+ words, ~23 carry content. On 581 unheard clips (S51 + S45/S48/S50) Whisper large-v3 on the clip alone recovers half the words of 50% of them (4+ words: 58%); turbo 49%, distil-large-v3.5 51%, Cohere 40%, Kyutai 35%, Parakeet CTC 26%; the vocal stem is worse (46%, 3x more invented phrases); on silence every Whisper writes text (98-100%, "Thank you"). The SDH text exists for all of them, timing within 0.2 s (median) on S51; but 48% of them sit under other recognised speech. Side findings: `merge_captions` replaced 32 real lines with caption text; the LLM fusion + alignment lost 35 of the 52 long lines Whisper alone had; S50E01/E02 in `output/subs_train` belong to another cut (their 433 cue lines are wrong, also in the speaker training set) |
-| Where the dub is silent while people shout (10.11, `output/exp_fill/silence_table.py`, `gap_causes.py`, `gap_models.py`; S48E01-E07 as voiced 9.11, S51E01 of 29.10, S01E01-E05 of 7-9.11) | Per episode: lines captioned on screen and shown as text only 123-361 s (S48; the three longest silent stretches of S48E01, 36/15/14 s, are captions), interjections left out 7-26 s, VAD speech with no recognised word 81-153 s (S48) and 102-132 s (S01, where the challenge climaxes of 17-27 s give both models one word), crowd noise the captioners wrote as `[cheering]`/`[indistinct chatter]` 43-50 cues. SDH spoken cues with no recognised word within 0.25 s: 2.1% of all, 10.8% of the shout-like ones (S48E01-E07, 11128 cues). Taken: captions voiced by the neutral voice, interjections voiced or said on the shout layer, a second Whisper pass on the empty stretches (`docs/roadmap.md`, plan of 10.11) |
+| Where the dub is silent while people shout (10.11, `output/exp_fill/silence_table.py`, `gap_causes.py`, `gap_models.py`; S48E01-E07 as voiced 9.11, S51E01 of 29.10, S01E01-E05 of 7-9.11) | Per episode: lines captioned on screen and shown as text only 123-361 s (S48; the three longest silent stretches of S48E01, 36/15/14 s, are captions), interjections left out 7-26 s, VAD speech with no recognised word 81-153 s (S48) and 102-132 s (S01, where the challenge climaxes of 17-27 s give both models one word), crowd noise the captioners wrote as `[cheering]`/`[indistinct chatter]` 43-50 cues. SDH spoken cues with no recognised word within 0.25 s: 2.1% of all, 10.8% of the shout-like ones (S48E01-E07, 11128 cues). Taken: captions voiced by the neutral voice, interjections voiced or said on the shout layer, a second Whisper pass on the empty stretches (`docs/history.md`, plan of 10.11) |
 | The second recognition pass on the stretches without words (11.11, `stt.fill`, `output/exp_fill/eval_fill.py`; S48E01-E03 and S51E01 against the SDH subtitles, S01E01-E03 by eye) | Stretches of VAD speech with no final word: 85-153 per episode, 4-7 min; Whisper large-v3 on each alone: "Thank you." / "Thanks for watching!" / "We'll be right back." on 46-60 stretches, cries with word probability under 0.4 ("Woo!", "Aah!", "Go!") on 18-67. Accepted lines at `min_score` 0.4 / 0.5 / 0.6 / 0.7: S48E01 11 / 6 / 3 / 2 (invented 7 / 3 / 0 / 0), S48E02 20 / 9 / 2 / 1 (13 / 6 / 2 / 1), S48E03 11 / 6 / 4 / 1 (8 / 5 / 3 / 0), S51E01 25 / 16 / 10 / 6 (16 / 8 / 3 / 0); words of the kept lines found in the SDH text at 0.7: 67-100%; unheard SDH cues now covered: 3 / 0 / 0 / 7. S01E01-E03 at 0.7: 8 / 3 / 2 lines (76 / 26 / 25 words), by eye real challenge speech ("Here we go! Let's do it! Here we go!", "Should we take a break? No! Keep paddling!"). Taken: on by default at 0.7 with the stock-phrase, laughter and credits guards; a small, nearly clean gain, since the lines the main recognition misses mostly sit under other recognised speech |
 | Lines from the subtitles in sync where the recognition heard nothing (11.11, `stt.fill.from_subtitles`; S01E01-E05 with the tvsubtitles files of the archive, S48E01-E03 with the embedded SDH) | Unconfirmed lines over free time, credits and cries apart: S01E01 94 lines / 342 words (79% of the file's 983 lines pinned, shift 1.26 s), S01E02 37, E03 67, E04 100, E05 36; S48E01 145 / 667 (the marooning), E02 7, E03 3. Lines over recognised words (a different reading) stay out: 43-252 per episode. The Whisper fill pass on the same episodes gives 1-8 lines. Taken: subtitles first, Whisper on what is still free |
 | Missing edges of partly recognised lines from the subtitles (11.11, the user's request; `stt.fill.from_subtitles(edges=True)`, `output/exp_fill/eval_edges.py`; S48E01-E03 with the embedded SDH and with an independent plain archive file as the source and the SDH as the reference, S01E01 with the sidecar file) | Runs / words added per episode: S48E01 58 / 79, E02 47 / 48, E03 40 / 48, S01E01 34 / 49 ("You are witnessing 16 Americans begin" before "an adventure that will", "Kamilla's through.", "Should we, uh,"). With the plain file as the source: 63 / 85, 52 / 55, 37 / 49 runs / words, of which 98-100% of the words are in the SDH text within 1.5 s; runs with no supported word 2 / 1 / 0 ("for", "game play" vs "gameplay"). The lower share for the edge pass (a third of the tokens with a run of 3, vs 0.6 for whole lines) adds 3 runs / 10 words on S48E01. Left out per episode: 81-198 runs with no free room, 66-145 where the recognition heard other words between the matched ones. Taken: on by default (`fill.edges`) |

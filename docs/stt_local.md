@@ -5,8 +5,8 @@ speakers, determines their gender (Russian grammar, voice choice), translates to
 to the timing and prepares the dubbing script. The `voiceover` package synthesises it (Vosk or
 TeraTTS, a voice per speaker gender), fits the lines to the timeline and exports the voice
 track; `stt.mix` puts it over the ducked original and muxes a video copy. What comes next
-(speaker bank, voice cloning, tips to test): `docs/roadmap.md`; state and pitfalls for a new
-agent: `docs/handoff.md`.
+(speaker bank, voice cloning, tips to test): `docs/roadmap.md` (done stages: `docs/history.md`); state and pitfalls for a new
+agent: `docs/archive/handoff.md` (archived).
 
 ```
 video ─► audio 16 kHz ─┬─► VAD chunks ─► Whisper  (fast)
@@ -652,13 +652,13 @@ A Russian line must not run ahead of the English speech. What keeps it in sync:
   sampling noise differs on every run) and the best take is kept. Cached takes are heard once and
   redone only when wrong. S29E03: 1-7 of ~260 such lines per engine heard wrong (11 in the three
   engines), 4 of them fixed by another take; TeraAnaly notices 37-67% of wrong stresses at 1-2% false alarms
-  (`docs/roadmap.md` §6). Off in the UI settings or with `"listen_stress": false`.
+  (`docs/history.md` §6). Off in the UI settings or with `"listen_stress": false`.
 - **Speech check (after synthesis).** `voiceover.speech_check` transcribes every clip with
   GigaAM-v3 and lists clips whose character error rate is over 15% (mispronounced
   abbreviations, swallowed words), drawn-out words and too slow/fast lines in `speech_check.md`.
   ESpeech swallows short words (и, в, да) more than the other engines; since 28.10 its takes start
   with "— ", get 0.3 s more length and are synthesised again while a word of the text, short ones
-  included, is not heard (lines losing a word 40% -> 19% on 300 S29 lines; `docs/roadmap.md` §7).
+  included, is not heard (lines losing a word 40% -> 19% on 300 S29 lines; `docs/history.md` §7).
   People without a voice-bank clip (unnamed voices, crowds) are spoken by TeraTTS in the ESpeech
   track (`"fallback": "teratts"` in the f5 engine: the TeraTTS voices of the config, ru_f1+ru_f2 /
   ru_m5) instead of a Vosk sentence cloned by F5; the F5 calibration still probes the Vosk clip.
@@ -814,7 +814,7 @@ What it does, after every episode has its transcript and names (`speakers` stage
    `season_voices.json` records what moved. The first-pass files are kept once as `*.before_voices.json`; the stage always
    starts from them, so a rerun (also with more episodes in the season) gives the same result as a first run.
 
-Since 7.11.2026 (old seasons, `docs/roadmap.md` plan of 7.11): a person only the subtitles or the season's cast name
+Since 7.11.2026 (old seasons, `docs/history.md` plan of 7.11): a person only the subtitles or the season's cast name
 (S01E01 "DIRK:" lines) gets a voice too; a person with fewer than `min_words` words gets one from the words spoken under
 their name cards (`ocr.json` and the multi-line cards of `onscreen.json`; title rolls and tribe / day / place cards do not
 count); a cluster the naming calls mixed ("merged contestant voices") gives no words to the voice of the person it is
@@ -1056,7 +1056,7 @@ and caption-only lines are skipped. On 899 voiced S51 contestant lines it change
 `gender_by_voice`, is voiced by the voice of the new gender (not the speaker's own), and every such cue is
 listed in `review.json` / `review.srt` with a note and a `fix` that undoes it. A gender in `corrections.json`
 wins. Missing model files: a warning, the override is skipped.
-Diarization: `diarizen-v2` (default since 28.10; `pyannote-community-1` when `diarizen_env` is missing; more speaker changes found: F1 vs the captions' turn marks 0.73 -> 0.83, who is who the same, see `docs/roadmap.md` §6; its own venv: `bash scripts/setup_envs.sh diarizen`), then speaker refinement (`stt.refine_speakers`,
+Diarization: `diarizen-v2` (default since 28.10; `pyannote-community-1` when `diarizen_env` is missing; more speaker changes found: F1 vs the captions' turn marks 0.73 -> 0.83, who is who the same, see `docs/history.md` §6; its own venv: `bash scripts/setup_envs.sh diarizen`), then speaker refinement (`stt.refine_speakers`,
 `"speaker_refine"` in `stt_config.json`): every diarized turn gets an embedding of the stronger
 WeSpeaker ResNet293 (pyannote's PyTorch port of the checkpoint, ~17 s per episode), every speaker a
 centroid of its turns of 1.5+ s, and a turn that sounds clearly (0.1) closer to another speaker

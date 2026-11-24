@@ -25,7 +25,7 @@ Rules for every question:
 ## Reference numbers
 
 Measured on a 64-minute Survivor episode (S48E07) on an RTX 4070 Ti SUPER 16 GB, all three voice-overs:
-**65.7 min** in total (docs/roadmap.md, "after speed-ups"). Main parts: recognition ~8 min, translation with
+**65.7 min** in total (docs/history.md, "after speed-ups"). Main parts: recognition ~8 min, translation with
 on-screen text ~4 min, stress ~2.5 min, ESpeech voice-over ~29 min (32 steps), TeraTTS ~10 min, Vosk on the CPU
 at the same time. Scale by episode length (minutes of video / 64).
 

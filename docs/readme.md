@@ -563,7 +563,7 @@ SRT → JSON (`utils.srt_to_json`) → RUNorm + RUAccent (`utils.text_normalizer
 чисел и ударения) → Vosk TTS (`synthesize.synthesize_cli`) → сведение (`utils.audio_mixer`).
 Он по-прежнему на месте, а `uv run -m voiceover.pipeline run <subs.json> --out <папка>` озвучивает
 готовые русские субтитры движками основного пайплайна. Наборы настроек на него не действуют.
-Подробнее: раздел 4 в `AGENTS.md` и `docs/pipeline.md`.
+Подробнее: раздел 4 в `AGENTS.md` и `docs/archive/pipeline.md`.
 
 ## 19. Обучение модели голосов
 
@@ -610,6 +610,6 @@ subs_env/bin/python -m pytest tests -q
 - `docs/stt_local.md` — основной пайплайн подробно: модели, языковые модели и их стоимость,
   измерения.
 - `docs/experiments.md` — что пробовали, что помогло, а что нет.
-- `docs/roadmap.md` — что сделано и что дальше.
-- `docs/pipeline.md` и `AGENTS.md` — классический пайплайн и правила работы с репозиторием.
+- `docs/roadmap.md` — что дальше; `docs/history.md` — что сделано и измерено.
+- `docs/archive/pipeline.md` и `AGENTS.md` — классический пайплайн и правила работы с репозиторием.
 - `ui/help.md` — справка внутри программы (по-русски).
