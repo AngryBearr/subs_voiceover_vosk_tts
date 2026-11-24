@@ -59,9 +59,19 @@ if has xvoice; then
   # (stt.ru_samples); the system library espeak-ng is used by phonemizer
   venv xvoice_env 3.11
   VIRTUAL_ENV=$PWD/xvoice_env uv pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+  xvoice_commit=817bcdd9f8173eb01c7d5c895858b1d93780d9d0
   if [ ! -d models/X-Voice ]; then
     git clone https://github.com/sunnyxrxrx/X-Voice models/X-Voice
-    git -C models/X-Voice checkout 817bcdd9f8173eb01c7d5c895858b1d93780d9d0
+  fi
+  if [ "$(git -C models/X-Voice rev-parse HEAD 2>/dev/null || true)" != "$xvoice_commit" ]; then
+    if [ -n "$(git -C models/X-Voice status --porcelain 2>/dev/null || true)" ]; then
+      echo "setup_envs: models/X-Voice has local changes; expected commit $xvoice_commit" >&2
+      exit 1
+    fi
+    git -C models/X-Voice checkout "$xvoice_commit" || {
+      git -C models/X-Voice fetch origin "$xvoice_commit"
+      git -C models/X-Voice checkout "$xvoice_commit"
+    }
   fi
   VIRTUAL_ENV=$PWD/xvoice_env uv pip install -e models/X-Voice
   VIRTUAL_ENV=$PWD/xvoice_env uv pip install "pyarrow<20"

@@ -79,6 +79,12 @@ def run_worker(spec: WorkerSpec, args: list[str], log_path: Path | None = None, 
                capture_output: bool = False, combine_output: bool = False, check: bool = True,
                on_poll: Callable[[], None] | None = None, poll_s: float = 2.0) -> subprocess.CompletedProcess[str]:
     """Run a worker, keeping stderr in a log or capturing output; optionally poll live progress."""
+    if capture_output and on_poll is not None:
+        raise ValueError("capture_output cannot be combined with on_poll")
+    if capture_output and log_path is not None:
+        raise ValueError("capture_output cannot be combined with log_path")
+    if combine_output and log_path is None:
+        raise ValueError("combine_output requires log_path")
     command = worker_command(spec, args, python)
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)

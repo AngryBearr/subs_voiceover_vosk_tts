@@ -143,7 +143,7 @@ def test_xvoice_keeps_isolation_cwd_and_subprocess_mock(tmp_path: Path, monkeypa
         Path(command[4]).write_text(json.dumps(items), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0)
 
-    with patch.object(ru_samples.subprocess, "run", side_effect=fake_run):
+    with patch.object(runner.subprocess, "run", side_effect=fake_run):
         assert ru_samples.run_worker(items, job_dir) == items
 
 
@@ -160,7 +160,17 @@ def test_lava_keeps_command_output_and_subprocess_mock(tmp_path: Path) -> None:
         Path(command[5]).write_bytes(b"widened")
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    with patch.object(widen.subprocess, "run", side_effect=fake_run):
+    with patch.object(runner.subprocess, "run", side_effect=fake_run):
         assert widen.widen_track(track, out, 5200.0, Path(sys.executable))
     assert out.read_bytes() == b"widened"
     assert not (tmp_path / "track.wide.tmp.wav").exists()
+
+
+def test_run_worker_rejects_incompatible_output_flags(tmp_path: Path) -> None:
+    spec = ENV_WORKERS["f5"]
+    with pytest.raises(ValueError, match="capture_output.*on_poll"):
+        run_worker(spec, [], python=Path(sys.executable), capture_output=True, on_poll=lambda: None)
+    with pytest.raises(ValueError, match="capture_output.*log_path"):
+        run_worker(spec, [], tmp_path / "w.log", python=Path(sys.executable), capture_output=True)
+    with pytest.raises(ValueError, match="combine_output.*log_path"):
+        run_worker(spec, [], python=Path(sys.executable), combine_output=True)

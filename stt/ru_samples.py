@@ -28,7 +28,6 @@ import hashlib
 import json
 import logging
 import re
-import subprocess
 import tempfile
 import time
 from pathlib import Path

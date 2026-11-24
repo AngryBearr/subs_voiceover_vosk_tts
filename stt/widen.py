@@ -20,7 +20,6 @@ import argparse
 import json
 import logging
 import statistics
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
