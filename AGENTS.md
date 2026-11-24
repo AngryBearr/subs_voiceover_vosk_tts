@@ -2,8 +2,8 @@
 
 Этот файл имеет приоритет над другими инструкциями для агента (`CLAUDE.md` — ссылка на него).
 Он описывает, как работать с проектом: английское видео → распознание и перевод (`stt/`) →
-русская озвучка с подгонкой под время (`voiceover/`), а также классический пайплайн
-SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс (legacy, §4).
+русская озвучка с подгонкой под время (`voiceover/`) → микс (`stt/mix.py`). Правила общих
+компонентов (SRT → JSON, RUNorm + RUAccent, Vosk TTS) — в §4-§6.
 
 ## 1. Общие правила
 
@@ -40,7 +40,7 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс (legacy, §4).
 - **Окружения** (всё сразу: `bash scripts/install.sh`, проверка: `subs_env/bin/python -m stt.selftest`;
     по отдельности: `bash scripts/setup_envs.sh`):
     - `subs_env` — всё: распознание (`stt/`), перевод, озвучка (`voiceover/`, Vosk, TeraTTS),
-        проверка речи, Gradio, классические скрипты. Ставится из `requirements.txt` через uv с
+        проверка речи, Gradio. Ставится из `requirements.txt` через uv с
         `overrides-onnxruntime.txt` (модуль `onnxruntime` даёт только `onnxruntime-gpu`).
     - `f5_env` — `f5-tts` для озвучки клонированными голосами (ESpeech, `voiceover/f5_worker.py`).
     - `xvoice_env` — X-Voice, русские образцы голосов для ESpeech (`stt/ru_samples.py`,
@@ -71,6 +71,9 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс (legacy, §4).
 - **Документация**: открытые пункты — `docs/roadmap.md`; журнал завершённых этапов и исследований —
     `docs/history.md`; устаревшие планы и описание классического пайплайна — `docs/archive/`;
     разовые исследовательские скрипты — `research/`.
+- **Ключевые модули**: настройки — `stt/config.py`; этапы `stt.run` — `stt/stage_runner.py`,
+    `stt/episode_vo.py`, `stt/episode_media.py`, `stt/run_llm.py`; общее ядро обращений к языковым
+    моделям — `utils/llm_core.py`; вкладки интерфейса — `ui/tabs/`.
 - **Озвучка готовых русских субтитров**: `uv run -m voiceover.pipeline run <subs.json> --out <dir>`
     (настройки в `voiceover_config.json`).
 - **Правка реплик серии**: `corrections.json` в папке серии (интерфейс или `stt.subtitle_edit`
@@ -78,12 +81,12 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс (legacy, §4).
 - Ключи API (`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, токен HF) лежат в `.env`;
     никогда не выводить их, как и токены opencode (`auth.json`).
 
-## 4. Классический пайплайн SRT → JSON → RUNorm + RUAccent → Vosk → микс (legacy)
+## 4. Общие компоненты: SRT → JSON, RUNorm + RUAccent, Vosk TTS, микс
 
-- Устаревший, вспомогательный путь (`pipeline.py`, `utils.srt_to_json`, `synthesize.synthesize_cli`,
-    `utils.audio_mixer`): сохраняется для совместимости и простых случаев. Основной путь — `stt.run`
-    (§3): микс там делает `stt/mix.py`, а `voiceover/pipeline.py` озвучивает готовые русские субтитры.
-    Правила про RUNorm/RUAccent и Vosk ниже действуют и для основного пайплайна.
+- Старый классический CLI (`pipeline.py`, `utils.audio_mixer`, `pipeline_config*.json`) удалён;
+    он доступен в git-теге `legacy/gen1-gen2`. Основной путь — `stt.run` (§3): микс делает
+    `stt/mix.py`, а `voiceover.pipeline` озвучивает готовые русские субтитры. Правила ниже
+    действуют для этих путей.
 
 - **SRT → JSON**
     - Вход: SRT-файл сабов.
@@ -133,19 +136,9 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс (legacy, §4).
     - Batch-синтез создаёт файлы `<file_prefix><n>.wav` (нумерация с 1)
         в указанной папке.
 
-- **Микс сегментов в финальный звук**
-    - Путь классического пайплайна (legacy): `utils.audio_mixer.mix_segments` или CLI
-        `uv run -m utils.audio_mixer ...`.
-        - Читает JSON сабов (ожидает `index`, `start`, `end`).
-        - Берёт сегменты `<index>.wav` из папки и миксует в единый трек с
-            опциональным ресемплингом (через `soxr`, если установлен).
-        - Может накладывать базовый трек (`base_audio_path`) и управлять
-            `base_gain_db` / `speech_gain_db`.
-    - Альтернатива для простых случаев: `utils.subs_utils`:
-        - `create_silence_audio(video_path, silence.wav)` — создать тихий
-            трек нужной длины по видео.
-        - `overlay_audio(silence.wav, tts_out, subs.json, mixed.mp3)` —
-            наложить TTS-сегменты на тишину.
+- **Микс в финальный звук**
+    - `stt/mix.py` (в `stt.run`); готовые русские субтитры целиком озвучивает
+        `uv run -m voiceover.pipeline run <subs.json> --out <dir>`.
 
 ## 5. RUNorm / RUAccent и устройства
 
@@ -251,6 +244,5 @@ SRT → JSON → RUNorm + RUAccent → Vosk TTS → микс (legacy, §4).
 - Этот файл (`AGENTS.md`) имеет приоритет над другими наборами
     инструкций для агента.
 - При расхождении с `.github/copilot-instructions.md` следовать
-    правилам из `AGENTS.md`, сохраняя при этом общий пайплайн
-    (SRT → JSON → RUNorm + RUAccent → Vosk TTS → mix/export).
+    правилам из `AGENTS.md`.
 

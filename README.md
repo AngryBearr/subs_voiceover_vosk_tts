@@ -35,7 +35,7 @@ Everything runs from the command line or from a browser page on your own compute
 15. [Output files and folders](#15-output-files-and-folders)
 16. [Correcting lines](#16-correcting-lines)
 17. [Configuration](#17-configuration)
-18. [The older "classic" pipeline](#18-the-older-classic-pipeline)
+18. [Voicing ready Russian subtitles](#18-voicing-ready-russian-subtitles)
 19. [Training the speaker model](#19-training-the-speaker-model)
 20. [Tests](#20-tests)
 21. [Repository layout](#21-repository-layout)
@@ -192,7 +192,7 @@ end took 1 h 15 min. Expect different numbers on other hardware and episodes.
 
 A preset is a named set of settings laid over the config. Order, the last one wins: base
 `stt_config.json` < `stt_config.local.json` < preset < UI form or command-line flags. Presets
-cover `stt.run` only, not the classic pipeline.
+cover `stt.run` only, not `voiceover.pipeline`.
 
 | Preset | What it does |
 |---|---|
@@ -520,14 +520,12 @@ Language models: one switch, `llm.model` (default `openai/gpt-6-luna`), sets eve
 `llm.stages.<step>` overrides one step. Per-step prices measured on one 64-minute episode are in
 `docs/stt_local.md`.
 
-## 18. The older "classic" pipeline
+## 18. Voicing ready Russian subtitles
 
-Before the main pipeline there was a simpler one for ready Russian subtitles:
-SRT -> JSON (`utils.srt_to_json`) -> RUNorm + RUAccent (`utils.text_normalizer`: number
-normalisation and stress) -> Vosk TTS (`synthesize.synthesize_cli`) -> mix
-(`utils.audio_mixer`). It is still there, and `uv run -m voiceover.pipeline run <subs.json> --out <dir>`
-voices ready Russian subtitles with the engines of the main pipeline. Presets do not apply to
-it. Details: `AGENTS.md` section 4 and `docs/archive/pipeline.md`.
+`uv run -m voiceover.pipeline run <subs.json> --out <dir>` voices ready Russian subtitles with
+the engines of the main pipeline (settings in `voiceover_config.json`); presets do not apply to it.
+The older classic command line (`pipeline.py`, `utils.audio_mixer`) was removed; it is kept in the
+git tag `legacy/gen1-gen2`. Rules for the shared parts: `AGENTS.md` sections 4-6.
 
 ## 19. Training the speaker model
 
@@ -559,9 +557,9 @@ subs_env/bin/python -m pytest tests -q
 |---|---|
 | `stt/` | the main pipeline: `run.py` (entry point), recognition, speakers, subtitles, season voices, translation, mixing, video compression |
 | `voiceover/` | voice engines (Vosk, TeraTTS, F5), timeline solver, stress check, speech check, TTS cache |
-| `ui/` | the browser UI (`dub_app.py`), settings page, help text `help.md` |
-| `utils/` | shared helpers: text normalisation, audio mixing, LLM transports, ffmpeg wrappers |
-| `synthesize/` | the Vosk TTS command line used by the classic pipeline |
+| `ui/` | the browser UI (`dub_app.py`, tabs in `ui/tabs/`), settings page, help text `help.md` |
+| `utils/` | shared helpers: text normalisation, LLM transports (`llm_core.py`), ffmpeg wrappers |
+| `synthesize/` | the Vosk TTS command line and model loading, used by the Vosk engine and voice previews |
 | `scripts/` | `install.sh`, `setup_envs.sh`, `run_ui.sh`, `status.py`, `speaker_training/` |
 | `tests/` | unit tests |
 | `docs/` | documentation, experiments and the roadmap |
@@ -575,5 +573,5 @@ subs_env/bin/python -m pytest tests -q
   measurements.
 - `docs/experiments.md` - what was tried, what helped and what did not.
 - `docs/roadmap.md` - what is next; `docs/history.md` - what was done and measured.
-- `docs/archive/pipeline.md` and `AGENTS.md` - the classic pipeline and the working rules of the repository.
+- `AGENTS.md` - the working rules of the repository; `docs/archive/` - old plans and the removed classic pipeline.
 - `ui/help.md` - the in-app help (Russian).

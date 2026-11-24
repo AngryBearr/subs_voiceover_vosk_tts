@@ -191,7 +191,7 @@ if the worker fails).
 
 `presets` in `stt_config.json` are named sets of settings laid over the config: `stt.run --preset <name>`, or the radio
 "Набор настроек" on the UI tab "Обработка" (it fills the form, which can still be edited). Order, last wins: `stt_config.json`
-< `stt_config.local.json` < preset < form / command-line flags. They cover `stt.run` only, not the classic pipeline.
+< `stt_config.local.json` < preset < form / command-line flags. They cover `stt.run` only, not `voiceover.pipeline`.
 
 | Preset | What it is |
 |---|---|
