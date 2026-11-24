@@ -15,7 +15,7 @@ from ui import seasons, settings
 from ui.app_paths import ENGINES, REPO_ROOT, _episode, _root
 from ui.widgets import wait_state
 
-log = logging.getLogger("ui.dub_app")
+log = logging.getLogger(__name__)
 MIX_SECONDS = 45.0
 MIX_SETTINGS = [next(s for s in settings.SETTINGS if s.path == path) for path in (
     ("mix", "voice_gain_db"), ("mix", "rest_duck_db"), ("mix", "duck_db"), ("mix", "loudness_lufs"),

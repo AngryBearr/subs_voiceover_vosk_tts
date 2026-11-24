@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from _thread import LockType
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any
 
@@ -93,7 +93,7 @@ def season_line_text(season: seasons.Season | None) -> str:
     return f"{seasons.summary(season)} · действуют: {season_settings.in_effect(season.results)}"
 
 
-def tts_cache(delete: bool, *, lock: LockType, current_job: Callable[[], Job | None]) -> str:
+def tts_cache(delete: bool, *, lock: AbstractContextManager[Any], current_job: Callable[[], Job | None]) -> str:
     """The TTS cache cleanup (``voiceover.cache_clean``) as a message: what goes, or what went."""
     from voiceover.cache_clean import apply, cache_dir, default_roots, plan
 
