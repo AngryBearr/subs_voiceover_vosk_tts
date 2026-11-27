@@ -38,6 +38,7 @@ SEPARATOR_ID = "torchaudio.HDEMUCS_HIGH_MUSDB_PLUS;chunk=30;overlap=1"
 _SEPARATION_LOCKS: dict[Path, threading.Lock] = {}
 _SEPARATION_GUARD = threading.Lock()
 MIX_BLOCK = 48000 * 60  # samples per block of ``mix`` / ``limit_peaks``: their temporaries stay ~minute-sized
+_MIX_CEILING = 10 ** (-1.3 / 20)  # measured PCM headroom for the AAC192 -1 dBTP delivery target
 
 
 def _resample(audio: np.ndarray, src: int, dst: int) -> np.ndarray:
@@ -113,32 +114,64 @@ def _block(audio: np.ndarray, start: int, end: int) -> np.ndarray:
 
 def limit_peaks(audio: np.ndarray, sample_rate: int, ceiling: float = 0.97, lookahead_s: float = 0.005, *,
                 inplace: bool = False) -> np.ndarray:
-    """Look-ahead peak limiter: samples never exceed ``ceiling``, everything else stays as it is.
+    """Linked-channel 4x true-peak lookahead limiter; ``ceiling`` is a linear amplitude.
 
-    The gain is ``min(1, ceiling / |peak over channels|)``, lowered ``lookahead_s`` before and after each
-    peak (minimum filter) and smoothed (moving average no wider than that), so it reaches the reduced
-    value before the peak arrives. Audio that never exceeds the ceiling is returned unchanged. ``inplace`` writes the
-    result into ``audio`` (float32) instead of a new array: a long episode has no room for a second copy.
+    Detect and smooth gain at 4x, apply it on the original sample grid, then verify the interpolated
+    output and correct any residual overshoot. Quiet audio is returned unchanged. Overlapping blocks
+    include the FIR and gain-filter support, retaining unmodified history even with ``inplace=True``.
+    Only the optional output is episode-sized; all scratch arrays are bounded by ``MIX_BLOCK``.
     """
     if audio.size == 0:
         return audio
-    peak = np.concatenate([np.abs(audio[s:s + MIX_BLOCK]).max(axis=1) if audio.ndim == 2
-                           else np.abs(audio[s:s + MIX_BLOCK]) for s in range(0, len(audio), MIX_BLOCK)])
-    if float(peak.max()) <= ceiling:
+    if _true_peak(audio) <= ceiling:
         return audio
     from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    from scipy.signal import resample_poly
 
-    gain = np.minimum(1.0, ceiling / np.maximum(peak, 1e-9)).astype(np.float32)
-    del peak
-    reach = max(1, int(lookahead_s * sample_rate))
-    gain = minimum_filter1d(gain, 2 * reach + 1, mode="nearest")
-    gain = uniform_filter1d(gain, reach + 1, mode="nearest")
-    gain = np.minimum(gain, 1.0)
+    reach = max(1, int(lookahead_s * sample_rate * 4))
+    # resample_poly's default FIR has 10 input samples of support on either side.
+    overlap = (2 * reach + 3) // 4 + 16
     out = audio if inplace and audio.dtype == np.float32 and audio.flags.writeable else np.empty(audio.shape, np.float32)
-    for s in range(0, len(audio), MIX_BLOCK):  # block by block: no full-length temporaries
-        g = gain[s:s + MIX_BLOCK]
-        out[s:s + MIX_BLOCK] = audio[s:s + MIX_BLOCK] * (g[:, None] if audio.ndim == 2 else g)
+    history = audio[:0].copy()
+    for start in range(0, len(audio), MIX_BLOCK):
+        end = min(len(audio), start + MIX_BLOCK)
+        left, right = max(0, start - overlap), min(len(audio), end + overlap)
+        block = np.concatenate((history, audio[start:right]))
+        # Save the *input* tail before writing; a small MIX_BLOCK may be shorter than the overlap.
+        history = block[max(0, end - overlap - left):end - left].copy()
+        high = resample_poly(block, 4, 1, axis=0, window=("kaiser", 8.6))
+        np.abs(high, out=high)
+        peak = high.max(axis=1) if audio.ndim == 2 else high
+        gain = np.minimum(1.0, ceiling / np.maximum(peak, 1e-9)).astype(np.float32)
+        del high, peak
+        minimum_filter1d(gain, 2 * reach + 1, mode="nearest", output=gain)
+        uniform_filter1d(gain, reach + 1, mode="nearest", output=gain)
+        g = gain[(start - left) * 4:(end - left) * 4:4]
+        out[start:end] = block[start - left:end - left] * (g[:, None] if audio.ndim == 2 else g)
+        del gain, g, block
+    # Gain modulation can introduce a small interpolation overshoot. A linked static correction
+    # is continuous across every seam and does not require an episode-sized verification buffer.
+    correction = min(1.0, ceiling / max(_true_peak(out), 1e-9))
+    if correction < 1.0:
+        for start in range(0, len(out), MIX_BLOCK):
+            out[start:start + MIX_BLOCK] *= np.float32(correction)
     return out
+
+
+def _true_peak(audio: np.ndarray) -> float:
+    """Maximum 4x Kaiser-FIR interpolated amplitude, with exact FIR overlap at block seams."""
+    from scipy.signal import resample_poly
+
+    peak = 0.0
+    for start in range(0, len(audio), MIX_BLOCK):
+        end = min(len(audio), start + MIX_BLOCK)
+        left, right = max(0, start - 16), min(len(audio), end + 16)
+        high = resample_poly(audio[left:right], 4, 1, axis=0, window=("kaiser", 8.6))
+        core = high[(start - left) * 4:(end - left) * 4]
+        np.abs(core, out=core)
+        peak = max(peak, float(core.max()))
+        del high, core
+    return peak
 
 
 def integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
@@ -169,20 +202,50 @@ def integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
 
 
 def finish_mix(audio: np.ndarray, sample_rate: int, loudness_lufs: float | None,
-               ceiling: float = 0.97, *, inplace: bool = False) -> tuple[np.ndarray, float | None, float]:
-    """The last step of a mix: a static gain to ``loudness_lufs`` (None: none), then the peak limiter.
-    Returns ``(audio, loudness before, gain applied in dB)``. ``inplace``: ``audio`` (float32) may be overwritten."""
+               ceiling: float = _MIX_CEILING, *, inplace: bool = False) -> tuple[np.ndarray, float | None, float]:
+    """Normalize and true-peak limit; default PCM headroom is intended for AAC192 at <= -1 dBTP.
+
+    Recheck loudness after limiting, correcting in bounded passes without retaining the input.
+    Unreachable targets are logged, not achieved by raising the ceiling. Returns ``(audio, loudness
+    before, cumulative gain applied in dB)``; ``inplace`` may overwrite writable float32 input.
+    AAC can create new peaks: headroom is measured engineering margin, not a codec guarantee.
+    """
     measured: float | None = None
     gain_db = 0.0
-    if loudness_lufs is not None:
-        measured = integrated_loudness(audio, sample_rate)
-        if np.isfinite(measured):
-            gain_db = loudness_lufs - measured
-            if inplace and audio.dtype == np.float32 and audio.flags.writeable:
-                audio *= np.float32(10 ** (gain_db / 20))  # in place: a copy of a long episode is gigabytes
-            else:
-                audio = (audio * np.float32(10 ** (gain_db / 20))).astype(np.float32)
-    return limit_peaks(audio, sample_rate, ceiling, inplace=inplace), measured, gain_db
+    if loudness_lufs is None:
+        return limit_peaks(audio, sample_rate, ceiling, inplace=inplace), measured, gain_db
+    measured = integrated_loudness(audio, sample_rate)
+    if not np.isfinite(measured):
+        return limit_peaks(audio, sample_rate, ceiling, inplace=inplace), measured, gain_db
+    if not (inplace and audio.dtype == np.float32 and audio.flags.writeable):
+        audio = audio.astype(np.float32, copy=True)
+    current = measured
+    after = measured
+    extra_gain_db = 0.0
+    max_extra_gain_db = 6.0
+    prev_after: float | None = None
+    for _ in range(6):
+        adjustment = loudness_lufs - current
+        if prev_after is not None and adjustment > 0.0:
+            headroom = max_extra_gain_db - extra_gain_db
+            if headroom <= 0.05:
+                break
+            adjustment = min(adjustment, headroom)
+            extra_gain_db += adjustment
+        gain_db += adjustment
+        for start in range(0, len(audio), MIX_BLOCK):
+            audio[start:start + MIX_BLOCK] *= np.float32(10 ** (adjustment / 20))
+        audio = limit_peaks(audio, sample_rate, ceiling, inplace=True)
+        after = integrated_loudness(audio, sample_rate)
+        if not np.isfinite(after) or abs(after - loudness_lufs) <= 0.1:
+            break
+        if prev_after is not None and abs(after - prev_after) < 0.05:
+            break
+        prev_after = after
+        current = after
+    if not np.isfinite(after) or abs(after - loudness_lufs) > 0.2:
+        log.warning("Mix loudness %.1f LUFS misses target %.1f after limiting", after, loudness_lufs)
+    return audio, measured, gain_db
 
 
 def separation_path(cache_dir: Path, media: Path, start: float, duration: float | None, sample_rate: int) -> Path:
@@ -408,8 +471,8 @@ def main(argv: list[str] | None = None) -> None:
     out, measured, gain_db = finish_mix(out, args.sample_rate, args.loudness_lufs, inplace=True)
     t_finished = time.monotonic()
     if measured is not None:
-        log.info("Loudness %.1f LUFS -> gain %+.1f dB to reach %.1f LUFS (peaks limited at 0.97)", measured, gain_db,
-                 args.loudness_lufs)
+        log.info("Loudness %.1f LUFS -> cumulative gain %+.1f dB toward %.1f LUFS (true-peak ceiling %.2f dBTP)",
+                 measured, gain_db, args.loudness_lufs, 20 * np.log10(_MIX_CEILING))
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), out, args.sample_rate, subtype="PCM_16")

@@ -77,5 +77,42 @@ def test_limiter_in_place_matches_the_copy(monkeypatch) -> None:
     work = audio.copy()
     inplace = mix_module.limit_peaks(work, 1000, inplace=True)
     assert inplace is work and np.array_equal(inplace, copy)
-    loud, _, _ = mix_module.finish_mix(audio.copy(), 1000, None, inplace=True)
+    loud, _, _ = mix_module.finish_mix(audio.copy(), 1000, None, ceiling=0.97, inplace=True)
     assert np.array_equal(loud, copy)
+
+
+def test_true_peak_limiter_block_seams_and_inplace_history(monkeypatch) -> None:
+    """Tiny blocks must match a single block, including peaks immediately around every seam."""
+    from scipy import signal
+
+    from stt import mix as mix_module
+
+    rate = 48000
+    t = np.arange(12000) / rate
+    audio = np.stack([0.8 * np.sin(2 * np.pi * 12000 * t + np.pi / 4),
+                      0.3 * np.sin(2 * np.pi * 997 * t)], axis=1).astype(np.float32)
+    for seam in range(997, len(audio), 997):
+        audio[seam - 1:seam + 2, 1] = [1.7, -1.6, 1.5]
+    saved = audio.copy()
+    ceiling = 10 ** (-1.15 / 20)
+    monkeypatch.setattr(mix_module, "MIX_BLOCK", len(audio))
+    reference = mix_module.limit_peaks(audio, rate, ceiling)
+    np.testing.assert_array_equal(audio, saved)
+    resample = signal.resample_poly
+    calls: list[int] = []
+
+    def bounded_resample(data: np.ndarray, *args, **kwargs) -> np.ndarray:
+        calls.append(len(data))
+        # 5 ms lookahead: two reaches plus FIR support on each side, independent of episode length.
+        assert len(data) <= mix_module.MIX_BLOCK + 2 * (2 * 240 + 16)
+        return resample(data, *args, **kwargs)
+
+    monkeypatch.setattr(signal, "resample_poly", bounded_resample)
+    for block_size in (997, 37):  # also exercise history longer than a block
+        monkeypatch.setattr(mix_module, "MIX_BLOCK", block_size)
+        work = audio.copy()
+        out = mix_module.limit_peaks(work, rate, ceiling, inplace=True)
+        assert out is work and out.shape == audio.shape and out.dtype == np.float32
+        np.testing.assert_allclose(out, reference, atol=2e-7, rtol=0)
+        assert float(np.abs(resample(out, 4, 1, axis=0, window=("kaiser", 8.6))).max()) <= ceiling + 1e-6
+    assert len(calls) > 100

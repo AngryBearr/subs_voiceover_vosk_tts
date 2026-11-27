@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from stt.mix import integrated_loudness, limit_peaks, mix, mux_tracks, streams
+from stt.mix import encode_track, finish_mix, integrated_loudness, limit_peaks, mix, mux_tracks, streams
 from stt.mix_preview import best_window, loudest_spot, render_preview
 from stt.video_compress import encode_video, video_bitrate
 from utils.ffmpeg import ffmpeg_exe
@@ -31,6 +32,62 @@ def test_limiter_never_exceeds_ceiling_and_keeps_quiet_audio() -> None:
     assert np.allclose(limited[:15000], audio[:15000])  # far from the burst: untouched
     quiet = _sine(0.5, rate, -20.0)
     assert limit_peaks(quiet, rate) is quiet
+
+
+@pytest.mark.parametrize("channels", [1, 2])
+def test_limiter_catches_intersample_peaks(channels: int) -> None:
+    from scipy.signal import resample_poly
+
+    rate = 48000
+    wave = (1.15 * np.sin(2 * np.pi * 12000 * np.arange(rate) / rate + np.pi / 4)).astype(np.float32)
+    audio = wave if channels == 1 else np.stack([wave, wave * 0.5], axis=1)
+    ceiling = 10 ** (-1 / 20)
+    assert float(np.abs(audio).max()) < ceiling  # the old sample-peak limiter missed this
+    assert float(np.abs(resample_poly(audio, 4, 1, axis=0)).max()) > 1.1
+    out = limit_peaks(audio, rate, ceiling=ceiling)
+    assert out.shape == audio.shape and out.dtype == np.float32
+    assert float(np.abs(resample_poly(out, 4, 1, axis=0, window=("kaiser", 8.6))).max()) <= ceiling + 1e-6
+    if channels == 2:
+        np.testing.assert_array_equal(out[:, 1], out[:, 0] * 0.5)  # linked gain preserves the stereo image
+
+
+def test_finish_mix_and_aac192_loudness_and_true_peak(tmp_path: Path) -> None:
+    """Exercise real PCM16 -> encode_track -> decoded AAC, not a simulated codec or peak meter."""
+    rate = 48000
+    t = np.arange(10 * rate) / rate
+    wave = 0.08 * np.sin(2 * np.pi * 220 * t)
+    burst = (np.arange(len(t)) % (rate // 2)) < rate // 100
+    wave += burst * 0.8 * np.sin(2 * np.pi * 997 * t)
+    audio = np.stack([wave, wave], axis=1).astype(np.float32)
+    finished, before, gain = finish_mix(audio, rate, -16.0, inplace=True)
+    assert finished is audio and before is not None and np.isfinite(gain)
+    wav, aac = tmp_path / "mix.wav", tmp_path / "mix.m4a"
+    sf.write(wav, finished, rate, subtype="PCM_16")
+    encode_track(wav, aac, "192k")
+    for path in (wav, aac):
+        result = subprocess.run(
+            [ffmpeg_exe(), "-hide_banner", "-nostats", "-i", str(path),
+             "-af", "ebur128=peak=sample+true", "-f", "null", "-"],
+            capture_output=True, text=True, check=True,
+        )
+        summary = result.stderr.rsplit("Summary:", 1)[1]
+        loudness = float(re.search(r"I:\s+([-\d.]+) LUFS", summary)[1])
+        peak = float(re.search(r"True peak:\s+Peak:\s+([-\d.]+) dBFS", summary)[1])
+        assert abs(loudness + 16) <= 0.2, (path, summary)
+        # The meter rounds to 0.1 dB; require a bin strictly below -1 to avoid ambiguous compliance.
+        assert peak <= -1.1, (path, summary)
+
+
+def test_finish_mix_caps_unreachable_loudness_target(caplog: pytest.LogCaptureFixture) -> None:
+    rate = 48000
+    audio = _sine(3.0, rate, -20.0)
+    with caplog.at_level("WARNING", logger="stt.mix"):
+        finished, before, gain = finish_mix(audio, rate, -1.0, inplace=False)
+    assert before is not None and np.isfinite(gain)
+    # Initial gain is ~19.7 dB plus at most 6 dB bounded extra correction (never runaway +40 dB)
+    assert gain <= (-1.0 - before) + 6.05
+    assert float(np.abs(finished).max()) <= 10 ** (-1.3 / 20) + 1e-3
+    assert any("misses target" in rec.message for rec in caplog.records)
 
 
 def test_integrated_loudness_of_a_sine() -> None:
