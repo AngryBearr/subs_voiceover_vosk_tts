@@ -16,7 +16,15 @@ gets ``<key>.take.json`` next to its WAV, so an interrupted job is resumed by th
 
 Every result also has ``attempts_run`` (attempts executed; ``takes`` is the winner's number) and ``timing``
 (seconds per phase, see ``voiceover.f5_stats``); the summary goes to the log and, with ``stats_path`` in the job,
-to that JSON file. Reference loading happens inside ``infer_process`` and is counted in ``sampling``.
+to that JSON file. Reference loading is counted in ``sampling``.
+
+Synthesis runs in the main thread (``DirectF5Synthesizer``): F5's ``infer_process`` starts a new thread for every
+line, which sets up its CUDA state again each time (~0.15 s per line, 18% of the time at 32 steps). The direct path
+does the same computation (loudness of the reference, its resampling, the text, ``fix_duration``, ``model.sample``,
+Vocos) bit for bit, with the prepared reference kept for the whole job. A line F5 would split into several pieces
+(long text for its reference) is made piece by piece in order, where F5 runs the pieces in parallel threads
+that draw the random noise in any order (so such takes were not reproducible). ``compile`` in the job wraps the DiT in
+``torch.compile`` (faster, slightly different audio, ~40 s to compile at the start).
 """
 
 from __future__ import annotations
@@ -26,8 +34,9 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import soundfile as sf
@@ -41,9 +50,107 @@ MODEL_CFG = {"dim": 1024, "depth": 22, "heads": 16, "ff_mult": 2, "text_dim": 51
 LOST_WORD_SCORE = 0.15  # per word of the text not heard (the speech check skips words under 3 letters)
 
 
+@dataclass
+class PreparedRef:
+    """A reference clip as F5's ``infer_batch_process`` prepares it (mono, loudness raised, 24 kHz, on the device)."""
+
+    audio: Any  # torch tensor (1, samples) at the model's rate, on the device
+    rms: Any  # loudness of the original clip (0-d torch tensor, as F5 keeps it)
+    ref_text: str  # transcript, with a space added after a final one-byte character (F5's rule)
+    max_chars: int  # F5's piece length for this reference (``infer_process``)
+
+
+class DirectF5Synthesizer:
+    """F5 ``infer_process`` without its thread per line: same audio, references prepared once per job.
+
+    ``utils`` is ``f5_tts.infer.utils_infer`` (passed in so tests can fake it)."""
+
+    def __init__(self, model: Any, vocoder: Any, utils: Any, torch_module: Any, torchaudio_module: Any) -> None:
+        self.model, self.vocoder, self.utils = model, vocoder, utils
+        self.torch, self.torchaudio = torch_module, torchaudio_module
+        self.refs: dict[tuple[str, str], PreparedRef] = {}
+        self.direct_lines = 0
+        self.split_lines = 0  # lines F5 splits into several pieces
+
+    def prepare(self, ref_wav: str, ref_text: str) -> PreparedRef:
+        key = (ref_wav, ref_text)
+        if key in self.refs:
+            return self.refs[key]
+        torch, u = self.torch, self.utils
+        audio, sr = self.torchaudio.load(ref_wav)
+        max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr))
+        if audio.shape[0] > 1:
+            audio = torch.mean(audio, dim=0, keepdim=True)
+        rms = torch.sqrt(torch.mean(torch.square(audio)))
+        if rms < u.target_rms:
+            audio = audio * u.target_rms / rms
+        if sr != u.target_sample_rate:
+            audio = self.torchaudio.transforms.Resample(sr, u.target_sample_rate)(audio)
+        text = ref_text + " " if len(ref_text[-1].encode("utf-8")) == 1 else ref_text
+        self.refs[key] = PreparedRef(audio.to(u.device), rms, text, max_chars)
+        return self.refs[key]
+
+    def synthesize(self, ref_wav: str, ref_text: str, gen_text: str, nfe_step: int,
+                   fix_duration: float) -> tuple[Any, int]:
+        """One take: ``(wave, sample_rate)``. A long text is split into pieces like F5 does, each gets its share of
+        ``fix_duration`` and the pieces are cross-faded; F5 runs the pieces in parallel threads (which take the
+        random numbers in any order), here they run one after another."""
+        u = self.utils
+        ref = self.prepare(ref_wav, ref_text)
+        pieces = u.chunk_text(gen_text, max_chars=ref.max_chars)
+        if not pieces:
+            raise ValueError(f"F5 got no text to synthesise: {gen_text!r}")
+        if len(pieces) == 1:
+            self.direct_lines += 1
+            return self._piece(ref, pieces[0], nfe_step, fix_duration), u.target_sample_rate
+        self.split_lines += 1
+        ref_sec = (ref.audio.shape[-1] // u.hop_length) * u.hop_length / u.target_sample_rate
+        weights = [len(piece.encode("utf-8")) for piece in pieces]
+        allocatable = fix_duration - ref_sec + u.cross_fade_duration * (len(pieces) - 1)
+        waves = [self._piece(ref, piece, nfe_step, ref_sec + allocatable * w / sum(weights))
+                 for piece, w in zip(pieces, weights)]
+        return cross_fade(waves, int(u.cross_fade_duration * u.target_sample_rate)), u.target_sample_rate
+
+    def _piece(self, ref: PreparedRef, text: str, nfe_step: int, fix_duration: float) -> Any:
+        """F5's ``infer_batch_process._infer_basic`` with a fixed duration."""
+        torch, u = self.torch, self.utils
+        ref_audio_len = ref.audio.shape[-1] // u.hop_length
+        duration = int(fix_duration * u.target_sample_rate / u.hop_length)
+        with torch.inference_mode():
+            generated, _ = self.model.sample(cond=ref.audio, text=u.convert_char_to_pinyin([ref.ref_text + text]),
+                                             duration=duration, steps=nfe_step, cfg_strength=u.cfg_strength,
+                                             sway_sampling_coef=u.sway_sampling_coef)
+            generated = generated.to(torch.float32)[:, ref_audio_len:, :].permute(0, 2, 1)
+            wave = self.vocoder.decode(generated)
+            if ref.rms < u.target_rms:
+                wave = wave * ref.rms / u.target_rms
+            return wave.squeeze().cpu().numpy()
+
+
+def cross_fade(waves: list[np.ndarray], samples: int) -> np.ndarray:
+    """F5's linear cross-fade of consecutive pieces (``infer_batch_process``)."""
+    final = waves[0]
+    for wave in waves[1:]:
+        n = min(samples, len(final), len(wave))
+        if n <= 0:
+            final = np.concatenate([final, wave])
+            continue
+        overlap = final[-n:] * np.linspace(1, 0, n) + wave[:n] * np.linspace(0, 1, n)
+        final = np.concatenate([final[:-n], overlap, wave[n:]])
+    return final
+
+
+def compile_transformer(model: Any, torch_module: Any, compile_fn: Callable[..., Any] | None = None) -> None:
+    """Wrap the DiT in ``torch.compile`` (dynamic shapes: every line has another length); compiled on first use."""
+    torch_module._dynamo.config.cache_size_limit = max(64, torch_module._dynamo.config.cache_size_limit)
+    model.transformer = (compile_fn or torch_module.compile)(model.transformer, dynamic=True)
+
+
 def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     import torch
-    from f5_tts.infer.utils_infer import infer_process, load_model, load_vocoder
+    import torchaudio
+    from f5_tts.infer import utils_infer
+    from f5_tts.infer.utils_infer import load_model, load_vocoder
     from f5_tts.model import DiT
     from huggingface_hub import hf_hub_download
 
@@ -55,8 +162,10 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
     model = load_model(DiT, MODEL_CFG, hf_hub_download(repo, job.get("checkpoint", "espeech_tts_rlv2.pt")),
                        vocab_file=hf_hub_download(repo, "vocab.txt"))
     vocoder = load_vocoder()
+    if job.get("compile"):
+        compile_transformer(model, torch)
+    synth = DirectF5Synthesizer(model, vocoder, utils_infer, torch, torchaudio)
     recognizer = Recognizer(job.get("device", "cuda")) if job.get("attempts", 3) > 1 else None
-    quiet = lambda *args, **kwargs: None  # noqa: E731
     prefix, slack = str(job.get("prefix", "")), float(job.get("slack_s", 0.0))
     retry_lost = bool(job.get("retry_lost_words", False))
     listener = StressListener(job.get("device", "cuda")) if recognizer and any(i.get("listen") for i in job["items"]) \
@@ -82,8 +191,7 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
                     nfe, fix = int(job.get("nfe", 32)), ref_seconds[ref] + float(item["duration"]) + slack
                     timer.attempts += 1
                     with timer.phase("sampling"):
-                        wav, rate, _ = infer_process(ref, item["ref_text"], prefix + item["text"], model, vocoder,
-                                                     nfe_step=nfe, show_info=quiet, fix_duration=fix)
+                        wav, rate = synth.synthesize(ref, item["ref_text"], prefix + item["text"], nfe, fix)
                 wav = np.asarray(wav, dtype=np.float32)
                 check = None
                 if recognizer:
@@ -132,6 +240,8 @@ def run(job: dict[str, Any]) -> list[dict[str, Any]]:
         results.append(entry)
         if n % 50 == 0:
             log.info("f5: %d/%d lines, %.1f s per line", n, len(job["items"]), (time.time() - t0) / n)
+    if synth.split_lines:
+        log.info("f5: %d takes made in several pieces (long text for the reference)", synth.split_lines)
     timed = [r for r in results if "timing" in r]
     if timed:
         summary = summarize([r["timing"] for r in timed])

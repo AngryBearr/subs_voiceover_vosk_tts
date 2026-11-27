@@ -112,6 +112,8 @@ class F5Engine(VoskEngine):
         self.slack_s = float(config.get("slack_s", 0.3))
         self.retry_lost_words = bool(config.get("retry_lost_words", True))
         self.listen_stress = bool(config.get("listen_stress", True))  # takes heard for the checked words' stress
+        # torch.compile of the DiT in the worker: faster synthesis, ~40 s to compile per run, audio not bit for bit
+        self.compile = bool(config.get("compile", False))
         self.python = worker_python(ENV_WORKERS["f5"],
                                     Path(str(config.get("python", REPO_ROOT / "f5_env" / "bin" / "python"))))
         self.normalization = dict(config.get("normalization", {}))
@@ -131,6 +133,7 @@ class F5Engine(VoskEngine):
                 # 3: the cut only when it checks better)
                 **({"prefix": self.prefix, "slack_s": self.slack_s, "retry_lost_words": self.retry_lost_words}
                    if (self.prefix, self.slack_s, self.retry_lost_words) != ("", 0.0, False) else {}),
+                **({"compile": True} if self.compile else {}),  # other GPU kernels: other takes
                 "voice": self._voice_key(self.voice)}
 
     @staticmethod
@@ -236,7 +239,8 @@ class F5Engine(VoskEngine):
             job, out = Path(tmp) / "job.json", Path(tmp) / "results.json"
             job.write_text(json.dumps({"model": self.repo, "nfe": self.nfe, "attempts": self.attempts,
                                        "device": self.device, "prefix": self.prefix, "slack_s": self.slack_s,
-                                       "retry_lost_words": self.retry_lost_words, "items": items,
+                                       "retry_lost_words": self.retry_lost_words, "compile": self.compile,
+                                       "items": items,
                                        "stats_path": str(cache_dir / "f5_timing.json")},
                                       ensure_ascii=False), encoding="utf-8")
             def report_progress() -> None:
