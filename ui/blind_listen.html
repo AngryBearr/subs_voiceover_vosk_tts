@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Слепое прослушивание</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f5f6f8; --panel: #ffffff; --panel-2: #eef0f4; --text: #1c2230; --muted: #667085;
+  --border: #d9dde5; --accent: #3b6fd8; --accent-soft: #e3ebfb; --good: #2f9e62; --warn: #c98a12; --bad: #cf4545;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171d; --panel: #1c2028; --panel-2: #242a34; --text: #e6e9ef; --muted: #98a2b3;
+    --border: #313844; --accent: #7aa2f7; --accent-soft: #263553; --good: #4cc38a; --warn: #e0a83a; --bad: #f07171;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171d; --panel: #1c2028; --panel-2: #242a34; --text: #e6e9ef; --muted: #98a2b3;
+  --border: #313844; --accent: #7aa2f7; --accent-soft: #263553; --good: #4cc38a; --warn: #e0a83a; --bad: #f07171;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: var(--accent); }
+header.top {
+  position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--border);
+  padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+}
+header.top h1 { font-size: 16px; margin: 0; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40ch; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.tab {
+  border: 1px solid var(--border); background: var(--panel-2); border-radius: 8px; padding: 5px 10px;
+  display: flex; flex-direction: column; align-items: flex-start; min-width: 0;
+}
+.tab .t { font-weight: 600; font-size: 13px; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .p { font-size: 12px; color: var(--muted); }
+.tab.active { border-color: var(--accent); background: var(--accent-soft); }
+.tab.done .p { color: var(--good); }
+.icon-btn { border: 1px solid var(--border); background: var(--panel-2); border-radius: 8px; padding: 5px 10px; }
+.icon-btn.on { border-color: var(--accent); color: var(--accent); }
+.layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+aside.groups { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 8px; align-self: start; position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow: auto; }
+aside.groups .g { display: flex; gap: 8px; align-items: flex-start; width: 100%; text-align: left; border: 0; background: none;
+  padding: 6px 8px; border-radius: 8px; }
+aside.groups .g:hover { background: var(--panel-2); }
+aside.groups .g.active { background: var(--accent-soft); }
+aside.groups .g .st { width: 14px; flex: none; color: var(--muted); }
+aside.groups .g .st.full { color: var(--good); }
+aside.groups .g .st.part { color: var(--warn); }
+aside.groups .g .nm { font-size: 13px; overflow-wrap: anywhere; }
+aside.groups .g .cap { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
+.ghead { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.ghead h2 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.ghead .cap { color: var(--muted); margin-top: 2px; }
+.nav { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+.badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+.badge.sync { color: var(--accent); border-color: var(--accent); }
+.badge.ok { color: var(--good); border-color: var(--good); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.badge.bad { color: var(--bad); border-color: var(--bad); }
+video { width: 100%; max-height: 52vh; background: #000; border-radius: 8px; display: block; }
+.transport { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.transport .play { min-width: 88px; padding: 7px 14px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; font-weight: 600; }
+.transport input[type=range]#seekBar { flex: 1; min-width: 160px; accent-color: var(--accent); }
+.transport .vol { display: inline-flex; gap: 6px; align-items: center; }
+.transport .vol input[type=range] { width: 88px; accent-color: var(--accent); }
+.transport .vol .vlbl { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); min-width: 34px; }
+.transport .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; min-width: 110px; }
+.transport .now { font-weight: 600; }
+.loopinfo { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 1.2em; }
+.scalehint { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: space-between; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+.scalehint b { color: var(--text); }
+.toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; user-select: none; }
+.rows { display: flex; flex-direction: column; gap: 6px; }
+.row { display: grid; grid-template-columns: minmax(120px, 220px) auto minmax(0, 1fr); gap: 10px; align-items: center;
+  padding: 8px; border-radius: 8px; border: 1px solid transparent; }
+.row.ref { grid-template-columns: minmax(120px, 220px) minmax(0, 1fr); }
+.row:hover { background: var(--panel-2); }
+.row.active { border-color: var(--accent); background: var(--accent-soft); }
+.row .who { display: flex; gap: 8px; align-items: center; min-width: 0; border: 0; background: none; text-align: left; padding: 0; }
+.row .key { flex: none; width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; display: grid; place-items: center; color: var(--muted); background: var(--panel); }
+.row .lbl { font-weight: 650; font-size: 16px; overflow-wrap: anywhere; }
+.row .lbl small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+.row .heard { flex: none; width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--muted); }
+.row .heard.on { background: var(--good); border-color: var(--good); }
+.row.playing .lbl::after { content: " ♪"; color: var(--accent); }
+.scale { display: flex; gap: 4px; flex-wrap: wrap; }
+.scale button { width: 34px; height: 32px; border-radius: 7px; border: 1px solid var(--border); background: var(--panel); font-weight: 600; font-variant-numeric: tabular-nums; }
+.scale button:hover { border-color: var(--accent); }
+.scale button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.scale button.on.dup { background: var(--warn); border-color: var(--warn); color: #fff; }
+.scale button.taken { border-style: dashed; opacity: .55; color: var(--muted); }
+.unique-msg { font-size: 12.5px; color: var(--warn); margin: 0 0 8px; min-height: 0; }
+.unique-msg.info { color: var(--accent); }
+.banner.err { border-color: var(--bad); color: var(--bad); }
+.extra { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; min-width: 0; }
+.chip { border: 1px solid var(--border); background: var(--panel); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+.chip.on { background: var(--warn); border-color: var(--warn); color: #fff; }
+.chip.on.clean { background: var(--good); border-color: var(--good); }
+.note { flex: 1; min-width: 140px; border: 1px solid var(--border); background: var(--panel); border-radius: 7px; padding: 5px 8px; font-size: 13px; }
+textarea.comment { width: 100%; min-height: 70px; border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 8px; resize: vertical; }
+.leaders { font-size: 14px; }
+.leaders .muted { color: var(--muted); }
+.footer { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.btn { border: 1px solid var(--border); background: var(--panel-2); border-radius: 8px; padding: 7px 14px; font-weight: 600; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.saved { font-size: 12px; color: var(--muted); }
+.saved.err { color: var(--bad); }
+.banner { border: 1px solid var(--warn); color: var(--warn); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+details.readme summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details.readme pre { white-space: pre-wrap; font: 13px/1.45 inherit; margin: 8px 0 0; color: var(--text); }
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: flex-start; justify-content: center; z-index: 20; padding: 24px 12px; overflow: auto; }
+.overlay.open { display: flex; }
+.modal { background: var(--panel); color: var(--text); border-radius: 12px; border: 1px solid var(--border); max-width: 1100px; width: 100%; padding: 18px 20px; }
+.modal h3 { margin-top: 0; }
+.md table { border-collapse: collapse; width: 100%; margin: 8px 0 16px; font-size: 13px; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.md th { background: var(--panel-2); }
+.md h1 { font-size: 20px; } .md h2 { font-size: 17px; } .md h3 { font-size: 15px; } .md h4 { font-size: 14px; }
+.keys { font-size: 12px; color: var(--muted); line-height: 1.8; }
+kbd { border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--panel); font: 12px ui-monospace, monospace; }
+.wait { color: var(--muted); padding: 30px; text-align: center; }
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; padding: 10px; }
+  aside.groups { position: static; max-height: 220px; }
+  .row { grid-template-columns: 1fr; }
+  .row.ref { grid-template-columns: 1fr; }
+  header.top h1 { max-width: 100%; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1 id="title">Слепое прослушивание</h1>
+  <nav class="tabs" id="tabs"></nav>
+  <button class="icon-btn" id="helpBtn" title="Горячие клавиши">⌨ Клавиши</button>
+  <button class="icon-btn" id="themeBtn" title="Тема оформления">◐ Авто</button>
+</header>
+<div class="layout">
+  <aside class="groups" id="groups"></aside>
+  <main id="main"><div class="wait">Загружаю наборы…</div></main>
+</div>
+
+<div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+
+<script>
+"use strict";
+const $ = (sel, root = document) => root.querySelector(sel);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmt = (t) => { if (!isFinite(t)) return "0:00.0"; t = Math.max(0, t); const m = Math.floor(t / 60); const s = (t - m * 60).toFixed(1).padStart(4, "0"); return `${m}:${s}`; };
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+};
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
+  return data;
+}
+
+/* ---------------------------------------------------------------- theme */
+const THEMES = ["auto", "light", "dark"];
+const THEME_TITLES = {auto: "◐ Авто", light: "☀ Светлая", dark: "☾ Тёмная"};
+function applyTheme(name) {
+  if (name === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", name);
+  $("#themeBtn").textContent = THEME_TITLES[name];
+}
+let theme = store.get("blindListen.theme", "auto");
+applyTheme(theme);
+$("#themeBtn").onclick = () => { theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length]; store.set("blindListen.theme", theme); applyTheme(theme); };
+
+/* ---------------------------------------------------------------- player */
+class Player {
+  constructor(group, host, hooks) {
+    this.group = group; this.hooks = hooks; this.items = new Map(); this.order = [];
+    this.active = null; this.loopA = null; this.loopB = null; this.keepTime = false;
+    this.volume = 1; this.userMuted = false;
+    this.listenedTime = {}; this.lastTick = null; this.destroyed = false;
+    this.video = null;
+    if (group.video) {
+      this.video = document.createElement("video");
+      this.video.src = group.video.url; this.video.muted = true; this.video.playsInline = true; this.video.preload = "auto";
+      host.appendChild(this.video);
+    }
+    const add = (item, role, index) => {
+      const el = new Audio(); el.preload = item.sync ? "auto" : "metadata"; el.src = item.url;
+      const key = `${role}${index}`;
+      this.items.set(key, {key, el, sync: !!item.sync, id: item.id, role});
+      this.order.push(key);
+      el.addEventListener("ended", () => { if (!this.items.get(key).sync || !this.video) this.hooks.onChange(); });
+    };
+    group.variants.forEach((it, i) => add(it, "v", i));
+    group.references.forEach((it, i) => add(it, "r", i));
+    this.syncItems = [...this.items.values()].filter((it) => it.sync);
+    this.master = this.video || (this.syncItems[0] ? this.syncItems[0].el : null);
+    if (this.video) this.video.addEventListener("ended", () => { this.pauseAll(); this.hooks.onChange(); });
+    this.timer = setInterval(() => this.tick(), 100);
+    const first = group.variants.length ? "v0" : this.order[0];
+    this.active = first;
+    for (const it of this.syncItems) it.el.muted = it.key !== first;
+  }
+  setVolume(vol, muted) {
+    this.volume = Math.max(0, Math.min(1, Number(vol) || 0));
+    this.userMuted = !!muted;
+    const effective = this.userMuted ? 0 : this.volume;
+    for (const it of this.items.values()) it.el.volume = effective;
+  }
+  destroy() {
+    this.destroyed = true; clearInterval(this.timer); this.pauseAll();
+    for (const it of this.items.values()) { it.el.removeAttribute("src"); it.el.load(); }
+    if (this.video) { this.video.removeAttribute("src"); this.video.load(); this.video.remove(); }
+  }
+  cur() { return this.items.get(this.active); }
+  isSyncActive() { const c = this.cur(); return !!(c && c.sync && this.master); }
+  isPlaying() { const c = this.cur(); if (!c) return false; return this.isSyncActive() ? !this.master.paused : !c.el.paused; }
+  time() { const c = this.cur(); if (!c) return 0; return this.isSyncActive() ? this.master.currentTime : c.el.currentTime; }
+  duration() { const c = this.cur(); if (!c) return 0; const el = this.isSyncActive() ? this.master : c.el; return isFinite(el.duration) ? el.duration : 0; }
+  syncEls() { const els = this.syncItems.map((it) => it.el); if (this.video) els.push(this.video); return els; }
+  pauseAll() { for (const it of this.items.values()) it.el.pause(); if (this.video) this.video.pause(); }
+  alignSync(t) { for (const el of this.syncEls()) if (Math.abs(el.currentTime - t) > 0.03) el.currentTime = t; }
+  playSync() {
+    const t = this.master.currentTime;
+    this.alignSync(t);
+    for (const el of this.syncEls()) el.play().catch(() => {});
+  }
+  play() {
+    const c = this.cur(); if (!c) return;
+    if (this.isSyncActive()) {
+      if (this.master.ended || this.master.currentTime >= this.duration() - 0.05) this.alignSync(this.loopA ?? 0);
+      this.playSync();
+    } else {
+      if (c.el.ended) c.el.currentTime = this.loopA ?? 0;
+      c.el.play().catch(() => {});
+    }
+    this.hooks.onChange();
+  }
+  toggle() { if (this.isPlaying()) { this.pauseAll(); this.hooks.onChange(); } else this.play(); }
+  select(key, autoplay = true) {
+    const next = this.items.get(key); if (!next) return;
+    const prev = this.cur();
+    const t = this.time();
+    if (next.sync && this.master) {
+      if (prev && !prev.sync) prev.el.pause();
+      for (const it of this.syncItems) it.el.muted = it.key !== key;
+      if (Math.abs(next.el.currentTime - this.master.currentTime) > 0.04) next.el.currentTime = this.master.currentTime;
+      this.active = key;
+      if (autoplay && !this.isPlaying()) this.play();
+    } else {
+      this.pauseAll();
+      let start = 0;
+      if (this.keepTime && prev && prev.key !== key) start = Math.max(0, Math.min(t, (isFinite(next.el.duration) ? next.el.duration : t) - 0.05));
+      if (prev && prev.key === key && !next.el.ended) start = autoplay ? 0 : next.el.currentTime;
+      next.el.currentTime = start;
+      this.active = key;
+      if (autoplay) next.el.play().catch(() => {});
+    }
+    this.hooks.onChange();
+  }
+  seekTo(t) {
+    const d = this.duration(); t = Math.max(0, d ? Math.min(t, d - 0.01) : t);
+    if (this.isSyncActive()) this.alignSync(t); else { const c = this.cur(); if (c) c.el.currentTime = t; }
+    this.hooks.onChange();
+  }
+  seek(delta) { this.seekTo(this.time() + delta); }
+  loopPress() {
+    const t = this.time();
+    if (this.loopA === null) this.loopA = t;
+    else if (this.loopB === null) { if (t > this.loopA + 0.3) this.loopB = t; else { this.loopA = null; } }
+    else { this.loopA = null; this.loopB = null; }
+    this.hooks.onChange();
+  }
+  tick() {
+    if (this.destroyed) return;
+    const playing = this.isPlaying();
+    const now = performance.now();
+    if (playing) {
+      if (this.isSyncActive()) {
+        const t = this.master.currentTime; const active = this.cur().el;
+        for (const el of this.syncEls()) {
+          if (el === this.master) continue;
+          const drift = Math.abs(el.currentTime - t);
+          if (drift > (el === active ? 0.12 : 0.05)) el.currentTime = t;
+          if (el.paused && !el.ended) el.play().catch(() => {});
+        }
+      }
+      if (this.loopB !== null && this.time() >= this.loopB) this.seekTo(this.loopA);
+      const c = this.cur();
+      if (this.lastTick !== null && c) {
+        this.listenedTime[c.key] = (this.listenedTime[c.key] || 0) + (now - this.lastTick) / 1000;
+        const need = Math.min(1.5, Math.max(0.3, this.duration() * 0.5));
+        if (this.listenedTime[c.key] >= need) this.hooks.onListened(c.id);
+      }
+    }
+    this.lastTick = playing ? now : null;
+    this.hooks.onTick();
+  }
+}
+
+/* ---------------------------------------------------------------- app state */
+const S = {summary: null, packIndex: 0, pack: null, groupIndex: 0, player: null, prepared: {}, saveTimers: {}, pending: {}, decodedNow: false,
+  volume: Number(store.get("blindListen.volume", 1)), muted: !!store.get("blindListen.muted", false), rankNote: ""};
+
+function applyVolume(vol, muted) {
+  S.volume = Math.max(0, Math.min(1, isFinite(vol) ? vol : 1));
+  S.muted = !!muted;
+  store.set("blindListen.volume", S.volume);
+  store.set("blindListen.muted", S.muted);
+  if (S.player) S.player.setVolume(S.volume, S.muted);
+  const bar = $("#volBar"); const lbl = $("#volLbl"); const btn = $("#muteBtn");
+  const pct = Math.round((S.muted ? 0 : S.volume) * 100);
+  if (bar && document.activeElement !== bar) bar.value = String(Math.round(S.volume * 100));
+  if (lbl) lbl.textContent = `${pct}%`;
+  if (btn) { btn.textContent = (S.muted || S.volume === 0) ? "🔇" : S.volume < 0.45 ? "🔉" : "🔊"; btn.classList.toggle("on", S.muted); }
+}
+
+function groupState(group) {
+  const all = S.pack.ratings;
+  if (!all[group.id]) all[group.id] = {scores: {}, notes: {}, tags: {}, comment: "", listened: []};
+  const st = all[group.id];
+  st.scores = st.scores || {}; st.notes = st.notes || {}; st.tags = st.tags || {}; st.listened = st.listened || []; st.comment = st.comment || "";
+  return st;
+}
+
+function groupStatus(group) {
+  const st = S.pack.ratings[group.id];
+  const scores = st && st.scores ? st.scores : {};
+  const n = group.variants.filter((v) => scores[v.id] !== undefined).length;
+  if (n === 0) return "none";
+  return n === group.variants.length ? "full" : "part";
+}
+
+function progressText(p, mode) {
+  const unit = mode === "single" ? "клипов" : "групп";
+  return `оценено ${p.done} из ${p.total} ${unit}`;
+}
+
+function scheduleSave(group) {
+  S.pending[group.id] = true;
+  clearTimeout(S.saveTimers[group.id]);
+  setSaved("Сохраняю…");
+  S.saveTimers[group.id] = setTimeout(() => saveNow(group), 350);
+}
+
+async function saveNow(group) {
+  clearTimeout(S.saveTimers[group.id]);
+  if (!S.pending[group.id]) return;
+  const packIndex = S.pack.index;
+  const state = groupState(group);
+  try {
+    const res = await api("/api/ratings", {pack: packIndex, group: group.id, state});
+    S.pending[group.id] = false;
+    if (S.pack && S.pack.index === packIndex) S.pack.progress = res.progress;
+    const tab = S.summary.packs[packIndex]; if (tab) tab.progress = res.progress;
+    renderTabs(); renderGroupList(); renderFooter();
+    setSaved(`Сохранено ✓ ${new Date().toLocaleTimeString("ru-RU")}`);
+  } catch (err) {
+    setSaved(`Не сохранено: ${err.message}. Повторю через 3 с`, true);
+    S.saveTimers[group.id] = setTimeout(() => saveNow(group), 3000);
+  }
+}
+
+function flushSaves() {
+  if (!S.pack) return;
+  for (const group of S.pack.groups) {
+    if (!S.pending[group.id]) continue;
+    const body = JSON.stringify({pack: S.pack.index, group: group.id, state: groupState(group)});
+    try { navigator.sendBeacon("/api/ratings", new Blob([body], {type: "application/json"})); S.pending[group.id] = false; } catch { /* page is closing */ }
+  }
+}
+window.addEventListener("beforeunload", flushSaves);
+
+function setSaved(text, error = false) {
+  const el = $("#saved"); if (!el) return;
+  el.textContent = text; el.classList.toggle("err", error);
+}
+
+/* ---------------------------------------------------------------- rendering */
+function renderTabs() {
+  const tabs = $("#tabs"); tabs.innerHTML = "";
+  if (!S.summary) return;
+  $("#title").textContent = S.summary.title;
+  document.title = `Слепое прослушивание — ${S.summary.title}`;
+  if (S.summary.packs.length < 2) return;
+  for (const p of S.summary.packs) {
+    const b = document.createElement("button");
+    b.className = "tab" + (p.index === S.packIndex ? " active" : "") + (p.progress.done === p.progress.total ? " done" : "");
+    b.innerHTML = `<span class="t">${esc(p.title)}</span><span class="p">${esc(progressText(p.progress, p.mode))}${p.decoded ? " · расшифровано" : ""}</span>`;
+    b.title = `${p.title} — ${p.kind_title}`;
+    b.onclick = () => openPack(p.index);
+    tabs.appendChild(b);
+  }
+}
+
+function renderGroupList() {
+  const box = $("#groups");
+  if (!S.pack) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="badge" style="margin:4px 6px 8px">${esc(S.pack.kind_title)} · ${esc(progressText(S.pack.progress, S.pack.mode))}</div>`;
+  S.pack.groups.forEach((g, i) => {
+    const status = groupStatus(g);
+    const b = document.createElement("button");
+    b.className = "g" + (i === S.groupIndex ? " active" : "");
+    const mark = status === "full" ? "●" : status === "part" ? "◐" : "○";
+    const comment = (S.pack.ratings[g.id] || {}).comment ? " ✎" : "";
+    b.innerHTML = `<span class="st ${status}">${mark}</span><span class="nm">${esc(g.title)}${comment}<span class="cap">${esc(g.caption)}</span></span>`;
+    b.onclick = () => openGroup(i);
+    box.appendChild(b);
+  });
+}
+
+function scaleCaption(group) {
+  if (S.pack.mode === "single") {
+    const labels = S.pack.scale_labels || {};
+    const parts = Object.keys(labels).sort((a, b) => a - b).map((k) => `<b>${esc(k)}</b> — ${esc(labels[k])}`);
+    return `Каждый клип оценивается отдельно: ${parts.join(", ") || `${group.scale.min}..${group.scale.max}`}. Теги — для быстрых пометок.`;
+  }
+  return `<b>${group.scale.min}</b> — хуже всех, <b>${group.scale.max}</b> — лучше всех. ` +
+    (S.pack.unique_ranks
+      ? "Строго по местам: каждый балл 1..N можно поставить только одному варианту (при повторном выборе оценка переносится сюда)."
+      : "Одинаковые оценки разрешены (удобно, если варианты звучат одинаково).");
+}
+
+function dupBadgeHtml(group) {
+  if (!S.pack || S.pack.mode !== "comparison") return "";
+  if (group.duplicates === null || group.duplicates === undefined) return "";
+  if (!group.duplicates.length) return '<span class="badge ok" title="Все аудиофайлы вариантов в этой группе проверены и точно отличаются">варианты разные ✓</span>';
+  const pairs = group.duplicates.map((g) => g.join(" = ")).join("; ");
+  return `<span class="badge bad" title="Найдены побайтно одинаковые варианты: ${esc(pairs)}">⚠ есть дубли: ${esc(pairs)}</span>`;
+}
+
+function dupBannerHtml(group) {
+  if (!group.duplicates || !group.duplicates.length) return "";
+  const pairs = group.duplicates.map((g) => g.join(" и ")).join("; ");
+  return `<div class="banner err" style="margin-bottom:10px">⚠ Проверка целостности: в этой группе варианты <b>${esc(pairs)}</b> имеют на 100% одинаковый аудиофайл! Проверьте сборку набора.</div>`;
+}
+
+function renderGroup() {
+  const main = $("#main");
+  if (S.player) { S.player.destroy(); S.player = null; }
+  S.rankNote = "";
+  const pack = S.pack; const group = pack.groups[S.groupIndex];
+  if (!group) { main.innerHTML = '<div class="wait">В наборе нет групп.</div>'; return; }
+  const st = groupState(group);
+  let readme = pack.readme ? `<details class="readme"><summary>Описание набора (README)</summary><pre>${esc(pack.readme)}</pre></details>` : "";
+  if (S.summary.readme) readme += `<details class="readme"><summary>Общее описание всех наборов</summary><pre>${esc(S.summary.readme)}</pre></details>`;
+  const decodedBanner = pack.decoded ? '<div class="banner">Ключи этого набора уже раскрыты: оценки дальше — не слепые.</div>' : "";
+  const syncBadge = group.sync ? '<span class="badge sync" title="Варианты выровнены по времени: переключение идёт с той же секунды">синхронно</span>' : "";
+  main.innerHTML = `
+    ${decodedBanner}
+    <section class="card">
+      <div class="ghead">
+        <div><h2>${esc(group.title)}</h2><div class="cap">${esc(group.caption)}</div></div>
+        <div class="nav">
+          <span id="dupBadge">${dupBadgeHtml(group)}</span>
+          ${syncBadge}
+          <button class="icon-btn" id="prevG" title="Предыдущая группа ( [ )">←</button>
+          <span>${S.groupIndex + 1} из ${pack.groups.length}</span>
+          <button class="icon-btn" id="nextG" title="Следующая группа ( ] )">→</button>
+        </div>
+      </div>
+      <div id="playerHost" style="margin-top:10px"></div>
+      <div class="transport">
+        <button class="play" id="playBtn">▶ Пуск</button>
+        <span class="time"><span class="now" id="nowLbl">—</span> · <span id="timeLbl">0:00.0 / 0:00.0</span></span>
+        <input type="range" id="seekBar" min="0" max="1" step="0.01" value="0" aria-label="Позиция">
+        <span class="vol" title="Громкость воспроизведения (M — без звука, - / + — тише/громче)">
+          <button class="icon-btn" id="muteBtn" aria-label="Выключить звук">🔊</button>
+          <input type="range" id="volBar" min="0" max="100" step="1" value="${Math.round(S.volume * 100)}" aria-label="Громкость">
+          <span class="vlbl" id="volLbl">${Math.round((S.muted ? 0 : S.volume) * 100)}%</span>
+        </span>
+        <button class="icon-btn" id="loopBtn" title="Повтор отрезка (L)">⟲ Повтор</button>
+        ${group.sync ? "" : '<label class="toggle" title="При переключении продолжать с той же секунды"><input type="checkbox" id="keepTime"> с той же секунды</label>'}
+      </div>
+      <div class="loopinfo" id="loopInfo"></div>
+      ${readme}
+    </section>
+    <section class="card">
+      <div id="dupBanner">${dupBannerHtml(group)}</div>
+      <div class="scalehint"><span>${scaleCaption(group)}</span>
+        ${pack.mode === "comparison" ? `<label class="toggle" title="Запрещает ставить одинаковые баллы разным вариантам в группе (строгий рейтинг 1..N)"><input type="checkbox" id="uniqueT" ${pack.unique_ranks ? "checked" : ""}> Запретить одинаковые оценки (места 1..N)</label>` : ""}
+      </div>
+      <div class="unique-msg" id="uniqueMsg"></div>
+      <div class="rows" id="rows"></div>
+    </section>
+    <section class="card">
+      <div class="leaders" id="leaders"></div>
+      <div style="margin-top:10px"><textarea class="comment" id="gcomment" placeholder="Общий комментарий к группе: что слышно, что понравилось, что мешает…">${esc(st.comment)}</textarea></div>
+    </section>
+    <section class="card footer" id="footer"></section>`;
+  $("#prevG").onclick = () => moveGroup(-1);
+  $("#nextG").onclick = () => moveGroup(1);
+  $("#gcomment").oninput = (e) => { st.comment = e.target.value; scheduleSave(group); };
+  const ut = $("#uniqueT"); if (ut) ut.onchange = (e) => setUnique(e.target.checked);
+  renderRows(group);
+  renderLeaders(group);
+  renderFooter();
+  startPlayer(group);
+}
+
+function rowHtml(item, key, hotkey, isRef, group, st) {
+  const heard = st.listened.includes(item.id);
+  const [main, ...rest] = String(item.label).split(" — ");
+  const sub = rest.length ? `<small>${esc(rest.join(" — "))}</small>` : "";
+  let scale = "";
+  let extra = "";
+  if (!isRef) {
+    const counts = {};
+    Object.values(st.scores).forEach((v) => { counts[v] = (counts[v] || 0) + 1; });
+    const taken = new Set(Object.entries(st.scores).filter(([k]) => k !== item.id).map(([, v]) => v));
+    for (let s = group.scale.min; s <= group.scale.max; s++) {
+      const on = st.scores[item.id] === s;
+      const isDup = on && S.pack.unique_ranks && S.pack.mode === "comparison" && counts[s] > 1;
+      const isTaken = !on && taken.has(s) && S.pack.unique_ranks && S.pack.mode === "comparison";
+      const title = S.pack.mode === "single"
+        ? (S.pack.scale_labels[String(s)] || `Оценка ${s}`)
+        : (isTaken ? `Оценка ${s} уже занята — клик перенесёт её сюда`
+           : s === group.scale.max ? "лучше всех" : s === group.scale.min ? "хуже всех" : `оценка ${s}`);
+      scale += `<button class="${on ? "on" : ""}${isDup ? " dup" : ""}${isTaken ? " taken" : ""}" data-score="${s}" title="${esc(title)}">${s}</button>`;
+    }
+    const tags = (S.pack.tags || []).map((t) => {
+      const on = (st.tags[item.id] || []).includes(t);
+      return `<button class="chip${on ? " on" : ""}${t === "Чисто" ? " clean" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`;
+    }).join("");
+    extra = `<div class="extra">${tags}<input class="note" data-note placeholder="Заметка к варианту…" value="${esc(st.notes[item.id] || "")}"></div>`;
+  }
+  return `<div class="row${isRef ? " ref" : ""}" data-key="${key}" data-id="${esc(item.id)}">
+      <button class="who" data-play title="Слушать (${hotkey})"><span class="key">${hotkey}</span><span class="heard${heard ? " on" : ""}" title="${heard ? "Уже прослушан" : "Ещё не слушали"}"></span><span class="lbl">${esc(main)}${sub}</span></button>
+      ${isRef ? `<div class="extra" style="color:var(--muted);font-size:13px">ориентир, не оценивается</div>` : `<div class="scale">${scale}</div>`}
+      ${extra}
+    </div>`;
+}
+
+function renderRows(group) {
+  const st = groupState(group);
+  let html = "";
+  group.references.forEach((r, i) => { html += rowHtml(r, `r${i}`, i === 0 ? "0" : "", true, group, st); });
+  group.variants.forEach((v, i) => { html += rowHtml(v, `v${i}`, i < 9 ? String(i + 1) : "", false, group, st); });
+  const rows = $("#rows"); rows.innerHTML = html;
+  rows.querySelectorAll(".row").forEach((row) => {
+    const key = row.dataset.key; const id = row.dataset.id;
+    row.querySelector("[data-play]").onclick = () => { if (!S.player) return; if (S.player.active === key && S.player.isPlaying()) S.player.toggle(); else S.player.select(key, true); };
+    row.querySelectorAll("[data-score]").forEach((b) => { b.onclick = () => setScore(group, id, Number(b.dataset.score)); });
+    row.querySelectorAll("[data-tag]").forEach((b) => { b.onclick = () => toggleTag(group, id, b.dataset.tag); });
+    const note = row.querySelector("[data-note]");
+    if (note) note.oninput = (e) => { const v = e.target.value; if (v.trim()) st.notes[id] = v; else delete st.notes[id]; scheduleSave(group); };
+  });
+  renderUniqueMsg(group);
+  markActiveRow();
+}
+
+function renderUniqueMsg(group) {
+  const el = $("#uniqueMsg"); if (!el) return;
+  if (!S.pack || S.pack.mode !== "comparison" || !S.pack.unique_ranks) {
+    el.textContent = ""; el.className = "unique-msg"; return;
+  }
+  const st = groupState(group);
+  const byScore = {};
+  for (const v of group.variants) {
+    const s = st.scores[v.id];
+    if (s !== undefined) (byScore[s] = byScore[s] || []).push(String(v.label).split(" — ")[0]);
+  }
+  const dups = Object.entries(byScore).filter(([, ids]) => ids.length > 1);
+  if (dups.length) {
+    const text = dups.map(([s, ids]) => `оценка ${s} у ${ids.join(", ")}`).join("; ");
+    el.className = "unique-msg";
+    el.textContent = `⚠ В этой группе уже стоят одинаковые оценки (${text}). Поставьте им разные баллы или снимите галочку.`;
+  } else if (S.rankNote) {
+    el.className = "unique-msg info";
+    el.textContent = S.rankNote;
+  } else {
+    el.className = "unique-msg";
+    el.textContent = "";
+  }
+}
+
+function markActiveRow() {
+  const p = S.player;
+  document.querySelectorAll("#rows .row").forEach((row) => {
+    const active = p && p.active === row.dataset.key;
+    row.classList.toggle("active", !!active);
+    row.classList.toggle("playing", !!(active && p.isPlaying()));
+  });
+}
+
+function renderLeaders(group) {
+  const st = groupState(group);
+  const box = $("#leaders"); if (!box) return;
+  const rated = group.variants.filter((v) => st.scores[v.id] !== undefined).map((v) => ({id: v.id, label: String(v.label).split(" — ")[0], s: st.scores[v.id]}));
+  const missing = group.variants.filter((v) => st.scores[v.id] === undefined).map((v) => String(v.label).split(" — ")[0]);
+  const notHeard = group.variants.filter((v) => !st.listened.includes(v.id)).map((v) => String(v.label).split(" — ")[0]);
+  let text;
+  if (S.pack.mode === "single") {
+    rated.sort((a, b) => a.s - b.s);
+    text = rated.length ? `<b>Хуже всего:</b> ${rated.slice(0, 6).map((r) => `${esc(r.label)} (${r.s})`).join(", ")}` : '<span class="muted">Пока нет оценок.</span>';
+  } else {
+    rated.sort((a, b) => b.s - a.s || a.label.localeCompare(b.label));
+    text = rated.length ? `<b>Лидеры:</b> ${rated.map((r) => `${esc(r.label)} (${r.s})`).join(", ")}` : '<span class="muted">Пока нет оценок — послушайте варианты и поставьте баллы.</span>';
+    const dup = {}; rated.forEach((r) => { dup[r.s] = (dup[r.s] || 0) + 1; });
+    if (S.pack.unique_ranks && Object.values(dup).some((n) => n > 1)) text += ' <span class="badge warn">есть одинаковые места</span>';
+  }
+  if (missing.length && S.pack.mode !== "single") text += ` <span class="muted">· без оценки: ${missing.map(esc).join(", ")}</span>`;
+  if (missing.length && S.pack.mode === "single") text += ` <span class="muted">· оценено ${rated.length} из ${group.variants.length}</span>`;
+  if (notHeard.length && notHeard.length < group.variants.length) text += ` <span class="muted">· ещё не слушали: ${notHeard.slice(0, 12).map(esc).join(", ")}${notHeard.length > 12 ? "…" : ""}</span>`;
+  box.innerHTML = text;
+}
+
+function renderFooter() {
+  const box = $("#footer"); if (!box || !S.pack) return;
+  const p = S.pack.progress;
+  box.innerHTML = `<div><b>${esc(S.pack.title)}</b>: ${esc(progressText(p, S.pack.mode))} <span class="saved" id="saved"></span></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      ${S.pack.decoded ? '<button class="btn" id="showRes">Показать расшифровку</button>' : ""}
+      <button class="btn danger" id="decodeBtn">Завершить и расшифровать ключи</button>
+    </div>`;
+  $("#decodeBtn").onclick = confirmDecode;
+  const sr = $("#showRes"); if (sr) sr.onclick = showSavedResults;
+}
+
+/* ---------------------------------------------------------------- actions */
+function setScore(group, id, score) {
+  const st = groupState(group);
+  S.rankNote = "";
+  const labelOf = (vid) => {
+    const item = group.variants.find((v) => v.id === vid);
+    return item ? String(item.label).split(" — ")[0] : vid;
+  };
+  if (st.scores[id] === score) delete st.scores[id];
+  else {
+    if (S.pack.unique_ranks && S.pack.mode === "comparison") {
+      const others = Object.keys(st.scores).filter((k) => k !== id && st.scores[k] === score);
+      if (others.length === 1) {
+        const other = others[0];
+        const prev = st.scores[id];
+        if (prev !== undefined && !Object.entries(st.scores).some(([k, v]) => k !== id && k !== other && v === prev)) {
+          st.scores[other] = prev;
+          S.rankNote = `Оценки поменялись местами: ${labelOf(id)} → ${score}, ${labelOf(other)} → ${prev}.`;
+        } else {
+          delete st.scores[other];
+          S.rankNote = `Оценка ${score} перенесена с ${labelOf(other)} на ${labelOf(id)}.`;
+        }
+      } else if (others.length > 1) {
+        for (const other of others) delete st.scores[other];
+        S.rankNote = `Оценка ${score} оставлена только у ${labelOf(id)} (снята с ${others.map(labelOf).join(", ")}).`;
+      }
+    }
+    st.scores[id] = score;
+  }
+  scheduleSave(group);
+  renderRows(group); renderLeaders(group); renderGroupList();
+}
+
+function toggleTag(group, id, tag) {
+  const st = groupState(group);
+  const list = st.tags[id] || [];
+  st.tags[id] = list.includes(tag) ? list.filter((t) => t !== tag) : [...list, tag];
+  if (!st.tags[id].length) delete st.tags[id];
+  scheduleSave(group);
+  renderRows(group);
+}
+
+function markListened(group, id) {
+  const st = groupState(group);
+  if (st.listened.includes(id)) return;
+  st.listened.push(id);
+  scheduleSave(group);
+  const row = document.querySelector(`#rows .row[data-id="${CSS.escape(id)}"] .heard`);
+  if (row) { row.classList.add("on"); row.title = "Уже прослушан"; }
+  renderLeaders(group);
+}
+
+async function setUnique(on) {
+  S.pack.unique_ranks = on;
+  try { await api("/api/settings", {pack: S.pack.index, unique_ranks: on}); } catch (err) { setSaved(err.message, true); }
+  const group = S.pack.groups[S.groupIndex];
+  $(".scalehint span").innerHTML = scaleCaption(group);
+  renderRows(group); renderLeaders(group);
+}
+
+async function startPlayer(group) {
+  const host = $("#playerHost");
+  const key = `${S.pack.index}:${S.groupIndex}`;
+  if (group.needs_prepare && !S.prepared[key]) {
+    host.innerHTML = '<div class="wait">Готовлю дорожки видео (один раз, обычно пара секунд)…</div>';
+    try {
+      const prep = await api("/api/prepare", {pack: S.pack.index, group: S.groupIndex});
+      S.prepared[key] = true;
+      if (prep.duplicates !== undefined) {
+        group.duplicates = prep.duplicates;
+        const db = $("#dupBadge"); if (db) db.innerHTML = dupBadgeHtml(group);
+        const bn = $("#dupBanner"); if (bn) bn.innerHTML = dupBannerHtml(group);
+      }
+    }
+    catch (err) { host.innerHTML = `<div class="banner">Не удалось подготовить видео: ${esc(err.message)}</div>`; return; }
+    if (S.pack.groups[S.groupIndex] !== group) return;
+    host.innerHTML = "";
+  }
+  const player = new Player(group, host, {
+    onChange: () => { updateTransport(); markActiveRow(); },
+    onTick: updateTransport,
+    onListened: (id) => markListened(group, id),
+  });
+  S.player = player;
+  applyVolume(S.volume, S.muted);
+  const kt = $("#keepTime"); if (kt) { kt.checked = store.get("blindListen.keepTime", false); player.keepTime = kt.checked; kt.onchange = () => { player.keepTime = kt.checked; store.set("blindListen.keepTime", kt.checked); }; }
+  $("#playBtn").onclick = () => player.toggle();
+  $("#loopBtn").onclick = () => player.loopPress();
+  const vbar = $("#volBar"); if (vbar) vbar.oninput = (e) => applyVolume(Number(e.target.value) / 100, false);
+  const mbtn = $("#muteBtn"); if (mbtn) mbtn.onclick = () => applyVolume(S.volume, !S.muted);
+  const bar = $("#seekBar");
+  bar.oninput = () => player.seekTo(Number(bar.value));
+  updateTransport(); markActiveRow();
+}
+
+function updateTransport() {
+  const p = S.player; if (!p) return;
+  const t = p.time(); const d = p.duration();
+  const bar = $("#seekBar"); if (!bar) return;
+  if (document.activeElement !== bar) { bar.max = String(d || 1); bar.value = String(t); }
+  $("#timeLbl").textContent = `${fmt(t)} / ${fmt(d)}`;
+  const c = p.cur(); const row = c ? document.querySelector(`#rows .row[data-key="${c.key}"] .lbl`) : null;
+  $("#nowLbl").textContent = row ? `Сейчас: ${row.childNodes[0].textContent}` : "—";
+  $("#playBtn").textContent = p.isPlaying() ? "❚❚ Пауза" : "▶ Пуск";
+  const info = $("#loopInfo");
+  if (p.loopA !== null && p.loopB === null) info.textContent = `Начало повтора: ${fmt(p.loopA)}. Нажмите L ещё раз в конце нужного отрезка.`;
+  else if (p.loopB !== null) info.textContent = `Повтор отрезка ${fmt(p.loopA)} → ${fmt(p.loopB)} (L — сбросить). Переключайте варианты цифрами.`;
+  else info.textContent = "";
+  $("#loopBtn").classList.toggle("on", p.loopA !== null);
+}
+
+function moveGroup(delta) {
+  const n = S.pack.groups.length; const i = S.groupIndex + delta;
+  if (i >= 0 && i < n) openGroup(i);
+}
+
+function openGroup(i) {
+  const prev = S.pack.groups[S.groupIndex]; if (prev) saveNow(prev);
+  S.groupIndex = i;
+  store.set(`blindListen.group.${S.summary.title}.${S.packIndex}`, i);
+  renderGroupList(); renderGroup();
+  window.scrollTo({top: 0});
+}
+
+async function openPack(index) {
+  if (S.pack) { for (const g of S.pack.groups) if (S.pending[g.id]) await saveNow(g); }
+  if (S.player) { S.player.destroy(); S.player = null; }
+  S.packIndex = index;
+  store.set(`blindListen.pack.${S.summary.title}`, index);
+  $("#main").innerHTML = '<div class="wait">Загружаю набор…</div>';
+  S.pack = await api(`/api/pack?pack=${index}`);
+  const saved = store.get(`blindListen.group.${S.summary.title}.${index}`, null);
+  let g = Number.isInteger(saved) && saved < S.pack.groups.length ? saved : S.pack.groups.findIndex((gr) => groupStatus(gr) !== "full");
+  S.groupIndex = g < 0 ? 0 : g;
+  renderTabs(); renderGroupList(); renderGroup();
+}
+
+/* ---------------------------------------------------------------- decoding */
+function openModal(html) { $("#modal").innerHTML = html; $("#overlay").classList.add("open"); }
+function closeModal() { $("#overlay").classList.remove("open"); $("#modal").innerHTML = ""; }
+$("#overlay").addEventListener("click", (e) => { if (e.target.id === "overlay") closeModal(); });
+
+function confirmDecode() {
+  const pack = S.pack; const p = pack.progress;
+  const unrated = pack.mode === "single" ? [] : pack.groups.filter((g) => groupStatus(g) !== "full").map((g) => g.title);
+  const left = p.total - p.done;
+  openModal(`<h3>Расшифровать ключи набора «${esc(pack.title)}»?</h3>
+    <p>Сейчас ${esc(progressText(p, pack.mode))}.${left > 0 ? ` <b>Не оценено ещё ${left}.</b>` : " Всё оценено."}</p>
+    ${unrated.length ? `<p style="color:var(--muted);font-size:13px">Не до конца оценены: ${unrated.slice(0, 20).map(esc).join(", ")}${unrated.length > 20 ? "…" : ""}</p>` : ""}
+    <p>После расшифровки вы увидите, какой вариант какой. Честно переслушать этот набор вслепую уже не получится.
+       Итоги сохранятся в <code>results_decoded.md</code> и <code>results_decoded.json</code> рядом с оценками.</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+      <button class="btn" id="cancelDec">Отмена</button>
+      <button class="btn danger" id="doDec">Да, расшифровать</button>
+    </div>`);
+  $("#cancelDec").onclick = closeModal;
+  $("#doDec").onclick = async () => {
+    for (const g of pack.groups) if (S.pending[g.id]) await saveNow(g);
+    $("#doDec").disabled = true; $("#doDec").textContent = "Расшифровываю…";
+    try {
+      const res = await api("/api/decode", {pack: pack.index, confirm: true});
+      pack.decoded = true; S.summary.packs[pack.index].decoded = true;
+      renderTabs(); renderFooter();
+      const banner = document.querySelector("#main > .banner");
+      if (!banner) $("#main").insertAdjacentHTML("afterbegin", '<div class="banner">Ключи этого набора уже раскрыты: оценки дальше — не слепые.</div>');
+      showResults(res.markdown);
+    } catch (err) {
+      openModal(`<h3>Не получилось расшифровать</h3><p>${esc(err.message)}</p><button class="btn" onclick="closeModal()">Закрыть</button>`);
+    }
+  };
+}
+
+async function showSavedResults() {
+  try { const res = await api(`/api/results?pack=${S.pack.index}`); showResults(res.markdown); }
+  catch (err) { openModal(`<p>${esc(err.message)}</p><button class="btn" onclick="closeModal()">Закрыть</button>`); }
+}
+
+function showResults(markdown) {
+  openModal(`<div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-bottom:8px">
+      <button class="btn primary" id="copyMd">Скопировать итог (Markdown)</button>
+      <button class="btn" id="closeRes">Закрыть</button></div>
+    <div class="md">${renderMarkdown(markdown)}</div>`);
+  $("#closeRes").onclick = closeModal;
+  $("#copyMd").onclick = async () => {
+    let ok = false;
+    try { await navigator.clipboard.writeText(markdown); ok = true; } catch { /* fallback below */ }
+    if (!ok) {
+      const ta = document.createElement("textarea"); ta.value = markdown; document.body.appendChild(ta); ta.select();
+      try { ok = document.execCommand("copy"); } catch { ok = false; }
+      ta.remove();
+    }
+    $("#copyMd").textContent = ok ? "Скопировано ✓ — вставьте в чат" : "Не вышло — выделите текст вручную";
+  };
+}
+
+function inlineMd(text) {
+  return esc(text).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function renderMarkdown(md) {
+  const lines = String(md).split("\n"); let html = ""; let i = 0;
+  const cells = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+  while (i < lines.length) {
+    const line = lines[i];
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (h) { html += `<h${h[1].length}>${inlineMd(h[2])}</h${h[1].length}>`; i++; continue; }
+    if (line.trim().startsWith("|")) {
+      const head = cells(line); i++;
+      if (i < lines.length && /^\|?\s*-{3}/.test(lines[i].trim())) i++;
+      let body = "";
+      while (i < lines.length && lines[i].trim().startsWith("|")) { body += "<tr>" + cells(lines[i]).map((c) => `<td>${inlineMd(c)}</td>`).join("") + "</tr>"; i++; }
+      html += `<table><thead><tr>${head.map((c) => `<th>${inlineMd(c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      let items = "";
+      while (i < lines.length && lines[i].startsWith("- ")) { items += `<li>${inlineMd(lines[i].slice(2))}</li>`; i++; }
+      html += `<ul>${items}</ul>`; continue;
+    }
+    if (line.trim()) html += `<p>${inlineMd(line)}</p>`;
+    i++;
+  }
+  return html;
+}
+
+/* ---------------------------------------------------------------- keys */
+function showHelp() {
+  openModal(`<h3>Горячие клавиши</h3>
+    <div class="keys">
+      <kbd>Пробел</kbd> пуск / пауза<br>
+      <kbd>1</kbd>…<kbd>9</kbd> слушать 1-й…9-й вариант (в синхронных группах — с той же секунды)<br>
+      <kbd>0</kbd> ориентир / «Оригинал»<br>
+      <kbd>←</kbd> / <kbd>→</kbd> перемотка на 3 секунды<br>
+      <kbd>[</kbd> / <kbd>]</kbd> предыдущая / следующая группа<br>
+      <kbd>L</kbd> повтор отрезка: первое нажатие — начало, второе — конец, третье — сброс<br>
+      <kbd>M</kbd> выключить / включить звук · <kbd>-</kbd> / <kbd>+</kbd> тише / громче на 10%<br>
+      Клавиши не срабатывают, пока курсор стоит в поле комментария (<kbd>Esc</kbd> — выйти из поля).
+    </div>
+    <p style="font-size:13px;color:var(--muted)">Оценки и комментарии сохраняются сами после каждого действия.</p>
+    <button class="btn" onclick="closeModal()">Понятно</button>`);
+}
+$("#helpBtn").onclick = showHelp;
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest && e.target.closest("input:not([type=checkbox]):not([type=range]), textarea, select, [contenteditable]")) {
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if ($("#overlay").classList.contains("open")) { if (e.key === "Escape") closeModal(); return; }
+  const p = S.player; const group = S.pack && S.pack.groups[S.groupIndex];
+  const code = e.code;
+  const focused = document.activeElement;
+  if (focused && focused.tagName === "BUTTON" && code === "Space") focused.blur();
+  const digit = /^(Digit|Numpad)(\d)$/.exec(code);
+  if (code === "Space") { e.preventDefault(); if (p) p.toggle(); }
+  else if (digit) {
+    e.preventDefault(); if (!p || !group) return;
+    const n = Number(digit[2]);
+    if (n === 0) { if (group.references.length) p.select("r0", true); }
+    else if (n <= group.variants.length) p.select(`v${n - 1}`, true);
+  }
+  else if (code === "ArrowLeft") { e.preventDefault(); if (p) p.seek(-3); }
+  else if (code === "ArrowRight") { e.preventDefault(); if (p) p.seek(3); }
+  else if (code === "BracketLeft") { e.preventDefault(); moveGroup(-1); }
+  else if (code === "BracketRight") { e.preventDefault(); moveGroup(1); }
+  else if (code === "KeyL") { e.preventDefault(); if (p) p.loopPress(); }
+  else if (code === "KeyM") { e.preventDefault(); applyVolume(S.volume, !S.muted); }
+  else if (code === "Minus" || code === "NumpadSubtract") { e.preventDefault(); applyVolume(S.volume - 0.1, false); }
+  else if (code === "Equal" || code === "NumpadAdd") { e.preventDefault(); applyVolume(S.volume + 0.1, false); }
+  else if (e.key === "?") { showHelp(); }
+});
+
+/* ---------------------------------------------------------------- start */
+(async function start() {
+  try {
+    S.summary = await api("/api/packs");
+    const saved = store.get(`blindListen.pack.${S.summary.title}`, 0);
+    const index = Number.isInteger(saved) && saved < S.summary.packs.length ? saved : 0;
+    S.packIndex = index;
+    await openPack(index);
+  } catch (err) {
+    $("#main").innerHTML = `<div class="banner">Не удалось загрузить наборы: ${esc(err.message)}</div>`;
+  }
+})();
+</script>
+</body>
+</html>
