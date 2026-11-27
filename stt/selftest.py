@@ -51,8 +51,9 @@ def _gpu(state: dict[str, Any]) -> str:
 
 
 def _ffmpeg(state: dict[str, Any]) -> str:
-    ffmpeg = Path(sys.executable).parent / "ffmpeg"
-    out = subprocess.run([str(ffmpeg), "-version"], capture_output=True, text=True, check=True).stdout
+    from utils.ffmpeg import ffmpeg_exe
+
+    out = subprocess.run([ffmpeg_exe(), "-version"], capture_output=True, text=True, check=True).stdout
     return out.split("\n", 1)[0]
 
 
