@@ -72,6 +72,7 @@ MIN_SAMPLE_SCORE = 0.6  # a reference clip must sound at least this much like th
 MIN_WINDOW_SCORE = 0.45  # ... and so must each 3 s window of it (another voice inside drops one)
 MAX_OTHER_VOICE_S = 0.15  # seconds of another diarized speaker allowed inside a reference stretch
 MUSIC_DB = -20.0  # accompaniment below the voice by more than this counts as clean
+MIN_VOCAL_RMS_DB = -45.0  # p90 of 50 ms mono RMS frames, before normalization or padding
 SEPARATE_TOP = 8  # candidates per person that go through vocal separation
 REJECT_SEARCH_TOP = 40  # after a rejection: look this deep for a clip with quiet music (MUSIC_DB) if the top ones are loud
 MIN_SUPPORT = 2  # a rename needs the voice under the other name in at least this many other episodes
@@ -657,6 +658,28 @@ def _window_scores(embed: "SegmentEmbedder", audio: np.ndarray, rate: int, print
     return [max(float(embed(audio[i:i + size], rate) @ p) for p in prints) for i in starts]
 
 
+def vocal_rejection(vocals: np.ndarray, rate: int) -> str | None:
+    """Reject broken or almost silent vocals before embedding; also checks old exported WAVs.
+
+    Audio is mono or channels-first. A high frame percentile tolerates pauses and the export's
+    trailing silence without allowing a few isolated peaks to rescue an otherwise quiet clip.
+    """
+    if (rate <= 0 or vocals.ndim not in (1, 2) or vocals.size == 0
+            or not np.isfinite(vocals).all()):
+        return "broken"
+    mono = vocals.astype(np.float64)
+    if mono.ndim == 2:
+        mono = mono.mean(axis=0)
+    size = max(1, round(0.05 * rate))
+    if len(mono) < size:
+        return "broken"
+    frames = mono[:len(mono) // size * size].reshape(-1, size)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    if float(np.percentile(rms, 90)) < 10 ** (MIN_VOCAL_RMS_DB / 20):
+        return "quiet"
+    return None
+
+
 def load_rejected(out_dir: Path) -> list[dict[str, Any]]:
     path = out_dir / "rejected.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
@@ -727,12 +750,22 @@ def reason_text(why: dict[str, int]) -> str:
         n = int(why["episodes"])
         text = (f"нет ни одного отрезка в {SAMPLE_MIN_S:.0f}-{SAMPLE_MAX_S:.0f} секунд, где человек говорит один "
                 f"(просмотрено {n} {_plural(n, 'эпизод', 'эпизода', 'эпизодов')})")
-        return text + (", склейка коротких кусков тоже не прошла" if why.get("stitched_failed") else "")
+        text += ", склейка коротких кусков тоже не прошла" if why.get("stitched_failed") else ""
+        details = []
+        if why.get("quiet"):
+            details.append("после очистки голос слишком тихий или отсутствует")
+        if why.get("broken"):
+            details.append("аудио повреждено или пустое")
+        if details:
+            text += ": " + "; ".join(details)
+        return text
     parts = []
     if why.get("rejected"):
         parts.append(f"{why['rejected']} отклонено вручную")
     for key, text in (("other_voices", "рядом звучат другие голоса"), ("low_score", "голос не похож на человека"),
                       ("noisy", "после очистки от музыки часть записи не похожа на человека"),
+                      ("quiet", "после очистки голос слишком тихий или отсутствует"),
+                      ("broken", "аудио повреждено или пустое"),
                       ("unchecked", "не проверено")):
         if why.get(key):
             parts.append(f"в {why[key]} {text}" if key != "unchecked" else f"{why[key]} {text}")
@@ -830,10 +863,11 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
 
     Returns the index (``references.json``; other people's entries are kept when ``only`` is set).
     People with a hand-made clip (``manual.json``) are skipped and their entries stay in the index.
+    ``missing`` rechecks old automatic WAVs for quiet/broken audio instead of trusting their index entry.
 
     Candidates: the person's solo stretches in every episode of the bank, without another
     diarized speaker inside. The closest to the person's prints go through vocal separation;
-    a candidate needs every 3 s window of its vocals to sound like the person. Clean ones
+    vocals must first pass an absolute level/validity check, then every 3 s window must sound like the person. Clean ones
     (accompaniment more than 20 dB under the voice) win, then the most similar. The clip is
     the separated vocals, 24 kHz mono, with 1 s of silence at the end. For a person left without
     a clip the reasons are counted into ``missing.json``. When no single stretch passes and ``stitch`` is on,
@@ -853,6 +887,22 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
     index: list[dict[str, Any]] = []
     if (only or missing) and index_path.exists():  # keep the other people's clips
         index = [r for r in json.loads(index_path.read_text(encoding="utf-8")) if person_key(r) != only]
+    if missing and not only:
+        kept: list[dict[str, Any]] = []
+        for ref in index:
+            if ref.get("source") == "manual":
+                kept.append(ref)
+                continue
+            try:
+                audio, sr = sf.read(str(out_dir / ref["wav"]), dtype="float32")
+                reason = vocal_rejection(audio.T, sr)
+            except (OSError, ValueError, RuntimeError):
+                reason = "broken"
+            if reason is None:
+                kept.append(ref)
+            else:
+                log.warning("%s: old automatic reference rejected (%s); searching again", person_key(ref), reason)
+        index = kept
     have = {person_key(r) for r in index} if missing else set()
     manual = load_manual(out_dir)
     why_missing = load_missing(out_dir) if (only or missing) else {}
@@ -870,7 +920,7 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
         mine = [p for p in bank.prints if same_key(person_key(p) or "", key)]
         prints = [_unit(p["embedding"]) for p in mine]
         why = {"episodes": 0, "stretches": 0, "rejected": 0, "other_voices": 0, "low_score": 0, "noisy": 0,
-               "unchecked": 0}
+               "quiet": 0, "broken": 0, "unchecked": 0}
         looked: set[str] = set()
         searched: set[tuple[str, tuple[str, ...], str]] = set()
         candidates = []
@@ -909,8 +959,10 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
         why["episodes"] = len(looked)
         candidates.sort(key=lambda c: -c["score"])
         why["low_score"] = sum(1 for c in candidates if c["score"] < MIN_SAMPLE_SCORE)
-        def choose(pool: list[dict[str, Any]], read: Callable[[dict[str, Any]], np.ndarray]) -> tuple[Any, int]:
+        def choose(pool: list[dict[str, Any]], read: Callable[[dict[str, Any]], np.ndarray],
+                   counts: dict[str, int] | None = None) -> tuple[Any, int]:
             """The best candidate that survives vocal separation, and how many fell out as noisy."""
+            target_why = why if counts is None else counts
             found: dict[str, Any] | None = None
             noisy = 0
             for n, c in enumerate(pool[:max(search_top, SEPARATE_TOP)]):
@@ -918,7 +970,23 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
                     break
                 if n >= SEPARATE_TOP and found is not None and found["music_db"] < MUSIC_DB:
                     break  # a clean clip is in hand: search no deeper
-                vocals, music_db = separate(read(c))
+                try:
+                    stereo = read(c)
+                except (OSError, ValueError, subprocess.CalledProcessError):
+                    target_why["broken"] = target_why.get("broken", 0) + 1
+                    continue
+                if (stereo.ndim != 2 or stereo.shape[0] != 2
+                        or vocal_rejection(stereo, separate.rate) == "broken"):
+                    target_why["broken"] = target_why.get("broken", 0) + 1
+                    continue
+                vocals, music_db = separate(stereo)
+                reason = ("broken" if vocals.ndim != 2 or vocals.shape[0] != 2
+                          else vocal_rejection(vocals, separate.rate))
+                if reason is None and not np.isfinite(music_db):
+                    reason = "broken"
+                if reason is not None:
+                    target_why[reason] = target_why.get(reason, 0) + 1
+                    continue
                 mono16 = soxr.resample(vocals.mean(0), separate.rate, 16_000)
                 windows = _window_scores(embed, mono16, 16_000, prints)
                 if min(windows) < MIN_WINDOW_SCORE:
@@ -935,11 +1003,16 @@ def export_references(bank: VoiceBank, out_dir: Path, device: str = "cuda", only
 
         best, noisy = choose(candidates, read_contiguous)
         why["noisy"] += noisy
+        why["unchecked"] = max(0, len(candidates) - why["low_score"] - noisy - why["quiet"] - why["broken"])
         if best is None and stitch:
-            best = stitched_best(places, prints, rejected, embed, audio_cache, choose, why, bank.path.parent,
-                                 separate.rate)
+            stitched_counts: dict[str, int] = {}
+            best = stitched_best(places, prints, rejected, embed, audio_cache,
+                                 lambda pool, read: choose(pool, read, stitched_counts),
+                                 why, bank.path.parent, separate.rate)
+            if best is None and why["stretches"] == 0:
+                why["quiet"] += stitched_counts.get("quiet", 0)
+                why["broken"] += stitched_counts.get("broken", 0)
         if best is None:
-            why["unchecked"] = max(0, len(candidates) - why["low_score"] - why["noisy"])
             why_missing[key] = why
             log.info("%s: no clean reference among %d candidates (%s)", key, len(candidates), reason_text(why))
             (out_dir / f"{_safe_name(key)}.wav").unlink(missing_ok=True)
